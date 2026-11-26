@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// The values every client takes from JS the same way: its configuration as a
-// kafka_Map_t of C strings, lists of TopicPartitions, and 64-bit integers.
+// The values the clients take from JS the same way: a configuration as a
+// kafka_Map_t of C strings, lists of TopicPartitions, 64-bit integers, and the
+// offsets a commit or a seek takes.
 
 #include <stdlib.h>
 
@@ -199,4 +200,131 @@ int js_int64(napi_env env, napi_value value, const char* what, int64_t* out) {
     }
     NAPI_CHECK(env, napi_get_value_int64(env, value, out), -1);
     return 0;
+}
+
+kafka_consumer_OffsetAndMetadata_t* offset_and_metadata_from_js(napi_env env, napi_value fields) {
+    napi_value o, e, m;
+    if (napi_get_element(env, fields, 0, &o) != napi_ok || napi_get_element(env, fields, 1, &e) != napi_ok
+        || napi_get_element(env, fields, 2, &m) != napi_ok) {
+        js_throw_last_napi_error(env, "napi_get_element");
+        return NULL;
+    }
+    int64_t offset = 0;
+    int32_t epoch = -1;
+    if (js_int64(env, o, "an offset must be a bigint or a number", &offset) != 0) return NULL;
+    if (napi_get_value_int32(env, e, &epoch) != napi_ok) {
+        napi_throw_type_error(env, NULL, "a leader epoch must be a number");
+        return NULL;
+    }
+    char* metadata = js_string_dup(env, m, "metadata must be a string");
+    if (metadata == NULL) return NULL;
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_consumer_OffsetAndMetadata_t* om = NULL;
+    // A negative epoch is Java's Optional.empty().
+    kafka_common_Error_t* err =
+        FFI_SET(om, kafka_consumer_OffsetAndMetadata_with_leader_epoch_metadata(offset, epoch, metadata, &ffi_err));
+    free(metadata);
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    return om;
+}
+
+void offset_and_metadata_free(napi_env env, kafka_consumer_OffsetAndMetadata_t* om) {
+    kafka_common_Error_t* ffi_err = NULL;
+    if (om != NULL) error_warn(env, 1, FFI_ERR(kafka_consumer_OffsetAndMetadata_destroy_err(om, &ffi_err)));
+}
+
+// The value an entry of a C-built map points at: an OffsetAndMetadata, or an
+// int64_t the builder allocated.
+typedef enum { MAP_OFFSETS, MAP_LONGS } MapValues;
+
+// Destroys a C-built map of TopicPartition keys, which borrows its keys and
+// values: each key and value is freed, then the map.
+static void tp_map_free(napi_env env, kafka_Map_t* map, MapValues values) {
+    if (map == NULL) return;
+    kafka_common_Error_t* ffi_err = NULL;
+    int32_t n = 0;
+    error_warn(env, 1, FFI_SET(n, kafka_Map_size_err(map, &ffi_err)));
+    for (int32_t i = 0; i < n; i++) {
+        void* key = NULL;
+        void* value = NULL;
+        error_warn(env, 1, FFI_SET(key, kafka_Map_key_err(map, i, &ffi_err)));
+        error_warn(env, 1, FFI_SET(value, kafka_Map_value_err(map, i, &ffi_err)));
+        if (key != NULL) error_warn(env, 1, FFI_ERR(kafka_common_TopicPartition_destroy_err((kafka_common_TopicPartition_t*)key, &ffi_err)));
+        if (values == MAP_OFFSETS) offset_and_metadata_free(env, (kafka_consumer_OffsetAndMetadata_t*)value);
+        else free(value);
+    }
+    error_warn(env, 1, FFI_ERR(kafka_Map_destroy_err(map, &ffi_err)));
+}
+
+// A map of TopicPartition keys from JS [pair, value] entries, a null pair a
+// NULL key, each value read by `values`. NULL with a JS exception pending.
+static kafka_Map_t* tp_map_from_js(napi_env env, napi_value entries, MapValues values) {
+    uint32_t n = 0;
+    if (napi_get_array_length(env, entries, &n) != napi_ok) {
+        napi_throw_type_error(env, NULL, "a map's entries must be an array");
+        return NULL;
+    }
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_Map_t* map = NULL;
+    kafka_common_Error_t* err = FFI_SET(map, kafka_Map_new_err(&ffi_err));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    for (uint32_t i = 0; i < n; i++) {
+        napi_value entry, pair, v;
+        napi_valuetype pair_type = napi_undefined, value_type = napi_undefined;
+        if (napi_get_element(env, entries, i, &entry) != napi_ok || napi_get_element(env, entry, 0, &pair) != napi_ok
+            || napi_get_element(env, entry, 1, &v) != napi_ok || napi_typeof(env, pair, &pair_type) != napi_ok
+            || napi_typeof(env, v, &value_type) != napi_ok) {
+            js_throw_last_napi_error(env, "napi_get_element");
+            tp_map_free(env, map, values);
+            return NULL;
+        }
+        // A null key or a null OffsetAndMetadata crosses as NULL, which the FFI reports.
+        kafka_common_TopicPartition_t* tp = NULL;
+        if (pair_type != napi_null && (tp = tp_from_js(env, pair)) == NULL) {
+            tp_map_free(env, map, values);
+            return NULL;
+        }
+        void* value = NULL;
+        if (values == MAP_OFFSETS) {
+            if (value_type != napi_null && (value = offset_and_metadata_from_js(env, v)) == NULL) {
+                if (tp != NULL) FFI_DISCARD(kafka_common_TopicPartition_destroy_err(tp, &ffi_err));
+                tp_map_free(env, map, values);
+                return NULL;
+            }
+        } else {
+            int64_t* slot = (int64_t*)malloc(sizeof(int64_t));
+            if (slot == NULL || js_int64(env, v, "a value must be a bigint or a number", slot) != 0) {
+                if (slot == NULL) napi_throw_error(env, NULL, "out of memory");
+                free(slot);
+                if (tp != NULL) FFI_DISCARD(kafka_common_TopicPartition_destroy_err(tp, &ffi_err));
+                tp_map_free(env, map, values);
+                return NULL;
+            }
+            value = slot;
+        }
+        err = FFI_ERR(kafka_Map_put_err(map, tp, value, &ffi_err));
+        if (err != NULL) {
+            if (tp != NULL) FFI_DISCARD(kafka_common_TopicPartition_destroy_err(tp, &ffi_err));
+            if (values == MAP_OFFSETS) offset_and_metadata_free(env, (kafka_consumer_OffsetAndMetadata_t*)value);
+            else free(value);
+            tp_map_free(env, map, values);
+            error_throw_owned(env, err);
+            return NULL;
+        }
+    }
+    return map;
+}
+
+kafka_Map_t* offset_map_from_js(napi_env env, napi_value entries) {
+    return tp_map_from_js(env, entries, MAP_OFFSETS);
+}
+
+void offset_map_free(napi_env env, kafka_Map_t* map) {
+    tp_map_free(env, map, MAP_OFFSETS);
 }

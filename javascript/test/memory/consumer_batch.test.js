@@ -154,3 +154,58 @@ test('the test-only switch of the copy path arms and disarms, and a poll with no
   assert.equal(out.stats.copies, 0);
   assert.equal(out.stats.batchesMade, out.stats.batchesDestroyed);
 });
+
+test('the offset calls free every error they fail with, every answer, and the values built for the call', () => {
+  // Each call fails at least once (a null, a negative timeout, an unassigned
+  // partition, a closed consumer), and each answer is read; the errors' and
+  // the consumers' counts must come back to zero.
+  const out = probe(`
+    const { KafkaConsumer, CloseOptions, OffsetAndMetadata } = require(D + '/consumer');
+    const { TopicPartition, TopicPartitionMap } = require(D + '/common');
+    (async () => {
+      const hold = setInterval(() => {}, 1000);
+      let failures = 0;
+      const fail = (p) => p.then(() => {}, () => { failures++; });
+      await (async () => {
+        const tp = new TopicPartition({ topic: 't', partition: 0 });
+        const other = new TopicPartition({ topic: 't', partition: 1 });
+        const offsets = new TopicPartitionMap([[tp, new OffsetAndMetadata({ offset: 5n, leaderEpoch: 1, metadata: 'm' })]]);
+        for (let i = 0; i < 5; i++) {
+          const c = new KafkaConsumer({ configs: { ...${CONFIGS}, 'default.api.timeout.ms': 50 } });
+          await c.assign({ partitions: [tp] });
+          await c.commitSync();
+          await c.commitAsync();
+          await fail(c.commitSync({ timeout: -1 }));
+          await fail(c.commitSync({ offsets: null }));
+          await fail(c.commitSync({ offsets: new TopicPartitionMap([[tp, null]]) }));
+          await fail(c.commitSync({ offsets, timeout: 20 }));
+          await c.seek({ partition: tp, offset: 3 });
+          await c.seek({ partition: tp, offsetAndMetadata: new OffsetAndMetadata(4) });
+          await fail(c.seek({ partition: other, offset: 1 }));
+          await fail(c.seek({ partition: tp, offsetAndMetadata: null }));
+          await c.seekToBeginning({ partitions: [tp] });
+          await fail(c.seekToEnd({ partitions: null }));
+          await c.seek({ partition: tp, offset: 3 });
+          await c.position({ partition: tp });
+          await fail(c.position({ partition: other }));
+          await fail(c.position(new TopicPartition({ topic: null, partition: 0 })));
+          await c.committed({ partitions: [] });
+          await fail(c.committed({ partitions: [tp], timeout: 20 }));
+          await fail(c.committed({ partitions: null }));
+          await c.currentLag({ topicPartition: tp });
+          await fail(c.currentLag({ topicPartition: other }));
+          c.groupMetadata();
+          await c.close({ option: CloseOptions.timeout({ timeout: 0 }) });
+          await fail(c.commitSync());
+          await fail(c.position({ partition: tp }));
+          await fail(c.committed({ partitions: [tp] }));
+        }
+      })();
+      await settle();
+      console.log(JSON.stringify({ leaks: leaks(), failures }));
+      clearInterval(hold);
+    })();
+  `);
+  assert.deepEqual(out.leaks, NO_LEAKS);
+  assert.equal(out.failures, 5 * 15);
+});

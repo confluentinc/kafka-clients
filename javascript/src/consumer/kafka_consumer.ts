@@ -25,17 +25,19 @@ import { debug } from '../internal/debug';
 import { durationToMillis, isDurationOrNull } from '../internal/duration';
 import { warnPreview } from '../internal/lifecycle';
 import { liveMetrics } from '../internal/live_metrics';
-import { stringSet, topicPartitionList } from '../internal/payload';
+import { long, stringSet, topicPartition as topicPartitionKind, topicPartitionList, topicPartitionOffsetMap } from '../internal/payload';
 import type { Metric } from '../common/metric';
 import type { MetricNameMap } from '../common/metric_name_map';
 import { TopicPartition } from '../common/topic_partition';
 import { TopicPartitionMap } from '../common/topic_partition_map';
 import { TopicPartitionSet } from '../common/topic_partition_set';
 import type { Duration } from '../duration';
+import { InvalidGroupIdError } from '../common/errors/invalid_group_id_error';
 import { UnsupportedOperationError } from '../unsupported_operation_error';
 import { CloseOptions } from './close_options';
 import type { Consumer } from './consumer';
 import type { ConsumerConfigs } from './consumer_configs';
+import { ConsumerGroupMetadata } from './consumer_group_metadata';
 import { ConsumerRecord } from './consumer_record';
 import { ConsumerRecords } from './consumer_records';
 import { OffsetAndMetadata } from './offset_and_metadata';
@@ -43,6 +45,9 @@ import { SubscriptionPattern } from './subscription_pattern';
 
 /** The native consumer handle (`internal/native.ts`). */
 type ConsumerHandle = ReturnType<typeof native.consumerCreate>;
+
+/** A committed offset as the addon reads it: topic, partition, then offset, leader epoch and metadata, or null for none. */
+type NativeOffsetEntry = [string, number, bigint | null, number?, string?];
 
 /**
  * Whether `value` is an iterable object, which a bare collection is.
@@ -83,10 +88,37 @@ const PAUSED_FORMS = new JavaForms('paused', [[]], { reader: true });
 const METRICS_FORMS = new JavaForms('metrics', [[]], { reader: true });
 const UNSUBSCRIBE_FORMS = new JavaForms('unsubscribe', [[]]);
 const WAKEUP_FORMS = new JavaForms('wakeup', [[]]);
+// A bare null fits both one-parameter forms of commitSync, so neither takes it.
+const COMMIT_SYNC_FORMS = new JavaForms('commitSync', [[], ['timeout'], ['offsets'], ['offsets', 'timeout']], {
+  order: ['offsets', 'timeout'],
+  bareTypes: {
+    timeout: (value) => value !== null && isDurationOrNull(value),
+    offsets: (value) => value instanceof TopicPartitionMap || value instanceof Map,
+  },
+});
+const COMMIT_ASYNC_FORMS = new JavaForms('commitAsync', [[]]);
+const SEEK_FORMS = new JavaForms('seek', [
+  ['partition', 'offset'],
+  ['partition', 'offsetAndMetadata'],
+]);
+const SEEK_TO_BEGINNING_FORMS = partitionsForms('seekToBeginning');
+const SEEK_TO_END_FORMS = partitionsForms('seekToEnd');
+const isPartitionOrNull = (value: unknown): boolean => value === null || value instanceof TopicPartition;
+const POSITION_FORMS = new JavaForms('position', [['partition'], ['partition', 'timeout']], {
+  bareTypes: { partition: isPartitionOrNull },
+});
+const COMMITTED_FORMS = new JavaForms('committed', [['partitions'], ['partitions', 'timeout']], {
+  bareTypes: { partitions: (value) => value === null || isIterable(value) },
+});
+const CURRENT_LAG_FORMS = new JavaForms('currentLag', [['topicPartition']], { bareTypes: { topicPartition: isPartitionOrNull } });
+const GROUP_METADATA_FORMS = new JavaForms('groupMetadata', [[]], { reader: true });
 
 // Until the client has deserializers, a consumer takes none: keys and values
 // are Buffers, and a deserializer is refused rather than ignored.
 const NO_DESERIALIZERS = 'KafkaConsumer takes no deserializer yet: keys and values are Buffers';
+
+// The message of Java's AsyncKafkaConsumer#throwIfGroupIdNotDefined.
+const NO_GROUP_ID = 'To use the group management or offset commit APIs, you must provide a valid group.id in the consumer configuration.';
 
 // What the addon builds each record of a poll with.
 const RECORD_FACTORY: typeof ConsumerRecord.internalCreate = (...fields) => ConsumerRecord.internalCreate(...fields);
@@ -142,6 +174,58 @@ function partitionPairs(value: unknown, blankNull: boolean): Array<[string | nul
 }
 
 /**
+ * A partition as the addon takes it: a `[topic, partition]` pair, or null.
+ *
+ * @param value - the partition given
+ * @param name - the parameter's name, for the error
+ * @returns the pair
+ */
+function partitionPair(value: unknown, name: string): [string | null, number] | null {
+  const tp = topicPartitionKind.take(value, name) as TopicPartition | null;
+  return tp === null ? null : [tp.topic, tp.partition];
+}
+
+/**
+ * An `OffsetAndMetadata` as the addon takes it: `[offset, leaderEpoch (-1 for
+ * none), metadata]`.
+ *
+ * @param om - the offset and its metadata
+ * @returns the fields
+ */
+function offsetFields(om: OffsetAndMetadata): [bigint, number, string] {
+  return [om.offset, om.leaderEpoch ?? -1, om.metadata];
+}
+
+/**
+ * The timeout of a timed form as the addon takes it, or null for the form
+ * without one: a negative one goes to the FFI, which rejects it with the
+ * core's message (javascript/CLAUDE.md, JavaScript Binding Conventions,
+ * Signatures).
+ *
+ * @param forms - the method's forms
+ * @param options - the argument the forms matched
+ * @param timed - whether the matched form has a timeout
+ * @returns the milliseconds, or null
+ */
+function timeoutOf(forms: JavaForms, options: unknown, timed: boolean): number | bigint | null {
+  return timed ? durationToMillis(forms.value(options, 'timeout'), 'timeout') : null;
+}
+
+/**
+ * A Promise settled by a native completion that answers with an error or a
+ * value.
+ *
+ * @param start - starts the native call with its completion
+ * @returns resolving to the value
+ */
+function answer<T>(start: (done: (error: unknown, value: T | null) => void) => void): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with the error the core reported, a client Error src/internal/errors.ts built (typed unknown at the native boundary)
+    start((error, value) => (error !== null ? reject(error) : resolve(value as T)));
+  });
+}
+
+/**
  * A `TopicPartitionSet` of the addon's `[topic, partition]` pairs.
  *
  * @param pairs - the pairs
@@ -171,6 +255,9 @@ function partitionSet(pairs: Array<[string, number]>): TopicPartitionSet {
  */
 export class KafkaConsumer<K = Buffer, V = Buffer> implements Consumer<K, V> {
   #handle: ConsumerHandle;
+  // Whether group.id was given, for the temporary group.id check
+  // (javascript/CLAUDE.md, JavaScript Binding Conventions, Errors).
+  readonly #groupIdDefined: boolean;
 
   /**
    * A consumer is instantiated by providing a set of key-value pairs as
@@ -211,6 +298,7 @@ export class KafkaConsumer<K = Buffer, V = Buffer> implements Consumer<K, V> {
     const keyed = configs['key.deserializer'] !== undefined && configs['key.deserializer'] !== null;
     const valued = configs['value.deserializer'] !== undefined && configs['value.deserializer'] !== null;
     if (form === 1 || keyed || valued) throw new UnsupportedOperationError(NO_DESERIALIZERS);
+    this.#groupIdDefined = configs['group.id'] !== undefined && configs['group.id'] !== null;
     this.#handle = native.consumerCreate(configEntries(configs));
     warnPreview();
     debug('KafkaConsumer created');
@@ -319,6 +407,176 @@ export class KafkaConsumer<K = Buffer, V = Buffer> implements Consumer<K, V> {
     });
   }
 
+  commitSync(): Promise<void>;
+  commitSync(options: {
+    /** The maximum amount of time to await completion of the offset commit. */
+    timeout: Duration;
+    offsets?: never;
+  }): Promise<void>;
+  commitSync(timeout: Duration): Promise<void>;
+  commitSync(options: {
+    /** A map of offsets by partition with associated metadata, copied by the call. */
+    offsets: TopicPartitionMap<OffsetAndMetadata>;
+    timeout?: never;
+  }): Promise<void>;
+  commitSync(offsets: TopicPartitionMap<OffsetAndMetadata>): Promise<void>;
+  commitSync(options: {
+    /** A map of offsets by partition with associated metadata, copied by the call. */
+    offsets: TopicPartitionMap<OffsetAndMetadata>;
+    /** The maximum amount of time to await completion of the offset commit. */
+    timeout: Duration;
+  }): Promise<void>;
+  commitSync(options?: unknown): Promise<void> {
+    const count = arguments.length;
+    return rejecting(() => {
+      const form = COMMIT_SYNC_FORMS.match(options, count);
+      const withOffsets = form >= 2;
+      let entries: Array<[[string | null, number] | null, [bigint, number, string] | null]> | null = null;
+      if (withOffsets) {
+        const offsets = topicPartitionOffsetMap.take(
+          COMMIT_SYNC_FORMS.value(options, 'offsets'),
+          'offsets',
+        ) as TopicPartitionMap<OffsetAndMetadata | null> | null;
+        // A null map, key or value goes to the FFI as NULL, which refuses it.
+        entries =
+          offsets === null
+            ? null
+            : [...offsets.entries()].map(([tp, om]) => [
+                tp === null ? null : [tp.topic, tp.partition],
+                om === null ? null : offsetFields(om),
+              ]);
+      }
+      const timeoutMs = timeoutOf(COMMIT_SYNC_FORMS, options, form === 1 || form === 3);
+      return completion((done) => native.consumerCommitSync(this.#handle, withOffsets, entries, timeoutMs, done));
+    });
+  }
+
+  commitAsync(): Promise<void>;
+  commitAsync(options?: unknown): Promise<void> {
+    const count = arguments.length;
+    return rejecting(() => {
+      // The argument is read, so a callback, whose forms are not in this
+      // release, gets the form error.
+      COMMIT_ASYNC_FORMS.match(options, count);
+      return completion((done) => native.consumerCommitAsync(this.#handle, done));
+    });
+  }
+
+  seek(options: {
+    /** The TopicPartition on which the seek will be performed. */
+    partition: TopicPartition;
+    /** The next offset returned by poll(): a bigint, or a whole number up to 2^53 - 1. */
+    offset: bigint | number;
+    offsetAndMetadata?: never;
+  }): Promise<void>;
+  seek(options: {
+    /** The TopicPartition on which the seek will be performed. */
+    partition: TopicPartition;
+    /** The next offset returned by poll(), with its leader epoch. */
+    offsetAndMetadata: OffsetAndMetadata;
+    offset?: never;
+  }): Promise<void>;
+  seek(options: unknown): Promise<void> {
+    const count = arguments.length;
+    return rejecting(() => {
+      const withMetadata = SEEK_FORMS.match(options, count) === 1;
+      const partition = partitionPair(SEEK_FORMS.value(options, 'partition'), 'partition');
+      if (!withMetadata) {
+        // A negative offset goes to the FFI, which refuses it with Java's message.
+        const offset = long.take(SEEK_FORMS.value(options, 'offset'), 'offset') as bigint;
+        return completion((done) => native.consumerSeek(this.#handle, partition, false, offset, done));
+      }
+      const om = SEEK_FORMS.value(options, 'offsetAndMetadata');
+      if (om !== null && !(om instanceof OffsetAndMetadata)) throw new TypeError('offsetAndMetadata must be an OffsetAndMetadata');
+      const fields = om === null ? null : offsetFields(om);
+      return completion((done) => native.consumerSeek(this.#handle, partition, true, fields, done));
+    });
+  }
+
+  seekToBeginning(options: {
+    /** The partitions to seek to their first offset. */
+    partitions: Iterable<TopicPartition>;
+  }): Promise<void>;
+  seekToBeginning(partitions: Iterable<TopicPartition>): Promise<void>;
+  seekToBeginning(options: unknown): Promise<void> {
+    const count = arguments.length;
+    return rejecting(() => {
+      SEEK_TO_BEGINNING_FORMS.match(options, count);
+      const pairs = partitionPairs(SEEK_TO_BEGINNING_FORMS.value(options, 'partitions'), false);
+      return completion((done) => native.consumerSeekToBeginning(this.#handle, pairs, done));
+    });
+  }
+
+  seekToEnd(options: {
+    /** The partitions to seek to their last offset. */
+    partitions: Iterable<TopicPartition>;
+  }): Promise<void>;
+  seekToEnd(partitions: Iterable<TopicPartition>): Promise<void>;
+  seekToEnd(options: unknown): Promise<void> {
+    const count = arguments.length;
+    return rejecting(() => {
+      SEEK_TO_END_FORMS.match(options, count);
+      const pairs = partitionPairs(SEEK_TO_END_FORMS.value(options, 'partitions'), false);
+      return completion((done) => native.consumerSeekToEnd(this.#handle, pairs, done));
+    });
+  }
+
+  position(options: {
+    /** The partition to get the position for. */
+    partition: TopicPartition;
+    timeout?: never;
+  }): Promise<bigint>;
+  position(partition: TopicPartition): Promise<bigint>;
+  position(options: {
+    /** The partition to get the position for. */
+    partition: TopicPartition;
+    /** The maximum amount of time to await determination of the current position. */
+    timeout: Duration;
+  }): Promise<bigint>;
+  position(options: unknown): Promise<bigint> {
+    const count = arguments.length;
+    return rejecting(() => {
+      const form = POSITION_FORMS.match(options, count);
+      const partition = partitionPair(POSITION_FORMS.value(options, 'partition'), 'partition');
+      const timeoutMs = timeoutOf(POSITION_FORMS, options, form === 1);
+      return answer<bigint>((done) => native.consumerPosition(this.#handle, partition, timeoutMs, done));
+    });
+  }
+
+  committed(options: {
+    /** The partitions to check. */
+    partitions: Iterable<TopicPartition>;
+    timeout?: never;
+  }): Promise<TopicPartitionMap<OffsetAndMetadata | null>>;
+  committed(partitions: Iterable<TopicPartition>): Promise<TopicPartitionMap<OffsetAndMetadata | null>>;
+  committed(options: {
+    /** The partitions to check. */
+    partitions: Iterable<TopicPartition>;
+    /** The maximum amount of time to await the latest committed offsets. */
+    timeout: Duration;
+  }): Promise<TopicPartitionMap<OffsetAndMetadata | null>>;
+  committed(options: unknown): Promise<TopicPartitionMap<OffsetAndMetadata | null>> {
+    const count = arguments.length;
+    return rejecting(async () => {
+      const form = COMMITTED_FORMS.match(options, count);
+      const given = COMMITTED_FORMS.value(options, 'partitions');
+      // The temporary group.id check: Java's throwIfGroupIdNotDefined() comes
+      // before its dereference of the null, which the FFI would report first.
+      if (given === null && !this.#groupIdDefined) throw new InvalidGroupIdError(NO_GROUP_ID);
+      const pairs = partitionPairs(given, false);
+      const timeoutMs = timeoutOf(COMMITTED_FORMS, options, form === 1);
+      const entries = await answer<NativeOffsetEntry[]>((done) => native.consumerCommitted(this.#handle, pairs, timeoutMs, done));
+      const map = new TopicPartitionMap<OffsetAndMetadata | null>();
+      for (const [topic, partition, offset, leaderEpoch = -1, metadata = ''] of entries) {
+        map.set(
+          new TopicPartition({ topic, partition }),
+          offset === null ? null : new OffsetAndMetadata({ offset, leaderEpoch: leaderEpoch < 0 ? null : leaderEpoch, metadata }),
+        );
+      }
+      return map;
+    });
+  }
+
   metrics(): MetricNameMap<Metric> {
     METRICS_FORMS.match(undefined, arguments.length);
     return liveMetrics(native.consumerMetrics(this.#handle));
@@ -355,6 +613,28 @@ export class KafkaConsumer<K = Buffer, V = Buffer> implements Consumer<K, V> {
       const pairs = partitionPairs(RESUME_FORMS.value(options, 'partitions'), false);
       return completion((done) => native.consumerResume(this.#handle, pairs, done));
     });
+  }
+
+  currentLag(options: {
+    /** The partition to get the lag for. */
+    topicPartition: TopicPartition;
+  }): Promise<bigint | null>;
+  currentLag(topicPartition: TopicPartition): Promise<bigint | null>;
+  currentLag(options: unknown): Promise<bigint | null> {
+    const count = arguments.length;
+    return rejecting(() => {
+      CURRENT_LAG_FORMS.match(options, count);
+      const partition = partitionPair(CURRENT_LAG_FORMS.value(options, 'topicPartition'), 'topicPartition');
+      return answer<bigint | null>((done) => native.consumerCurrentLag(this.#handle, partition, done));
+    });
+  }
+
+  groupMetadata(): ConsumerGroupMetadata {
+    GROUP_METADATA_FORMS.match(undefined, arguments.length);
+    // The temporary group.id check: the core makes it with a panic.
+    if (!this.#groupIdDefined) throw new InvalidGroupIdError(NO_GROUP_ID);
+    const [groupId, generationId, memberId, groupInstanceId] = native.consumerGroupMetadata(this.#handle);
+    return ConsumerGroupMetadata.internalCreate(groupId, generationId, memberId, groupInstanceId);
   }
 
   close(): Promise<void>;

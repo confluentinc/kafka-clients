@@ -329,6 +329,60 @@ interface Native {
   consumerPause(handle: ConsumerHandle, partitions: Array<[string | null, number] | null> | null, done: (error: unknown) => void): void;
   consumerResume(handle: ConsumerHandle, partitions: Array<[string | null, number] | null> | null, done: (error: unknown) => void): void;
   consumerUnsubscribe(handle: ConsumerHandle, done: (error: unknown) => void): void;
+  // Java's commitSync forms through their `_cb` twins: `offsets` as
+  // [[topic, partition], [offset, leaderEpoch (-1 for none), metadata]]
+  // entries when withOffsets, a null map, key or value going to the FFI as
+  // NULL; timeoutMs null for the forms without a timeout.
+  consumerCommitSync(
+    handle: ConsumerHandle,
+    withOffsets: boolean,
+    offsets: Array<[[string | null, number] | null, [bigint, number, string] | null]> | null,
+    timeoutMs: number | bigint | null,
+    done: (error: unknown) => void,
+  ): void;
+  // Java's commitAsync(), settling once the core took the commit.
+  consumerCommitAsync(handle: ConsumerHandle, done: (error: unknown) => void): void;
+  // Java's seek(TopicPartition, long), or with withMetadata
+  // seek(TopicPartition, OffsetAndMetadata), `offset` then the
+  // OffsetAndMetadata's [offset, leaderEpoch (-1 for none), metadata]; a null
+  // partition or OffsetAndMetadata goes to the FFI as NULL.
+  consumerSeek(
+    handle: ConsumerHandle,
+    partition: [string | null, number] | null,
+    withMetadata: boolean,
+    offset: bigint | [bigint, number, string] | null,
+    done: (error: unknown) => void,
+  ): void;
+  consumerSeekToBeginning(
+    handle: ConsumerHandle,
+    partitions: Array<[string | null, number] | null> | null,
+    done: (error: unknown) => void,
+  ): void;
+  consumerSeekToEnd(handle: ConsumerHandle, partitions: Array<[string | null, number] | null> | null, done: (error: unknown) => void): void;
+  // Java's position, timeoutMs null for the form without a timeout.
+  consumerPosition(
+    handle: ConsumerHandle,
+    partition: [string | null, number] | null,
+    timeoutMs: number | bigint | null,
+    done: (error: unknown, position: bigint | null) => void,
+  ): void;
+  // Java's committed: each partition's [topic, partition, offset, leaderEpoch
+  // (-1 for none), metadata], or [topic, partition, null] for none.
+  consumerCommitted(
+    handle: ConsumerHandle,
+    partitions: Array<[string | null, number] | null> | null,
+    timeoutMs: number | bigint | null,
+    done: (error: unknown, entries: Array<[string, number, bigint | null, number?, string?]> | null) => void,
+  ): void;
+  // Java's currentLag: null for an empty OptionalLong.
+  consumerCurrentLag(
+    handle: ConsumerHandle,
+    partition: [string | null, number] | null,
+    done: (error: unknown, lag: bigint | null) => void,
+  ): void;
+  // Java's groupMetadata() through its fallible form: groupId, generationId,
+  // memberId and groupInstanceId (null for none).
+  consumerGroupMetadata(handle: ConsumerHandle): [string, number, string, string | null];
   // Java's assignment(), subscription() and paused(), through their fallible forms.
   consumerAssignment(handle: ConsumerHandle): Array<[string, number]>;
   consumerSubscription(handle: ConsumerHandle): string[];

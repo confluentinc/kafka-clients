@@ -20,10 +20,13 @@
 import type { Metric } from '../common/metric';
 import type { MetricNameMap } from '../common/metric_name_map';
 import type { TopicPartition } from '../common/topic_partition';
+import type { TopicPartitionMap } from '../common/topic_partition_map';
 import type { TopicPartitionSet } from '../common/topic_partition_set';
 import type { Duration } from '../duration';
 import type { CloseOptions } from './close_options';
+import type { ConsumerGroupMetadata } from './consumer_group_metadata';
 import type { ConsumerRecords } from './consumer_records';
+import type { OffsetAndMetadata } from './offset_and_metadata';
 import type { SubscriptionPattern } from './subscription_pattern';
 
 /**
@@ -275,6 +278,589 @@ export interface Consumer<K = Buffer, V = Buffer> {
   poll(timeout: Duration): Promise<ConsumerRecords<K, V>>;
 
   /**
+   * Commit offsets returned on the last `poll()` for all the subscribed list
+   * of topics and partitions.
+   *
+   * This commits offsets only to Kafka. The offsets committed using this API
+   * will be used on the first fetch after every rebalance and also on
+   * startup. As such, if you need to store offsets in anything other than
+   * Kafka, this API should not be used.
+   *
+   * This is a synchronous commit and will block until either the commit
+   * succeeds, an unrecoverable error is encountered (in which case it is
+   * thrown to the caller), or the timeout specified by
+   * `default.api.timeout.ms` expires (in which case a `TimeoutError` is
+   * thrown to the caller).
+   *
+   * Note that asynchronous offset commits sent previously with `commitAsync`
+   * (or similar) are guaranteed to have their callbacks invoked prior to
+   * completion of this method, but only when the consumer is using the
+   * consumer group protocol.
+   *
+   * @returns settling once the commit succeeded
+   * @throws `CommitFailedError` rejects with it if the commit failed and
+   *   cannot be retried. This fatal error can only occur if you are using
+   *   automatic group management with `subscribe`, or if there is an active
+   *   group with the same `group.id` which is using group management. In such
+   *   cases, when you are trying to commit to partitions that are no longer
+   *   assigned to this consumer because the consumer is for example no longer
+   *   part of the group this error would be thrown.
+   * @throws `RebalanceInProgressError` rejects with it if the consumer
+   *   instance is in the middle of a rebalance so it is not yet determined
+   *   which partitions would be assigned to the consumer. In such cases you
+   *   can first complete the rebalance by calling `poll` and commit can be
+   *   reconsidered afterwards. NOTE when you reconsider committing after the
+   *   rebalance, the assigned partitions may have changed, and also for those
+   *   partitions that are still assigned their fetch positions may have
+   *   changed too if more records are returned from the `poll` call.
+   * @throws `WakeupError` rejects with it if `wakeup()` is called before or
+   *   while this function is called
+   * @throws `AuthenticationError` rejects with it if authentication fails
+   * @throws `AuthorizationError` rejects with it if not authorized to the
+   *   topic or to the configured groupId
+   * @throws `KafkaError` rejects with it for any other unrecoverable errors
+   *   (e.g. if offset metadata is too large or if the topic does not exist)
+   * @throws `TimeoutError` rejects with it if the timeout specified by
+   *   `default.api.timeout.ms` expires before successful completion of the
+   *   offset commit
+   * @throws `FencedInstanceIdError` rejects with it if this consumer is using
+   *   the classic group protocol and this instance gets fenced by broker
+   * @throws `BootstrapResolutionError` rejects with it if DNS resolution of
+   *   the bootstrap servers fails within `bootstrap.resolve.timeout.ms`
+   * @throws `InvalidGroupIdError` rejects with it if the consumer has no
+   *   `group.id`
+   *
+   * @remarks Java's blocking call returns a Promise here, as `commitAsync()`
+   * does: only this one waits for the broker's answer.
+   */
+  commitSync(): Promise<void>;
+  /**
+   * Commit offsets returned on the last `poll()` for all the subscribed list
+   * of topics and partitions.
+   *
+   * This commits offsets only to Kafka. The offsets committed using this API
+   * will be used on the first fetch after every rebalance and also on
+   * startup. As such, if you need to store offsets in anything other than
+   * Kafka, this API should not be used.
+   *
+   * This is a synchronous commit and will block until either the commit
+   * succeeds, an unrecoverable error is encountered (in which case it is
+   * thrown to the caller), or the passed timeout expires.
+   *
+   * Note that asynchronous offset commits sent previously with `commitAsync`
+   * (or similar) are guaranteed to have their callbacks invoked prior to
+   * completion of this method, but only when the consumer is using the
+   * consumer group protocol.
+   *
+   * @param options - the maximum amount of time to await completion of the
+   *   offset commit
+   * @returns settling once the commit succeeded
+   * @throws `CommitFailedError` rejects with it if the commit failed and
+   *   cannot be retried. This can only occur if you are using automatic group
+   *   management with `subscribe`, or if there is an active group with the
+   *   same `group.id` which is using group management.
+   * @throws `RebalanceInProgressError` rejects with it if the consumer
+   *   instance is in the middle of a rebalance so it is not yet determined
+   *   which partitions would be assigned to the consumer. In such cases you
+   *   can first complete the rebalance by calling `poll` and commit can be
+   *   reconsidered afterwards.
+   * @throws `WakeupError` rejects with it if `wakeup()` is called before or
+   *   while this function is called
+   * @throws `AuthenticationError` rejects with it if authentication fails
+   * @throws `AuthorizationError` rejects with it if not authorized to the
+   *   topic or to the configured groupId
+   * @throws `KafkaError` rejects with it for any other unrecoverable errors
+   *   (e.g. if offset metadata is too large or if the topic does not exist)
+   * @throws `TimeoutError` rejects with it if the timeout expires before
+   *   successful completion of the offset commit
+   * @throws `FencedInstanceIdError` rejects with it if this consumer is using
+   *   the classic group protocol and this instance gets fenced by broker
+   * @throws `IllegalArgumentError` rejects with it if the timeout value is
+   *   negative
+   * @throws `RangeError` rejects with it if the timeout is `NaN`,
+   *   `-Infinity`, holds years, months or weeks, or is beyond
+   *   `Number.MAX_SAFE_INTEGER` milliseconds
+   * @throws `TypeError` rejects with it if the timeout is null
+   *
+   * @remarks Java's blocking call returns a Promise here.
+   */
+  commitSync(options: {
+    /** The maximum amount of time to await completion of the offset commit. */
+    timeout: Duration;
+    offsets?: never;
+  }): Promise<void>;
+  /**
+   * Commit offsets returned on the last `poll()`, waiting up to the timeout:
+   * the timeout on its own, the same as `commitSync({ timeout })`.
+   *
+   * @param timeout - The maximum amount of time to await completion of the
+   *   offset commit
+   * @returns settling once the commit succeeded
+   */
+  commitSync(timeout: Duration): Promise<void>;
+  /**
+   * Commit the specified offsets for the specified list of topics and
+   * partitions.
+   *
+   * This commits offsets to Kafka. The offsets committed using this API will
+   * be used on the first fetch after every rebalance and also on startup. As
+   * such, if you need to store offsets in anything other than Kafka, this API
+   * should not be used. The committed offset should be the next message your
+   * application will consume, i.e. `nextRecordToBeProcessed.offset` (or
+   * `ConsumerRecords.nextOffsets()`). You should also add the leader epoch as
+   * commit metadata, which can be obtained from `ConsumerRecord.leaderEpoch`
+   * or `ConsumerRecords.nextOffsets()`. If automatic group management with
+   * `subscribe` is used, then the committed offsets must belong to the
+   * currently auto-assigned partitions.
+   *
+   * This is a synchronous commit and will block until either the commit
+   * succeeds or an unrecoverable error is encountered (in which case it is
+   * thrown to the caller), or the timeout specified by
+   * `default.api.timeout.ms` expires (in which case a `TimeoutError` is
+   * thrown to the caller).
+   *
+   * @param options - A map of offsets by partition with associated metadata.
+   *   This map will be copied internally, so it is safe to mutate the map
+   *   after returning.
+   * @returns settling once the commit succeeded
+   * @throws `CommitFailedError` rejects with it if the commit failed and
+   *   cannot be retried. This can only occur if you are using automatic group
+   *   management with `subscribe`, or if there is an active group with the
+   *   same `group.id` which is using group management.
+   * @throws `RebalanceInProgressError` rejects with it if the consumer
+   *   instance is in the middle of a rebalance so it is not yet determined
+   *   which partitions would be assigned to the consumer, so when you retry
+   *   committing you should consider updating the passed in offsets
+   * @throws `WakeupError` rejects with it if `wakeup()` is called before or
+   *   while this function is called
+   * @throws `AuthenticationError` rejects with it if authentication fails
+   * @throws `AuthorizationError` rejects with it if not authorized to the
+   *   topic or to the configured groupId
+   * @throws `IllegalArgumentError` rejects with it if the committed offset is
+   *   negative
+   * @throws `KafkaError` rejects with it for any other unrecoverable errors
+   *   (e.g. if offset metadata is too large or if the topic does not exist)
+   * @throws `TimeoutError` rejects with it if the timeout expires before
+   *   successful completion of the offset commit
+   * @throws `FencedInstanceIdError` rejects with it if this consumer is using
+   *   the classic group protocol and this instance gets fenced by broker
+   * @throws `TypeError` rejects with it if `offsets` is null, holds a null
+   *   key or value, or is not a `TopicPartitionMap` (a `Map` included)
+   *
+   * @remarks Java's blocking call returns a Promise here. Only a
+   * `TopicPartitionMap` is taken: a `Map` keyed by `TopicPartition` compares
+   * its keys by identity.
+   */
+  commitSync(options: {
+    /** A map of offsets by partition with associated metadata, copied by the call. */
+    offsets: TopicPartitionMap<OffsetAndMetadata>;
+    timeout?: never;
+  }): Promise<void>;
+  /**
+   * Commit the specified offsets: the offsets on their own, the same as
+   * `commitSync({ offsets })`.
+   *
+   * @param offsets - A map of offsets by partition with associated metadata
+   * @returns settling once the commit succeeded
+   */
+  commitSync(offsets: TopicPartitionMap<OffsetAndMetadata>): Promise<void>;
+  /**
+   * Commit the specified offsets for the specified list of topics and
+   * partitions.
+   *
+   * This commits offsets to Kafka. The offsets committed using this API will
+   * be used on the first fetch after every rebalance and also on startup. As
+   * such, if you need to store offsets in anything other than Kafka, this API
+   * should not be used. The committed offset should be the next message your
+   * application will consume, i.e. `nextRecordToBeProcessed.offset` (or
+   * `ConsumerRecords.nextOffsets()`). If automatic group management with
+   * `subscribe` is used, then the committed offsets must belong to the
+   * currently auto-assigned partitions.
+   *
+   * This is a synchronous commit and will block until either the commit
+   * succeeds, an unrecoverable error is encountered (in which case it is
+   * thrown to the caller), or the timeout expires.
+   *
+   * @param options - A map of offsets by partition with associated metadata,
+   *   copied internally, and the maximum amount of time to await completion
+   *   of the offset commit
+   * @returns settling once the commit succeeded
+   * @throws `CommitFailedError` rejects with it if the commit failed and
+   *   cannot be retried
+   * @throws `RebalanceInProgressError` rejects with it if the consumer
+   *   instance is in the middle of a rebalance
+   * @throws `WakeupError` rejects with it if `wakeup()` is called before or
+   *   while this function is called
+   * @throws `AuthenticationError` rejects with it if authentication fails
+   * @throws `AuthorizationError` rejects with it if not authorized to the
+   *   topic or to the configured groupId
+   * @throws `IllegalArgumentError` rejects with it if the committed offset or
+   *   the timeout is negative
+   * @throws `KafkaError` rejects with it for any other unrecoverable errors
+   * @throws `TimeoutError` rejects with it if the timeout expires before
+   *   successful completion of the offset commit
+   * @throws `FencedInstanceIdError` rejects with it if this consumer is using
+   *   the classic group protocol and this instance gets fenced by broker
+   * @throws `RangeError` rejects with it if the timeout is `NaN`,
+   *   `-Infinity`, holds years, months or weeks, or is beyond
+   *   `Number.MAX_SAFE_INTEGER` milliseconds
+   * @throws `TypeError` rejects with it if the timeout or `offsets` is null,
+   *   or `offsets` is not a `TopicPartitionMap`
+   *
+   * @remarks Java's blocking call returns a Promise here.
+   */
+  commitSync(options: {
+    /** A map of offsets by partition with associated metadata, copied by the call. */
+    offsets: TopicPartitionMap<OffsetAndMetadata>;
+    /** The maximum amount of time to await completion of the offset commit. */
+    timeout: Duration;
+  }): Promise<void>;
+
+  /**
+   * Commit offsets returned on the last `poll()` for all the subscribed list
+   * of topics and partition.
+   *
+   * @returns settling once the core took the commit, not when the broker
+   *   answered
+   * @throws `InvalidGroupIdError` rejects with it if the consumer has no
+   *   `group.id`
+   *
+   * @remarks Both commits return Promises; only `commitSync()` waits for the
+   * broker. Without a callback, a failed commit isn't reported, as in Java.
+   * Await it: a commit that isn't awaited keeps the consumer busy.
+   */
+  commitAsync(): Promise<void>;
+
+  /**
+   * Overrides the fetch offsets that the consumer will use on the next
+   * `poll(timeout)`. If this API is invoked for the same partition more than
+   * once, the latest offset will be used on the next poll(). Note that you may
+   * lose data if this API is arbitrarily used in the middle of consumption, to
+   * reset the fetch offsets.
+   *
+   * The next Consumer Record which will be retrieved when poll() is invoked
+   * will have the offset specified, given that a record with that offset
+   * exists (i.e. it is a valid offset).
+   *
+   * `seekToBeginning` will go to the first offset in the topic. seek(0) is
+   * equivalent to seekToBeginning for a TopicPartition with beginning offset
+   * 0, assuming that there is a record at offset 0 still available.
+   * `seekToEnd` is equivalent to seeking to the last offset of the partition,
+   * but behavior depends on `isolation.level`, so see `seekToEnd`
+   * documentation for more details.
+   *
+   * Seeking to the offset smaller than the log start offset or larger than
+   * the log end offset means an invalid offset is reached. Invalid offset
+   * behaviour is controlled by the `auto.offset.reset` property. If this is
+   * set to "earliest", the next poll will return records from the starting
+   * offset. If it is set to "latest", it will seek to the last offset
+   * (similar to seekToEnd()). If it is set to "none", an
+   * `OffsetOutOfRangeError` will be thrown.
+   *
+   * Note that, the seek offset won't change to the in-flight fetch request,
+   * it will take effect in next fetch request. So, the consumer might wait
+   * for `fetch.max.wait.ms` before starting to fetch the records from desired
+   * offset.
+   *
+   * @param options - the TopicPartition on which the seek will be performed,
+   *   and the next offset returned by poll()
+   * @returns settling once the offset is set
+   * @throws `IllegalArgumentError` rejects with it if the provided offset is
+   *   negative
+   * @throws `IllegalStateError` rejects with it if the provided
+   *   TopicPartition is not assigned to this consumer
+   *
+   * @remarks Java's blocking call returns a Promise here.
+   * *(deviation: the busy check comes before the negative offset's, and a
+   * null partition gets the FFI's `TypeError`, where Java checks the offset
+   * first. Why: the binding repeats no precondition, and the FFI checks the
+   * busy consumer and the NULL first. Goes when: the FFI checks in Java's
+   * order.)*
+   */
+  seek(options: {
+    /** The TopicPartition on which the seek will be performed. */
+    partition: TopicPartition;
+    /** The next offset returned by poll(): a bigint, or a whole number up to 2^53 - 1. */
+    offset: bigint | number;
+    offsetAndMetadata?: never;
+  }): Promise<void>;
+  /**
+   * Overrides the fetch offsets that the consumer will use on the next
+   * `poll(timeout)`. If this API is invoked for the same partition more than
+   * once, the latest offset will be used on the next poll(). Note that you may
+   * lose data if this API is arbitrarily used in the middle of consumption, to
+   * reset the fetch offsets. This method allows for setting the leaderEpoch
+   * along with the desired offset.
+   *
+   * @param options - the TopicPartition on which the seek will be performed,
+   *   and the offset with its leader epoch
+   * @returns settling once the offset is set
+   * @throws `IllegalArgumentError` rejects with it if the provided offset is
+   *   negative
+   * @throws `IllegalStateError` rejects with it if the provided
+   *   TopicPartition is not assigned to this consumer
+   *
+   * @remarks Java's blocking call returns a Promise here. A null
+   * `offsetAndMetadata` or partition gets the FFI's `TypeError`.
+   */
+  seek(options: {
+    /** The TopicPartition on which the seek will be performed. */
+    partition: TopicPartition;
+    /** The next offset returned by poll(), with its leader epoch. */
+    offsetAndMetadata: OffsetAndMetadata;
+    offset?: never;
+  }): Promise<void>;
+
+  /**
+   * Seek to the first offset for each of the given partitions. This function
+   * evaluates lazily, seeking to the first offset in all partitions only when
+   * `poll` or `position` are called. If no partitions are provided, seek to
+   * the first offset for all of the currently assigned partitions.
+   *
+   * @param options - the partitions to seek
+   * @returns settling once the seek is recorded
+   * @throws `IllegalArgumentError` rejects with it if `partitions` is `null`
+   * @throws `IllegalStateError` rejects with it if any of the provided
+   *   partitions are not currently assigned to this consumer
+   *
+   * @remarks Java's blocking call returns a Promise here.
+   */
+  seekToBeginning(options: {
+    /** The partitions to seek to their first offset. */
+    partitions: Iterable<TopicPartition>;
+  }): Promise<void>;
+  /**
+   * Seek to the first offset for each of the given partitions: the partitions
+   * on their own, the same as `seekToBeginning({ partitions })`.
+   *
+   * @param partitions - the partitions to seek
+   * @returns settling once the seek is recorded
+   */
+  seekToBeginning(partitions: Iterable<TopicPartition>): Promise<void>;
+
+  /**
+   * Seek to the last offset for each of the given partitions. This function
+   * evaluates lazily, seeking to the final offset in all partitions only when
+   * `poll` or `position` are called. If no partitions are provided, seek to
+   * the final offset for all of the currently assigned partitions.
+   *
+   * If `isolation.level=read_committed`, the end offset will be the Last
+   * Stable Offset, i.e., the offset of the first message with an open
+   * transaction.
+   *
+   * @param options - the partitions to seek
+   * @returns settling once the seek is recorded
+   * @throws `IllegalArgumentError` rejects with it if `partitions` is `null`
+   * @throws `IllegalStateError` rejects with it if any of the provided
+   *   partitions are not currently assigned to this consumer
+   *
+   * @remarks Java's blocking call returns a Promise here.
+   */
+  seekToEnd(options: {
+    /** The partitions to seek to their last offset. */
+    partitions: Iterable<TopicPartition>;
+  }): Promise<void>;
+  /**
+   * Seek to the last offset for each of the given partitions: the partitions
+   * on their own, the same as `seekToEnd({ partitions })`.
+   *
+   * @param partitions - the partitions to seek
+   * @returns settling once the seek is recorded
+   */
+  seekToEnd(partitions: Iterable<TopicPartition>): Promise<void>;
+
+  /**
+   * Get the offset of the *next record* that will be fetched (if a record
+   * with that offset exists). This method may issue a remote call to the
+   * server if there is no current position for the given partition.
+   *
+   * This call will block until either the position could be determined or an
+   * unrecoverable error is encountered (in which case it is thrown to the
+   * caller), or the timeout specified by `default.api.timeout.ms` expires (in
+   * which case a `TimeoutError` is thrown to the caller).
+   *
+   * @param options - The partition to get the position for
+   * @returns resolving to the current position of the consumer (that is, the
+   *   offset of the next record to be fetched), a bigint
+   * @throws `IllegalStateError` rejects with it if the provided
+   *   TopicPartition is not assigned to this consumer
+   * @throws `InvalidOffsetError` rejects with it if no offset is currently
+   *   defined for the partition
+   * @throws `WakeupError` rejects with it if `wakeup()` is called before or
+   *   while this function is called
+   * @throws `AuthenticationError` rejects with it if authentication fails
+   * @throws `AuthorizationError` rejects with it if not authorized to the
+   *   topic or to the configured groupId
+   * @throws `UnsupportedVersionError` rejects with it if the consumer
+   *   attempts to fetch stable offsets when the broker doesn't support this
+   *   feature
+   * @throws `KafkaError` rejects with it for any other unrecoverable errors
+   * @throws `TimeoutError` rejects with it if the position cannot be
+   *   determined before the timeout specified by `default.api.timeout.ms`
+   *   expires
+   *
+   * @remarks Java's blocking call returns a Promise here.
+   * *(deviation: a null partition, or one with a null topic, gets the FFI's
+   * `TypeError` before the closed and busy checks, where Java reports those
+   * and then "You can only check the position for partitions assigned to
+   * this consumer.". Why: the FFI refuses the NULL at its boundary. Goes
+   * when: the FFI refuses it after the core's checks.)*
+   */
+  position(options: {
+    /** The partition to get the position for. */
+    partition: TopicPartition;
+    timeout?: never;
+  }): Promise<bigint>;
+  /**
+   * Get the offset of the next record that will be fetched: the partition on
+   * its own, the same as `position({ partition })`.
+   *
+   * @param partition - The partition to get the position for
+   * @returns resolving to the current position of the consumer
+   */
+  position(partition: TopicPartition): Promise<bigint>;
+  /**
+   * Get the offset of the *next record* that will be fetched (if a record
+   * with that offset exists). This method may issue a remote call to the
+   * server if there is no current position for the given partition.
+   *
+   * This call will block until the position can be determined, an
+   * unrecoverable error is encountered (in which case it is thrown to the
+   * caller), or the timeout expires.
+   *
+   * @param options - The partition to get the position for, and the maximum
+   *   amount of time to await determination of the current position
+   * @returns resolving to the current position of the consumer (that is, the
+   *   offset of the next record to be fetched), a bigint
+   * @throws `IllegalStateError` rejects with it if the provided
+   *   TopicPartition is not assigned to this consumer
+   * @throws `InvalidOffsetError` rejects with it if no offset is currently
+   *   defined for the partition
+   * @throws `WakeupError` rejects with it if `wakeup()` is called before or
+   *   while this function is called
+   * @throws `TimeoutError` rejects with it if the position cannot be
+   *   determined before the passed timeout expires
+   * @throws `AuthenticationError` rejects with it if authentication fails
+   * @throws `AuthorizationError` rejects with it if not authorized to the
+   *   topic or to the configured groupId
+   * @throws `KafkaError` rejects with it for any other unrecoverable errors
+   * @throws `IllegalArgumentError` rejects with it if the timeout value is
+   *   negative
+   * @throws `RangeError` rejects with it if the timeout is `NaN`,
+   *   `-Infinity`, holds years, months or weeks, or is beyond
+   *   `Number.MAX_SAFE_INTEGER` milliseconds
+   * @throws `TypeError` rejects with it if the timeout is null
+   *
+   * @remarks Java's blocking call returns a Promise here.
+   */
+  position(options: {
+    /** The partition to get the position for. */
+    partition: TopicPartition;
+    /** The maximum amount of time to await determination of the current position. */
+    timeout: Duration;
+  }): Promise<bigint>;
+
+  /**
+   * Get the last committed offsets for the given partitions (whether the
+   * commit happened by this process or another). The returned offsets will be
+   * used as the position for the consumer in the event of a failure.
+   *
+   * If any of the partitions requested do not exist, the result map will
+   * contain null as the value for that partition.
+   *
+   * This call will do a remote call to get the latest committed offsets from
+   * the server, and will block until the committed offsets are gotten
+   * successfully, an unrecoverable error is encountered (in which case it is
+   * thrown to the caller), or the timeout specified by
+   * `default.api.timeout.ms` expires (in which case a `TimeoutError` is
+   * thrown to the caller).
+   *
+   * @param options - The partitions to check
+   * @returns resolving to the latest committed offsets for the given
+   *   partitions; `null` will be returned for the partition if there is no
+   *   such message.
+   * @throws `WakeupError` rejects with it if `wakeup()` is called before or
+   *   while this function is called
+   * @throws `AuthenticationError` rejects with it if authentication fails
+   * @throws `AuthorizationError` rejects with it if not authorized to the
+   *   topic or to the configured groupId
+   * @throws `UnsupportedVersionError` rejects with it if the consumer
+   *   attempts to fetch stable offsets when the broker doesn't support this
+   *   feature
+   * @throws `KafkaError` rejects with it for any other unrecoverable errors
+   * @throws `TimeoutError` rejects with it if the committed offset cannot be
+   *   found before the timeout specified by `default.api.timeout.ms` expires
+   * @throws `BootstrapResolutionError` rejects with it if DNS resolution of
+   *   the bootstrap servers fails within `bootstrap.resolve.timeout.ms`
+   * @throws `InvalidGroupIdError` rejects with it if the consumer has no
+   *   `group.id`
+   *
+   * @remarks Java's blocking call returns a Promise here.
+   * *(deviation: a null collection, or a partition with a null topic, gets
+   * the FFI's `TypeError` before the closed and busy checks; without
+   * `group.id`, `committed(null)` rejects with `InvalidGroupIdError` before
+   * them. Why: the FFI refuses the NULL at its boundary, and the binding
+   * checks the group first. Goes when: the FFI checks in Java's order.)*
+   */
+  committed(options: {
+    /** The partitions to check. */
+    partitions: Iterable<TopicPartition>;
+    timeout?: never;
+  }): Promise<TopicPartitionMap<OffsetAndMetadata | null>>;
+  /**
+   * Get the last committed offsets for the given partitions: the partitions
+   * on their own, the same as `committed({ partitions })`.
+   *
+   * @param partitions - The partitions to check
+   * @returns resolving to the latest committed offsets for the given
+   *   partitions, `null` for a partition with none
+   */
+  committed(partitions: Iterable<TopicPartition>): Promise<TopicPartitionMap<OffsetAndMetadata | null>>;
+  /**
+   * Get the last committed offsets for the given partitions (whether the
+   * commit happened by this process or another). The returned offsets will be
+   * used as the position for the consumer in the event of a failure.
+   *
+   * If any of the partitions requested do not exist, the result map will
+   * contain null as the value for that partition.
+   *
+   * This call will block to do a remote call to get the latest committed
+   * offsets from the server.
+   *
+   * @param options - The partitions to check, and the maximum amount of time
+   *   to await the latest committed offsets
+   * @returns resolving to the latest committed offsets for the given
+   *   partitions; `null` will be returned for the partition if there is no
+   *   such message.
+   * @throws `WakeupError` rejects with it if `wakeup()` is called before or
+   *   while this function is called
+   * @throws `AuthenticationError` rejects with it if authentication fails
+   * @throws `AuthorizationError` rejects with it if not authorized to the
+   *   topic or to the configured groupId
+   * @throws `KafkaError` rejects with it for any other unrecoverable errors
+   * @throws `TimeoutError` rejects with it if the committed offset cannot be
+   *   found before expiration of the timeout
+   * @throws `IllegalArgumentError` rejects with it if the timeout value is
+   *   negative
+   * @throws `RangeError` rejects with it if the timeout is `NaN`,
+   *   `-Infinity`, holds years, months or weeks, or is beyond
+   *   `Number.MAX_SAFE_INTEGER` milliseconds
+   * @throws `TypeError` rejects with it if the timeout is null
+   *
+   * @remarks Java's blocking call returns a Promise here.
+   * *(deviation: a negative timeout is refused, where Java makes no check
+   * and waits without a time limit. Why: the binding repeats no
+   * precondition, and the FFI refuses it. Goes when: the FFI treats it as
+   * Java does.)*
+   */
+  committed(options: {
+    /** The partitions to check. */
+    partitions: Iterable<TopicPartition>;
+    /** The maximum amount of time to await the latest committed offsets. */
+    timeout: Duration;
+  }): Promise<TopicPartitionMap<OffsetAndMetadata | null>>;
+
+  /**
    * Get the metrics kept by the consumer.
    *
    * The returned map is an unmodifiable live view of the metrics. Changes to
@@ -357,6 +943,48 @@ export interface Consumer<K = Buffer, V = Buffer> {
    * @returns settling once the partitions are resumed
    */
   resume(partitions: Iterable<TopicPartition>): Promise<void>;
+
+  /**
+   * Get the consumer's current lag on the partition. Returns an "empty"
+   * value, `null`, if the lag is not known, for example if there is no
+   * position yet, or if the end offset is not known yet.
+   *
+   * This method uses locally cached metadata. If the log end offset is not
+   * known yet, it triggers a request to fetch the log end offset, but returns
+   * immediately.
+   *
+   * @param options - The partition to get the lag for.
+   * @returns resolving to this `Consumer` instance's current lag for the given
+   *   partition, a bigint, or `null` when it is not known
+   * @throws `IllegalStateError` rejects with it if the `topicPartition` is
+   *   not assigned
+   *
+   * @remarks *(deviation: a null partition gets the FFI's `TypeError` before
+   * the closed and busy checks. Why: the FFI refuses the NULL first. Goes
+   * when: it refuses it after them.)*
+   */
+  currentLag(options: {
+    /** The partition to get the lag for. */
+    topicPartition: TopicPartition;
+  }): Promise<bigint | null>;
+  /**
+   * Get the consumer's current lag on the partition: the partition on its
+   * own, the same as `currentLag({ topicPartition })`.
+   *
+   * @param topicPartition - The partition to get the lag for.
+   * @returns resolving to the current lag, or `null` when it is not known
+   */
+  currentLag(topicPartition: TopicPartition): Promise<bigint | null>;
+
+  /**
+   * Return the current group metadata associated with this consumer.
+   *
+   * @returns consumer group metadata
+   * @throws `InvalidGroupIdError` if consumer does not have a group
+   * @throws `IllegalStateError` when the consumer is closed, the core's error
+   * @throws `ConcurrentModificationError` while another call is in progress
+   */
+  groupMetadata(): ConsumerGroupMetadata;
 
   /**
    * Close the consumer with the default leave group behavior, waiting for up

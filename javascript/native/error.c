@@ -451,7 +451,14 @@ napi_value offset_map_to_js(napi_env env, const kafka_Map_t* map) {
         }
         napi_value entry = tp == NULL ? NULL : topic_partition_to_js(env, tp);
         napi_value o, e, m;
-        if (entry == NULL || om == NULL || napi_create_bigint_int64(env, offset, &o) != napi_ok
+        if (entry != NULL && om == NULL) {
+            // A partition with no offset, as committed() answers it.
+            if (napi_get_null(env, &o) != napi_ok || napi_set_element(env, entry, 2, o) != napi_ok
+                || napi_set_element(env, arr, (uint32_t)i, entry) != napi_ok)
+                rc = -1;
+            continue;
+        }
+        if (entry == NULL || napi_create_bigint_int64(env, offset, &o) != napi_ok
             || napi_create_int32(env, epoch, &e) != napi_ok || (m = string_or_null(env, metadata != NULL ? metadata : "")) == NULL
             || napi_set_element(env, entry, 2, o) != napi_ok || napi_set_element(env, entry, 3, e) != napi_ok
             || napi_set_element(env, entry, 4, m) != napi_ok || napi_set_element(env, arr, (uint32_t)i, entry) != napi_ok) {

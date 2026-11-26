@@ -123,6 +123,36 @@ test('the consumer uses the functions of the plan', () => {
   }
 });
 
+test("the consumer's commits, seeks, positions and group metadata use their entry points", () => {
+  const called = new Set(sources.flatMap((s) => [...calledFunctions(path.join(NATIVE, s))]));
+  for (const name of [
+    'kafka_consumer_Consumer_commit_sync_cb',
+    'kafka_consumer_Consumer_commit_sync_with_timeout_cb',
+    'kafka_consumer_Consumer_commit_sync_with_offsets_cb',
+    'kafka_consumer_Consumer_commit_sync_with_offsets_timeout_cb',
+    'kafka_consumer_Consumer_commit_async_cb',
+    'kafka_consumer_OffsetAndMetadata_with_leader_epoch_metadata',
+    'kafka_consumer_OffsetAndMetadata_destroy_err',
+    'kafka_consumer_Consumer_seek_with_offset_cb',
+    'kafka_consumer_Consumer_seek_with_offset_and_metadata_cb',
+    'kafka_consumer_Consumer_seek_to_beginning_cb',
+    'kafka_consumer_Consumer_seek_to_end_cb',
+    'kafka_consumer_Consumer_position_cb',
+    'kafka_consumer_Consumer_position_with_timeout_cb',
+    'kafka_consumer_Consumer_committed_cb',
+    'kafka_consumer_Consumer_committed_with_timeout_cb',
+    'kafka_consumer_Consumer_current_lag_cb',
+    'kafka_consumer_Consumer_group_metadata',
+    'kafka_consumer_ConsumerGroupMetadata_group_id_err',
+    'kafka_consumer_ConsumerGroupMetadata_generation_id_err',
+    'kafka_consumer_ConsumerGroupMetadata_member_id_err',
+    'kafka_consumer_ConsumerGroupMetadata_group_instance_id_err',
+    'kafka_consumer_ConsumerGroupMetadata_destroy_err',
+  ]) {
+    assert.ok(called.has(name), `${name} is not called`);
+  }
+});
+
 test('no blocking consumer call: every waiting call is a _cb twin (rule 4)', () => {
   for (const name of [
     'kafka_consumer_Consumer_poll',
@@ -134,6 +164,20 @@ test('no blocking consumer call: every waiting call is a _cb twin (rule 4)', () 
     'kafka_consumer_Consumer_unsubscribe',
     'kafka_consumer_Consumer_pause',
     'kafka_consumer_Consumer_resume',
+    'kafka_consumer_Consumer_commit_sync',
+    'kafka_consumer_Consumer_commit_sync_with_timeout',
+    'kafka_consumer_Consumer_commit_sync_with_offsets',
+    'kafka_consumer_Consumer_commit_sync_with_offsets_timeout',
+    'kafka_consumer_Consumer_commit_async',
+    'kafka_consumer_Consumer_seek_with_offset',
+    'kafka_consumer_Consumer_seek_with_offset_and_metadata',
+    'kafka_consumer_Consumer_seek_to_beginning',
+    'kafka_consumer_Consumer_seek_to_end',
+    'kafka_consumer_Consumer_position',
+    'kafka_consumer_Consumer_position_with_timeout',
+    'kafka_consumer_Consumer_committed',
+    'kafka_consumer_Consumer_committed_with_timeout',
+    'kafka_consumer_Consumer_current_lag',
   ]) {
     for (const source of sources) {
       const code = stripComments(fs.readFileSync(path.join(NATIVE, source), 'utf8'));

@@ -21,15 +21,13 @@
 // protocol's arm. Where Java drives a MockClient only to make a call wait, an
 // unreachable bootstrap address stands for it.
 //
-// Of Java's 135 tests, 30 are ported here:
+// Of Java's 135 tests, 33 are ported here:
 //   testConstructorClose, testOsDefaultSocketBufferSizes,
 //   shouldIgnoreGroupInstanceIdForEmptyGroupId, testEmptyGroupId,
 //   testGroupIdWithWhitespace,
 //   testConsumerConstructorFailsWithConfigExceptionOnUnresolvableBootstrapWhenTimeoutZero,
-//   testOperationsBySubscribingConsumerWithDefaultGroupId and
-//   testOperationsByAssigningConsumerWithDefaultGroupId (their constructor,
-//   subscribe and assign halves: the commit halves need commitSync,
-//   commitAsync and committed, which this release does not have), testSubscription,
+//   testOperationsBySubscribingConsumerWithDefaultGroupId,
+//   testOperationsByAssigningConsumerWithDefaultGroupId, testSubscription,
 //   testSubscriptionOnNullTopicCollection, testSubscriptionOnNullTopic,
 //   testSubscriptionOnEmptyTopic, testSubscriptionOnEmptyPattern (its
 //   SubscriptionPattern form), testAssignOnNullTopicPartition,
@@ -43,13 +41,13 @@
 //   a broker), testMetricsRemovedOnClose, testClosingConsumerUnregistersConsumerMetrics,
 //   testPollIdleRatioZero (its default value: the zero-length poll is recorded
 //   through the package-private kafkaConsumerMetrics() on a MockTime) and
-//   testCloseShouldBeIdempotent.
+//   testCloseShouldBeIdempotent, testSeekNegative, testInvalidGroupMetadata
+//   and testCommittedThrowsTimeoutExceptionForNoResponse.
 //
-// Not here yet, for want of the methods they test (the offsets, commits and
-// group metadata): testSeekNegative, testInvalidGroupMetadata,
-// testOffsetsForTimesTimeout, testBeginningOffsetsTimeout,
-// testEndOffsetsTimeout and testCommittedThrowsTimeoutExceptionForNoResponse;
-// for want of deserializers: configurableObjectsShouldSeeGeneratedClientId.
+// Not here yet, for want of the methods they test (the offset queries):
+// testOffsetsForTimesTimeout, testBeginningOffsetsTimeout and
+// testEndOffsetsTimeout; for want of deserializers:
+// configurableObjectsShouldSeeGeneratedClientId.
 // Against a broker, where Java scripts a MockClient: testMissingOffsetNoResetPolicy,
 // testResetToCommittedOffset, testResetUsingAutoResetPolicy,
 // testResetUsingDurationBasedAutoResetPolicy, testOffsetIsValidAfterSeek,
@@ -147,15 +145,23 @@ const {
   IllegalStateError,
   UnsupportedOperationError,
 } = require('@confluentinc/kafka-javascript');
-const { KafkaError, TopicPartition, TopicPartitionSet } = require('@confluentinc/kafka-javascript/common');
+const { KafkaError, TopicPartition, TopicPartitionMap, TopicPartitionSet } = require('@confluentinc/kafka-javascript/common');
 const { ConfigError } = require('@confluentinc/kafka-javascript/common/config');
 const {
   BootstrapResolutionError,
   InvalidConfigurationError,
   InvalidGroupIdError,
+  TimeoutError: KafkaTimeoutError,
   WakeupError,
 } = require('@confluentinc/kafka-javascript/common/errors');
-const { CloseOptions, ConsumerRecords, KafkaConsumer, SubscriptionPattern } = require('@confluentinc/kafka-javascript/consumer');
+const {
+  CloseOptions,
+  ConsumerGroupMetadata,
+  ConsumerRecords,
+  KafkaConsumer,
+  OffsetAndMetadata,
+  SubscriptionPattern,
+} = require('@confluentinc/kafka-javascript/consumer');
 
 /** @typedef {import('@confluentinc/kafka-javascript/consumer').ConsumerConfigs} ConsumerConfigs */
 
@@ -305,8 +311,7 @@ test('testConsumerConstructorFailsWithConfigExceptionOnUnresolvableBootstrapWhen
 });
 
 test('testOperationsBySubscribingConsumerWithDefaultGroupId', async () => {
-  // Its constructor and subscribe halves: the commit half needs the commit
-  // calls. enable.auto.commit=true needs a group.id: the core's error, unwrapped.
+  // enable.auto.commit=true needs a group.id: the core's error, unwrapped.
   assert.throws(() => new KafkaConsumer({ configs: configs(null, { 'enable.auto.commit': true }) }), {
     constructor: InvalidConfigurationError,
     message: 'enable.auto.commit cannot be set to true when default group id (null) is used.',
@@ -315,13 +320,18 @@ test('testOperationsBySubscribingConsumerWithDefaultGroupId', async () => {
   // Java's subscribe() checks the group before the topics.
   // @ts-expect-error a null topic the types forbid: the run time sends it as a blank one
   await assert.rejects(newConsumer(null).subscribe({ topics: [null] }), { constructor: InvalidGroupIdError, message: NO_GROUP_ID });
+  await assert.rejects(newConsumer(null).committed({ partitions: [TP0] }), { constructor: InvalidGroupIdError, message: NO_GROUP_ID });
+  await assert.rejects(newConsumer(null).commitAsync(), { constructor: InvalidGroupIdError, message: NO_GROUP_ID });
+  await assert.rejects(newConsumer(null).commitSync(), { constructor: InvalidGroupIdError, message: NO_GROUP_ID });
 });
 
 test('testOperationsByAssigningConsumerWithDefaultGroupId', async () => {
-  // Its assign half: the commit half needs the commit calls.
   const consumer = newConsumer(null);
   await consumer.assign({ partitions: [TP0] });
   assert.deepEqual(names(consumer.assignment()), ['test-0']);
+  await assert.rejects(consumer.committed({ partitions: [TP0] }), { constructor: InvalidGroupIdError, message: NO_GROUP_ID });
+  await assert.rejects(consumer.commitAsync(), { constructor: InvalidGroupIdError, message: NO_GROUP_ID });
+  await assert.rejects(consumer.commitSync(), { constructor: InvalidGroupIdError, message: NO_GROUP_ID });
 });
 
 test('testSubscription', async () => {
@@ -561,6 +571,41 @@ test('testCloseShouldBeIdempotent', async () => {
   assert.throws(() => consumer.assignment(), { constructor: IllegalStateError, message: CLOSED_GETTER('assignment') });
 });
 
+test('testSeekNegative', async () => {
+  const consumer = newConsumer(null);
+  const partition = new TopicPartition({ topic: 'nonExistTopic', partition: 0 });
+  await consumer.assign({ partitions: [partition] });
+  await assert.rejects(consumer.seek({ partition, offset: -1 }), {
+    constructor: IllegalArgumentError,
+    message: 'seek offset must not be a negative number',
+  });
+});
+
+test('testInvalidGroupMetadata', async () => {
+  // Java's second thread is a call while a poll waits.
+  const consumer = new KafkaConsumer({ configs: configs() });
+  await consumer.subscribe({ topics: [TOPIC] });
+  const polling = consumer.poll({ timeout: 5000 });
+  assert.throws(() => consumer.groupMetadata(), { constructor: ConcurrentModificationError, message: CONCURRENT });
+  consumer.wakeup();
+  await assert.rejects(polling, WakeupError);
+  await consumer.close({ option: CloseOptions.timeout({ timeout: 0 }) });
+  // The closed getter panics in the core, whose message the FFI prefixes.
+  assert.throws(() => consumer.groupMetadata(), { constructor: IllegalStateError, message: CLOSED_GETTER('group_metadata') });
+});
+
+test('testCommittedThrowsTimeoutExceptionForNoResponse', async () => {
+  // Java's coordinator never answers; an unreachable broker never does either.
+  const consumer = newConsumer();
+  await consumer.assign({ partitions: [TP0] });
+  await assert.rejects(consumer.committed({ partitions: [TP0], timeout: 1000 }), {
+    constructor: KafkaTimeoutError,
+    message:
+      'Timeout of 1000ms expired before the last committed offset for partitions [test-0] could be determined. ' +
+      'Try tuning default.api.timeout.ms larger to relax the threshold.',
+  });
+});
+
 // ---- the binding's own contracts --------------------------------------------
 
 test('the classic protocol, the default, gets the core UnsupportedOperationError', () => {
@@ -771,6 +816,52 @@ test('the null checks come before the closed, busy and group checks: the FFI ref
   await assert.rejects(assigned.resume({ partitions: [nullTopic] }), { constructor: TypeError, message: 'topic must not be null' });
 });
 
+test('the null checks of the offset calls come before the closed and busy checks, and the group.id check before all', async () => {
+  const nullTopic = new TopicPartition({ topic: null, partition: 0 });
+  // Closed: Java throws IllegalStateException("This consumer has already been closed.") first.
+  const closed = new KafkaConsumer({ configs: configs() });
+  await closed.close({ option: CloseOptions.timeout({ timeout: 0 }) });
+  // @ts-expect-error a null the types forbid
+  await assert.rejects(closed.position(null), { constructor: TypeError, message: 'partition must not be null' });
+  await assert.rejects(closed.position(nullTopic), { constructor: TypeError, message: 'topic must not be null' });
+  // @ts-expect-error a null the types forbid
+  await assert.rejects(closed.committed(null), { constructor: TypeError, message: 'partitions must not be null' });
+  // @ts-expect-error a null the types forbid
+  await assert.rejects(closed.currentLag(null), { constructor: TypeError, message: 'topic_partition must not be null' });
+  // @ts-expect-error a null the types forbid
+  await assert.rejects(closed.seek({ partition: null, offset: 0 }), { constructor: TypeError, message: 'partition must not be null' });
+  // Java checks these first too: no deviation.
+  // @ts-expect-error a null the types forbid
+  await assert.rejects(closed.commitSync({ offsets: null }), { constructor: TypeError, message: 'offsets must not be null' });
+  // @ts-expect-error a null the types forbid
+  await assert.rejects(closed.seekToBeginning(null), {
+    constructor: IllegalArgumentError,
+    message: 'Partitions collection cannot be null',
+  });
+  // Without group.id, the binding's check comes before the closed check.
+  const closedGroupless = new KafkaConsumer({ configs: configs(null) });
+  await closedGroupless.close({ option: CloseOptions.timeout({ timeout: 0 }) });
+  assert.throws(() => closedGroupless.groupMetadata(), { constructor: InvalidGroupIdError, message: NO_GROUP_ID });
+  // @ts-expect-error a null the types forbid
+  await assert.rejects(closedGroupless.committed(null), { constructor: InvalidGroupIdError, message: NO_GROUP_ID });
+  // While a poll is pending: Java throws ConcurrentModificationException first.
+  const busy = newConsumer();
+  await busy.assign({ partitions: [TP0] });
+  const polling = busy.poll({ timeout: 10000 });
+  // @ts-expect-error a null the types forbid
+  await assert.rejects(busy.position(null), { constructor: TypeError, message: 'partition must not be null' });
+  // The busy check comes before seek's negative offset, which Java checks first.
+  await assert.rejects(busy.seek({ partition: TP0, offset: -1 }), { constructor: ConcurrentModificationError, message: CONCURRENT });
+  busy.wakeup();
+  await assert.rejects(polling, WakeupError);
+  const busyGroupless = newConsumer(null);
+  await busyGroupless.assign({ partitions: [TP0] });
+  const pollingGroupless = busyGroupless.poll({ timeout: 10000 });
+  assert.throws(() => busyGroupless.groupMetadata(), { constructor: InvalidGroupIdError, message: NO_GROUP_ID });
+  busyGroupless.wakeup();
+  await assert.rejects(pollingGroupless, WakeupError);
+});
+
 test('poll: its forms, a negative timeout with the core message, a Temporal.Duration', async () => {
   const consumer = newConsumer();
   await consumer.assign({ partitions: [TP0] });
@@ -785,6 +876,254 @@ test('poll: its forms, a negative timeout with the core message, a Temporal.Dura
   // @ts-expect-error a string
   await assert.rejects(consumer.poll('1'), { constructor: IllegalArgumentError, message: 'poll() takes one of (timeout); got a string' });
   await assert.rejects(consumer.poll(NaN), { constructor: RangeError, message: 'timeout must be a number of milliseconds, not NaN' });
+});
+
+test('commitSync: its four forms, bare and by name, and their errors', async () => {
+  const consumer = newConsumer();
+  const forms = 'commitSync() takes one of (), (timeout), (offsets), (offsets, timeout)';
+  const offsets = new TopicPartitionMap([[TP0, new OffsetAndMetadata({ offset: 5n, leaderEpoch: 1, metadata: 'm' })]]);
+  // Nothing consumed: each form commits nothing and resolves.
+  await consumer.commitSync();
+  await consumer.commitSync({ timeout: 100 });
+  // The bare forms, checked once each.
+  await consumer.commitSync(100);
+  await consumer.commitSync(new TopicPartitionMap());
+  await consumer.commitSync({ offsets: new TopicPartitionMap(), timeout: Temporal.Duration.from({ milliseconds: 100 }) });
+  // Offsets to an unassigned partition: the broker would take them; the
+  // unreachable one never answers.
+  await assert.rejects(consumer.commitSync({ offsets, timeout: 300 }), {
+    constructor: KafkaTimeoutError,
+    message: 'Timeout of 300ms expired before successfully committing offsets',
+  });
+  // A bare null fits both one-parameter forms, so neither takes it.
+  // @ts-expect-error a null the types forbid
+  await assert.rejects(consumer.commitSync(null), { constructor: IllegalArgumentError, message: `${forms}; got null` });
+  // @ts-expect-error a string
+  await assert.rejects(consumer.commitSync('1'), { constructor: IllegalArgumentError, message: `${forms}; got a string` });
+  // @ts-expect-error a second argument
+  await assert.rejects(consumer.commitSync(offsets, 100), {
+    constructor: IllegalArgumentError,
+    message: `${forms}; got 2 arguments, not one object of named parameters`,
+  });
+  // @ts-expect-error a name no form has
+  await assert.rejects(consumer.commitSync({ offset: offsets }), { constructor: IllegalArgumentError, message: `${forms}; got (offset)` });
+  // @ts-expect-error undefined is no value
+  await assert.rejects(consumer.commitSync(undefined), {
+    constructor: TypeError,
+    message: "timeout must not be undefined. Leave the argument out, or pass null for Java's null",
+  });
+  // A Map keyed by TopicPartition is refused with the hint, by name and bare.
+  const hint =
+    'offsets must be a TopicPartitionMap, not a Map: a Map keyed by TopicPartition compares its keys by identity, so build one with new TopicPartitionMap(entries)';
+  // @ts-expect-error a Map is no TopicPartitionMap
+  await assert.rejects(consumer.commitSync({ offsets: new Map([[TP0, new OffsetAndMetadata(1)]]) }), {
+    constructor: TypeError,
+    message: hint,
+  });
+  // @ts-expect-error a Map is no TopicPartitionMap
+  await assert.rejects(consumer.commitSync(new Map()), { constructor: TypeError, message: hint });
+  // Java's new HashMap<>(null) throws; the FFI refuses a null map or value.
+  // @ts-expect-error a null the types forbid
+  await assert.rejects(consumer.commitSync({ offsets: null }), { constructor: TypeError, message: 'offsets must not be null' });
+  // @ts-expect-error a null value the types forbid
+  await assert.rejects(consumer.commitSync({ offsets: new TopicPartitionMap([[TP0, null]]) }), {
+    constructor: TypeError,
+    message: 'offsets must not contain null',
+  });
+  // A timeout: the core's message for a negative one, null a TypeError.
+  for (const call of [() => consumer.commitSync({ timeout: -1 }), () => consumer.commitSync({ offsets, timeout: -1 })]) {
+    await assert.rejects(call(), { constructor: IllegalArgumentError, message: 'Timeout must not be negative' });
+  }
+  // @ts-expect-error a null the types forbid
+  await assert.rejects(consumer.commitSync({ timeout: null }), { constructor: TypeError, message: 'timeout must not be null' });
+  // @ts-expect-error a null the types forbid
+  await assert.rejects(consumer.commitSync({ offsets, timeout: null }), { constructor: TypeError, message: 'timeout must not be null' });
+});
+
+test('commitAsync() settles once the core took the commit, and takes no argument', async () => {
+  const consumer = newConsumer();
+  await consumer.assign({ partitions: [TP0] });
+  await consumer.commitAsync();
+  // The forms with a callback are not in this release.
+  await assert.rejects(
+    // @ts-expect-error a callback
+    consumer.commitAsync(() => {}),
+    { constructor: IllegalArgumentError, message: 'commitAsync() takes one of (); got a function' },
+  );
+  // @ts-expect-error an argument
+  await assert.rejects(consumer.commitAsync(undefined), TypeError);
+});
+
+test('seek: its two forms and their errors', async () => {
+  const consumer = newConsumer();
+  const forms = 'seek() takes one of (partition, offset), (partition, offsetAndMetadata)';
+  await consumer.assign({ partitions: [TP0] });
+  await consumer.seek({ partition: TP0, offset: 5 });
+  assert.equal(await consumer.position({ partition: TP0 }), 5n);
+  await consumer.seek({ partition: TP0, offsetAndMetadata: new OffsetAndMetadata({ offset: 7n, leaderEpoch: 2, metadata: '' }) });
+  assert.equal(await consumer.position({ partition: TP0 }), 7n);
+  // Each form takes its parameters by name: no bare form.
+  // @ts-expect-error a bare partition
+  await assert.rejects(consumer.seek(TP0), { constructor: IllegalArgumentError, message: `${forms}; got a TopicPartition` });
+  // @ts-expect-error two forms at once
+  await assert.rejects(consumer.seek({ partition: TP0, offset: 1, offsetAndMetadata: new OffsetAndMetadata(1) }), {
+    constructor: IllegalArgumentError,
+    message: `${forms}; got (partition, offset, offsetAndMetadata)`,
+  });
+  await assert.rejects(consumer.seek({ partition: TP0, offset: 2 ** 60 }), {
+    constructor: RangeError,
+    message: 'offset must be a bigint beyond 2^53 - 1: a number holds no larger integer exactly',
+  });
+  // @ts-expect-error a string
+  await assert.rejects(consumer.seek({ partition: TP0, offset: '1' }), {
+    constructor: TypeError,
+    message: 'offset must be a bigint or an integer',
+  });
+  // @ts-expect-error a number is no OffsetAndMetadata
+  await assert.rejects(consumer.seek({ partition: TP0, offsetAndMetadata: 1 }), {
+    constructor: TypeError,
+    message: 'offsetAndMetadata must be an OffsetAndMetadata',
+  });
+  // The FFI refuses a null partition or OffsetAndMetadata.
+  // @ts-expect-error a null the types forbid
+  await assert.rejects(consumer.seek({ partition: null, offset: 1 }), { constructor: TypeError, message: 'partition must not be null' });
+  // @ts-expect-error a null the types forbid
+  await assert.rejects(consumer.seek({ partition: TP0, offsetAndMetadata: null }), {
+    constructor: TypeError,
+    message: 'offset_and_metadata must not be null',
+  });
+  await assert.rejects(consumer.seek({ partition: TP1, offset: 1 }), {
+    constructor: IllegalStateError,
+    message: 'No current assignment for partition test-1',
+  });
+});
+
+test('seekToBeginning and seekToEnd: bare and by name, Java null check first', async () => {
+  const consumer = newConsumer();
+  await consumer.assign({ partitions: [TP0] });
+  await consumer.seekToBeginning({ partitions: [TP0] });
+  await consumer.seekToEnd({ partitions: [TP0] });
+  // The bare forms, checked once each.
+  await consumer.seekToBeginning([TP0]);
+  await consumer.seekToEnd(new Set([TP0]));
+  for (const method of /** @type {const} */ (['seekToBeginning', 'seekToEnd'])) {
+    // Java's own null check, before the closed and busy checks.
+    // @ts-expect-error a null the types forbid
+    await assert.rejects(consumer[method]({ partitions: null }), {
+      constructor: IllegalArgumentError,
+      message: 'Partitions collection cannot be null',
+    });
+    // @ts-expect-error a null the types forbid
+    await assert.rejects(consumer[method](null), { constructor: IllegalArgumentError, message: 'Partitions collection cannot be null' });
+    await assert.rejects(consumer[method]({ partitions: [TP1] }), {
+      constructor: IllegalStateError,
+      message: 'No current assignment for partition test-1',
+    });
+    // @ts-expect-error a string
+    await assert.rejects(consumer[method]('test-0'), {
+      constructor: IllegalArgumentError,
+      message: `${method}() takes one of (partitions); got a string`,
+    });
+  }
+});
+
+test('position: its forms, bare and by name, and their errors', async () => {
+  const consumer = newConsumer();
+  await consumer.assign({ partitions: [TP0] });
+  await consumer.seek({ partition: TP0, offset: 3n });
+  // The bare form, checked once.
+  const position = await consumer.position(TP0);
+  assert.equal(typeof position, 'bigint');
+  assert.equal(position, 3n);
+  assert.equal(await consumer.position({ partition: TP0, timeout: 100 }), 3n);
+  await assert.rejects(consumer.position({ partition: TP1 }), {
+    constructor: IllegalStateError,
+    message: 'You can only check the position for partitions assigned to this consumer.',
+  });
+  await assert.rejects(consumer.position({ partition: TP0, timeout: -1 }), {
+    constructor: IllegalArgumentError,
+    message: 'Timeout must not be negative',
+  });
+  // @ts-expect-error a null the types forbid
+  await assert.rejects(consumer.position({ partition: TP0, timeout: null }), {
+    constructor: TypeError,
+    message: 'timeout must not be null',
+  });
+  // @ts-expect-error a string
+  await assert.rejects(consumer.position('test-0'), {
+    constructor: IllegalArgumentError,
+    message: 'position() takes one of (partition), (partition, timeout); got a string',
+  });
+});
+
+test('committed: its forms, the group.id check of committed(null), and their errors', async () => {
+  const consumer = newConsumer();
+  const forms = 'committed() takes one of (partitions), (partitions, timeout)';
+  // Nothing asked: an empty map, the core's answer without a request.
+  const none = await consumer.committed({ partitions: [] });
+  assert.ok(none instanceof TopicPartitionMap);
+  assert.equal(none.size(), 0);
+  // The bare form, checked once.
+  assert.equal((await consumer.committed(new Set())).size(), 0);
+  assert.equal((await consumer.committed({ partitions: [], timeout: 100 })).size(), 0);
+  // With a group.id, the FFI refuses the null.
+  // @ts-expect-error a null the types forbid
+  await assert.rejects(consumer.committed({ partitions: null }), { constructor: TypeError, message: 'partitions must not be null' });
+  // Without one, the binding throws Java's InvalidGroupIdException first, as
+  // Java's throwIfGroupIdNotDefined() comes before the null's dereference.
+  const groupless = newConsumer(null);
+  // @ts-expect-error a null the types forbid
+  await assert.rejects(groupless.committed(null), { constructor: InvalidGroupIdError, message: NO_GROUP_ID });
+  // @ts-expect-error a null the types forbid
+  await assert.rejects(groupless.committed({ partitions: null, timeout: 100 }), { constructor: InvalidGroupIdError, message: NO_GROUP_ID });
+  await assert.rejects(consumer.committed({ partitions: [TP0], timeout: -1 }), {
+    constructor: IllegalArgumentError,
+    message: 'Timeout must not be negative',
+  });
+  // @ts-expect-error a string
+  await assert.rejects(consumer.committed('test-0'), { constructor: IllegalArgumentError, message: `${forms}; got a string` });
+});
+
+test('currentLag: null while the lag is unknown, a bigint argument, and its errors', async () => {
+  const consumer = newConsumer();
+  await consumer.assign({ partitions: [TP0] });
+  // Assigned, with no position or end offset yet: Java's empty OptionalLong.
+  assert.equal(await consumer.currentLag({ topicPartition: TP0 }), null);
+  // The bare form, checked once.
+  assert.equal(await consumer.currentLag(TP0), null);
+  await assert.rejects(consumer.currentLag({ topicPartition: TP1 }), {
+    constructor: IllegalStateError,
+    message: 'No current assignment for partition test-1',
+  });
+  // @ts-expect-error a null the types forbid
+  await assert.rejects(consumer.currentLag(null), { constructor: TypeError, message: 'topic_partition must not be null' });
+  // @ts-expect-error a string
+  await assert.rejects(consumer.currentLag('test-0'), {
+    constructor: IllegalArgumentError,
+    message: 'currentLag() takes one of (topicPartition); got a string',
+  });
+});
+
+test('groupMetadata(): the group, the temporary group.id check, no argument', () => {
+  const metadata = newConsumer().groupMetadata();
+  assert.ok(metadata instanceof ConsumerGroupMetadata);
+  assert.equal(metadata.groupId(), GROUP_ID);
+  // Before the member joins.
+  assert.equal(metadata.generationId(), -1);
+  assert.equal(metadata.memberId(), '');
+  assert.equal(metadata.groupInstanceId(), null);
+  assert.equal(newConsumer(GROUP_ID, { 'group.instance.id': 'i' }).groupMetadata().groupInstanceId(), 'i');
+  assert.throws(() => newConsumer(null).groupMetadata(), { constructor: InvalidGroupIdError, message: NO_GROUP_ID });
+  // A null group.id is no group.id.
+  assert.throws(() => newConsumer(GROUP_ID, { 'group.id': null }).groupMetadata(), {
+    constructor: InvalidGroupIdError,
+    message: NO_GROUP_ID,
+  });
+  // @ts-expect-error an argument
+  assert.throws(() => newConsumer().groupMetadata(1), {
+    constructor: TypeError,
+    message: 'groupMetadata() only reads: it takes no argument',
+  });
 });
 
 test('unsubscribe, wakeup and the getters take no argument', async () => {
@@ -807,11 +1146,20 @@ test('one call at a time: the core busy error, wakeup() ending the waiting poll,
     consumer.subscribe({ topics: [TOPIC] }),
     consumer.assign({ partitions: [TP0] }),
     consumer.unsubscribe(),
+    consumer.commitSync(),
+    consumer.commitAsync(),
+    consumer.seek({ partition: TP0, offset: 0 }),
+    consumer.seekToBeginning({ partitions: [TP0] }),
+    consumer.seekToEnd({ partitions: [TP0] }),
+    consumer.position({ partition: TP0 }),
+    consumer.committed({ partitions: [TP0] }),
+    consumer.currentLag({ topicPartition: TP0 }),
     consumer.close(),
   ]) {
     await assert.rejects(call, { constructor: ConcurrentModificationError, message: CONCURRENT });
   }
   assert.throws(() => consumer.assignment(), { constructor: ConcurrentModificationError, message: CONCURRENT });
+  assert.throws(() => consumer.groupMetadata(), { constructor: ConcurrentModificationError, message: CONCURRENT });
   // metrics() is exempt.
   assert.ok(consumer.metrics().size() > 0);
   consumer.wakeup();
@@ -858,9 +1206,28 @@ test('close(option) with and without a timeout, a negative one read as zero; the
   for (const fn of /** @type {const} */ (['assignment', 'subscription', 'paused'])) {
     assert.throws(() => leave[fn](), { constructor: IllegalStateError, message: CLOSED_GETTER(fn) });
   }
+  assert.throws(() => leave.groupMetadata(), { constructor: IllegalStateError, message: CLOSED_GETTER('group_metadata') });
   // The waiting calls get the core closed error, as a rejection.
-  await assert.rejects(leave.poll({ timeout: 0 }), { constructor: IllegalStateError, message: CLOSED });
-  await assert.rejects(leave.subscribe({ topics: [TOPIC] }), { constructor: IllegalStateError, message: CLOSED });
+  for (const call of [
+    () => leave.poll({ timeout: 0 }),
+    () => leave.subscribe({ topics: [TOPIC] }),
+    () => leave.commitSync(),
+    () => leave.commitSync({ timeout: 0 }),
+    () => leave.commitSync({ offsets: new TopicPartitionMap() }),
+    () => leave.commitSync({ offsets: new TopicPartitionMap(), timeout: 0 }),
+    () => leave.commitAsync(),
+    () => leave.seek({ partition: TP0, offset: 0 }),
+    () => leave.seek({ partition: TP0, offsetAndMetadata: new OffsetAndMetadata(0) }),
+    () => leave.seekToBeginning({ partitions: [TP0] }),
+    () => leave.seekToEnd({ partitions: [TP0] }),
+    () => leave.position({ partition: TP0 }),
+    () => leave.position({ partition: TP0, timeout: 0 }),
+    () => leave.committed({ partitions: [TP0] }),
+    () => leave.committed({ partitions: [TP0], timeout: 0 }),
+    () => leave.currentLag({ topicPartition: TP0 }),
+  ]) {
+    await assert.rejects(call(), { constructor: IllegalStateError, message: CLOSED });
+  }
   // A second close is harmless.
   await leave.close();
   await leave[Symbol.asyncDispose]();
@@ -889,6 +1256,22 @@ test('a Promise method never throws: it rejects', () => {
     () => consumer.poll('x'),
     // @ts-expect-error a wrong argument
     () => consumer.close(1),
+    // @ts-expect-error a wrong argument
+    () => consumer.commitSync('x'),
+    // @ts-expect-error a wrong argument
+    () => consumer.commitAsync(1),
+    // @ts-expect-error a wrong argument
+    () => consumer.seek(1),
+    // @ts-expect-error a wrong argument
+    () => consumer.seekToBeginning(1),
+    // @ts-expect-error a wrong argument
+    () => consumer.seekToEnd(1),
+    // @ts-expect-error a wrong argument
+    () => consumer.position(1),
+    // @ts-expect-error a wrong argument
+    () => consumer.committed(1),
+    // @ts-expect-error a wrong argument
+    () => consumer.currentLag(1),
   ]) {
     const result = call();
     assert.ok(result instanceof Promise);

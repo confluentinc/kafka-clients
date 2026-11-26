@@ -1110,6 +1110,39 @@ async function consumerUsage(): Promise<void> {
   expectTypeOf(consumer.assignment()).toEqualTypeOf<TopicPartitionSet>();
   expectTypeOf(consumer.paused()).toEqualTypeOf<TopicPartitionSet>();
   expectTypeOf(consumer.subscription()).toEqualTypeOf<Set<string>>();
+  // The commits: four commitSync forms, commitAsync() without a callback yet.
+  const offsets = new TopicPartitionMap<OffsetAndMetadata>([[tp, new OffsetAndMetadata(5)]]);
+  expectTypeOf(consumer.commitSync()).toEqualTypeOf<Promise<void>>();
+  await consumer.commitSync({ timeout: 100 });
+  await consumer.commitSync(100);
+  await consumer.commitSync({ offsets });
+  await consumer.commitSync(offsets);
+  await consumer.commitSync({ offsets, timeout: 100 });
+  // @ts-expect-error a Map keyed by TopicPartition is no TopicPartitionMap
+  await consumer.commitSync({ offsets: new Map([[tp, new OffsetAndMetadata(5)]]) });
+  expectTypeOf(consumer.commitAsync()).toEqualTypeOf<Promise<void>>();
+  // @ts-expect-error the callback forms come with the commit callbacks
+  await consumer.commitAsync({ callback: () => undefined });
+  // The seeks and the position.
+  await consumer.seek({ partition: tp, offset: 5 });
+  await consumer.seek({ partition: tp, offset: 5n });
+  await consumer.seek({ partition: tp, offsetAndMetadata: new OffsetAndMetadata(5) });
+  // @ts-expect-error the two seek forms at once
+  await consumer.seek({ partition: tp, offset: 5, offsetAndMetadata: new OffsetAndMetadata(5) });
+  await consumer.seekToBeginning({ partitions: [tp] });
+  await consumer.seekToEnd([tp]);
+  expectTypeOf(await consumer.position({ partition: tp })).toEqualTypeOf<bigint>();
+  expectTypeOf(await consumer.position(tp)).toEqualTypeOf<bigint>();
+  expectTypeOf(await consumer.position({ partition: tp, timeout: 100 })).toEqualTypeOf<bigint>();
+  const committed = await consumer.committed({ partitions: [tp] });
+  expectTypeOf(committed).toEqualTypeOf<TopicPartitionMap<OffsetAndMetadata | null>>();
+  expectTypeOf(committed.get(tp)).toEqualTypeOf<OffsetAndMetadata | null>();
+  expectTypeOf(await consumer.committed({ partitions: new Set([tp]), timeout: 100 })).toEqualTypeOf<
+    TopicPartitionMap<OffsetAndMetadata | null>
+  >();
+  expectTypeOf(await consumer.currentLag({ topicPartition: tp })).toEqualTypeOf<bigint | null>();
+  expectTypeOf(await consumer.currentLag(tp)).toEqualTypeOf<bigint | null>();
+  expectTypeOf(consumer.groupMetadata()).toEqualTypeOf<ConsumerGroupMetadata>();
   const records = await consumer.poll({ timeout: 100 });
   expectTypeOf(records).toEqualTypeOf<ConsumerRecords<Buffer, Buffer>>();
   expectTypeOf(await consumer.poll(100)).toEqualTypeOf<ConsumerRecords<Buffer, Buffer>>();

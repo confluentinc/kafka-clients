@@ -136,7 +136,7 @@ napi_value topic_partition_to_js(napi_env env, const kafka_common_TopicPartition
 
 // A borrowed map of TopicPartition to OffsetAndMetadata as an array of
 // [topic, partition, offset (a bigint), leaderEpoch (-1 for none), metadata],
-// NULL when Node-API failed.
+// or [topic, partition, null] for a NULL value; NULL when Node-API failed.
 napi_value offset_map_to_js(napi_env env, const kafka_Map_t* map);
 
 // A KafkaError for a BORROWED error (never destroyed here), or `null` for
@@ -385,6 +385,20 @@ napi_value tp_list_take_to_js(napi_env env, kafka_List_t* list);
 // int64_t: 0, or -1 with a TypeError or RangeError naming `what` pending.
 int js_int64(napi_env env, napi_value value, const char* what, int64_t* out);
 
+// An OffsetAndMetadata from its JS fields [offset, leaderEpoch (-1 for none),
+// metadata], owned by the caller, or NULL with a JS exception pending; freed
+// with offset_and_metadata_free (NULL is a no-op).
+kafka_consumer_OffsetAndMetadata_t* offset_and_metadata_from_js(napi_env env, napi_value fields);
+void offset_and_metadata_free(napi_env env, kafka_consumer_OffsetAndMetadata_t* om);
+
+// A map of TopicPartition to OffsetAndMetadata from JS [[topic, partition],
+// fields | null] entries (a null key or value crossing as NULL, which the FFI
+// reports), as kafka_Map_new builds it, borrowing its keys and values:
+// offset_map_free destroys them, then the map, after the call (NULL is a
+// no-op). NULL with a JS exception pending on failure.
+kafka_Map_t* offset_map_from_js(napi_env env, napi_value entries);
+void offset_map_free(napi_env env, kafka_Map_t* map);
+
 // ---- headers.c -------------------------------------------------------------
 
 // A new native RecordHeaders holding a copy of a record's headers: `pairs` is
@@ -489,6 +503,17 @@ napi_value js_consumer_close(napi_env env, napi_callback_info info);
 napi_value js_consumer_record_headers(napi_env env, napi_callback_info info);
 napi_value js_consumer_stats(napi_env env, napi_callback_info info);
 napi_value js_consumer_refuse_external_buffers(napi_env env, napi_callback_info info);
+// consumer.c: the commits, the committed offsets, the group metadata, the
+// seeks, the positions and the lag.
+napi_value js_consumer_commit_sync(napi_env env, napi_callback_info info);
+napi_value js_consumer_commit_async(napi_env env, napi_callback_info info);
+napi_value js_consumer_seek(napi_env env, napi_callback_info info);
+napi_value js_consumer_seek_to_beginning(napi_env env, napi_callback_info info);
+napi_value js_consumer_seek_to_end(napi_env env, napi_callback_info info);
+napi_value js_consumer_position(napi_env env, napi_callback_info info);
+napi_value js_consumer_committed(napi_env env, napi_callback_info info);
+napi_value js_consumer_current_lag(napi_env env, napi_callback_info info);
+napi_value js_consumer_group_metadata(napi_env env, napi_callback_info info);
 
 // headers.c: the counts of the RecordHeaders the sends made.
 napi_value js_header_stats(napi_env env, napi_callback_info info);

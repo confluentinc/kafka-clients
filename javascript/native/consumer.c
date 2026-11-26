@@ -22,8 +22,9 @@
 // (callback_queue.c) drains it on the JS thread. Each `_cb` call is counted
 // on the queue (cbq_call_begin right before it, cbq_call_end as the last
 // statement of its completion, on every path), so a call made on a closed
-// consumer holds Node until its answer ran. The three getters, wakeup() and
-// metrics() have no `_cb` twin and go through their fallible or `_err` form.
+// consumer holds Node until its answer ran. The three getters,
+// groupMetadata(), wakeup() and metrics() have no `_cb` twin and go through
+// their fallible or `_err` form.
 //
 // The records of a poll (Batch): the ConsumerRecords handle the completion
 // receives owns every record and the bytes behind their keys and values, and
@@ -599,11 +600,11 @@ napi_value js_consumer_subscribe_pattern(napi_env env, napi_callback_info info) 
     return NULL;
 }
 
-typedef enum { TP_ASSIGN, TP_PAUSE, TP_RESUME } TpCall;
+typedef enum { TP_ASSIGN, TP_PAUSE, TP_RESUME, TP_SEEK_TO_BEGINNING, TP_SEEK_TO_END } TpCall;
 
-// The calls taking partitions: an array of [topic, partition] (a null element
-// crosses as NULL), or null. The list borrows its TopicPartitions, which are
-// destroyed after the call.
+// The calls taking partitions and answered with nothing: an array of [topic,
+// partition] (a null element crosses as NULL), or null. The list borrows its
+// TopicPartitions, which are destroyed after the call.
 static napi_value tp_call(napi_env env, napi_callback_info info, TpCall which, const char* shape) {
     napi_value argv[3];
     int is_null = 0;
@@ -619,6 +620,12 @@ static napi_value tp_call(napi_env env, napi_callback_info info, TpCall which, c
         } else if (which == TP_PAUSE) {
             cbq_call_begin(env, &c->queue);
             kafka_consumer_Consumer_pause_cb(c->view, partitions, void_on_complete, ctx);
+        } else if (which == TP_SEEK_TO_BEGINNING) {
+            cbq_call_begin(env, &c->queue);
+            kafka_consumer_Consumer_seek_to_beginning_cb(c->view, partitions, void_on_complete, ctx);
+        } else if (which == TP_SEEK_TO_END) {
+            cbq_call_begin(env, &c->queue);
+            kafka_consumer_Consumer_seek_to_end_cb(c->view, partitions, void_on_complete, ctx);
         } else {
             cbq_call_begin(env, &c->queue);
             kafka_consumer_Consumer_resume_cb(c->view, partitions, void_on_complete, ctx);
@@ -641,6 +648,17 @@ napi_value js_consumer_pause(napi_env env, napi_callback_info info) {
 // consumerResume(handle, partitions, done): Java's resume(Collection).
 napi_value js_consumer_resume(napi_env env, napi_callback_info info) {
     return tp_call(env, info, TP_RESUME, "resume(handle, partitions, done)");
+}
+
+// consumerSeekToBeginning(handle, partitions, done): Java's
+// seekToBeginning(Collection).
+napi_value js_consumer_seek_to_beginning(napi_env env, napi_callback_info info) {
+    return tp_call(env, info, TP_SEEK_TO_BEGINNING, "seekToBeginning(handle, partitions, done)");
+}
+
+// consumerSeekToEnd(handle, partitions, done): Java's seekToEnd(Collection).
+napi_value js_consumer_seek_to_end(napi_env env, napi_callback_info info) {
+    return tp_call(env, info, TP_SEEK_TO_END, "seekToEnd(handle, partitions, done)");
 }
 
 // consumerUnsubscribe(handle, done): Java's unsubscribe().
@@ -761,6 +779,381 @@ napi_value js_consumer_metrics(napi_env env, napi_callback_info info) {
         return NULL;
     }
     return metrics_view_take_to_js(env, view);
+}
+
+// ---- commits, committed offsets and the group metadata ---------------------
+
+// Reads the optional timeout of a timed form: null for the form without one,
+// else its milliseconds (a negative one goes to the FFI, which rejects it).
+// 0 with *timed set, or -1 with a JS exception pending.
+static int timeout_arg(napi_env env, napi_value value, const char* what, int* timed, int64_t* out) {
+    napi_valuetype type;
+    NAPI_CHECK(env, napi_typeof(env, value, &type), -1);
+    *timed = type != napi_null;
+    *out = 0;
+    return *timed ? js_int64(env, value, what, out) : 0;
+}
+
+// consumerCommitSync(handle, withOffsets, offsets, timeoutMs, done): Java's
+// four commitSync forms through their `_cb` twins: commitSync() and
+// commitSync(Duration) when `withOffsets` is false, else the forms taking
+// `offsets`, an array of [[topic, partition], [offset, leaderEpoch (-1 for
+// none), metadata] | null] entries, or null, which the FFI reports. timeoutMs
+// null for the forms without a timeout.
+napi_value js_consumer_commit_sync(napi_env env, napi_callback_info info) {
+    size_t argc = 5;
+    napi_value argv[5];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    bool with_offsets = false;
+    if (argc != 5 || napi_get_value_bool(env, argv[1], &with_offsets) != napi_ok || !is_function(env, argv[4])) {
+        napi_throw_type_error(env, NULL, "commitSync(handle, withOffsets, offsets, timeoutMs, done)");
+        return NULL;
+    }
+    Consumer* c = unwrap_consumer(env, argv[0]);
+    if (c == NULL) return NULL;
+    int timed = 0;
+    int64_t timeout = 0;
+    if (timeout_arg(env, argv[3], "commitSync timeoutMs", &timed, &timeout) != 0) return NULL;
+    napi_valuetype type;
+    NAPI_CHECK(env, napi_typeof(env, argv[2], &type), NULL);
+    kafka_Map_t* offsets = NULL;
+    if (with_offsets && type != napi_null && (offsets = offset_map_from_js(env, argv[2])) == NULL) return NULL;
+    VoidCtx* ctx = void_ctx_new(env, c, argv[4]);
+    if (ctx != NULL) {
+        if (!with_offsets && !timed) {
+            cbq_call_begin(env, &c->queue);
+            kafka_consumer_Consumer_commit_sync_cb(c->view, void_on_complete, ctx);
+        } else if (!with_offsets) {
+            cbq_call_begin(env, &c->queue);
+            kafka_consumer_Consumer_commit_sync_with_timeout_cb(c->view, timeout, void_on_complete, ctx);
+        } else if (!timed) {
+            cbq_call_begin(env, &c->queue);
+            kafka_consumer_Consumer_commit_sync_with_offsets_cb(c->view, offsets, void_on_complete, ctx);
+        } else {
+            cbq_call_begin(env, &c->queue);
+            kafka_consumer_Consumer_commit_sync_with_offsets_timeout_cb(c->view, offsets, timeout, void_on_complete, ctx);
+        }
+    }
+    // The call copied the offsets.
+    offset_map_free(env, offsets);
+    return NULL;
+}
+
+// consumerCommitAsync(handle, done): Java's commitAsync() through
+// commit_async_cb, settling once the core took the commit.
+napi_value js_consumer_commit_async(napi_env env, napi_callback_info info) {
+    size_t argc = 2;
+    napi_value argv[2];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    if (argc != 2 || !is_function(env, argv[1])) {
+        napi_throw_type_error(env, NULL, "commitAsync(handle, done)");
+        return NULL;
+    }
+    Consumer* c = unwrap_consumer(env, argv[0]);
+    if (c == NULL) return NULL;
+    VoidCtx* ctx = void_ctx_new(env, c, argv[1]);
+    if (ctx == NULL) return NULL;
+    cbq_call_begin(env, &c->queue);
+    kafka_consumer_Consumer_commit_async_cb(c->view, void_on_complete, ctx);
+    return NULL;
+}
+
+// The context of a call whose completion answers with a value: `done(error |
+// null, value | null)`.
+typedef struct {
+    Consumer* c;
+    napi_ref done;
+} ValueCtx;
+
+static ValueCtx* value_ctx_new(napi_env env, Consumer* c, napi_value done) {
+    ValueCtx* ctx = (ValueCtx*)calloc(1, sizeof(ValueCtx));
+    if (ctx == NULL) {
+        napi_throw_error(env, NULL, "out of memory");
+        return NULL;
+    }
+    ctx->c = c;
+    if (napi_create_reference(env, done, 1, &ctx->done) != napi_ok) {
+        free(ctx);
+        js_throw_last_napi_error(env, "napi_create_reference");
+        return NULL;
+    }
+    return ctx;
+}
+
+// Calls `done(error, null)` for an owned error, or `done(null, value)`, where
+// `value` is NULL when the answer could not be built (a JS exception pending),
+// which settles the call with the failure. Frees the error; the caller ends
+// the call's count.
+static void value_settle(napi_env env, ValueCtx* ctx, kafka_common_Error_t* error, napi_value value, const char* what) {
+    napi_value argv[2] = {NULL, NULL};
+    if (error != NULL) {
+        argv[0] = error_take_to_js(env, error);
+        if (argv[0] == NULL) argv[0] = js_take_failure(env, what);
+        if (argv[0] != NULL && napi_get_null(env, &argv[1]) != napi_ok) argv[0] = NULL;
+    } else if (value == NULL) {
+        argv[0] = js_take_failure(env, what);
+        if (argv[0] != NULL && napi_get_null(env, &argv[1]) != napi_ok) argv[0] = NULL;
+    } else if (napi_get_null(env, &argv[0]) == napi_ok) {
+        argv[1] = value;
+    }
+    if (argv[0] != NULL && argv[1] != NULL) call_ref(env, ctx->done, 2, argv, NULL);
+    else js_warn_thrown(env);
+}
+
+// The committed_cb completion: the owned map of TopicPartition to
+// OffsetAndMetadata, a NULL value for a partition with no committed offset,
+// as offset_map_to_js reads it; the map freed.
+static void committed_on_complete(kafka_Map_t* value, kafka_common_Error_t* error, void* opaque) {
+    error_stat_owned(error);
+    ValueCtx* ctx = (ValueCtx*)opaque;
+    Consumer* c = ctx->c;
+    napi_env env = c->env;
+    kafka_common_Error_t* ffi_err = NULL;
+    if (!c->queue.finalizing) {
+        napi_value entries = error == NULL && value != NULL ? offset_map_to_js(env, value) : NULL;
+        if (entries == NULL && error == NULL) js_throw_last_napi_error(env, "reading the committed offsets");
+        value_settle(env, ctx, error, entries, "converting a committed() answer");
+        error = NULL;
+    }
+    if (value != NULL) error_warn(env, !c->queue.finalizing, FFI_ERR(kafka_Map_destroy_err(value, &ffi_err)));
+    error_discard(error);
+    delete_ref(env, &ctx->done);
+    free(ctx);
+    cbq_call_end(env, &c->queue);
+}
+
+// consumerCommitted(handle, partitions, timeoutMs, done): Java's committed(Set)
+// and committed(Set, Duration); `partitions` an array of [topic, partition]
+// (a null element crosses as NULL), or null, which the FFI reports.
+// `done(error | null, entries | null)`, the entries as offset_map_to_js gives
+// them.
+napi_value js_consumer_committed(napi_env env, napi_callback_info info) {
+    size_t argc = 4;
+    napi_value argv[4];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    if (argc != 4 || !is_function(env, argv[3])) {
+        napi_throw_type_error(env, NULL, "committed(handle, partitions, timeoutMs, done)");
+        return NULL;
+    }
+    Consumer* c = unwrap_consumer(env, argv[0]);
+    if (c == NULL) return NULL;
+    int timed = 0;
+    int64_t timeout = 0;
+    if (timeout_arg(env, argv[2], "committed timeoutMs", &timed, &timeout) != 0) return NULL;
+    napi_valuetype type;
+    NAPI_CHECK(env, napi_typeof(env, argv[1], &type), NULL);
+    kafka_List_t* partitions = type == napi_null ? NULL : tp_list_from_js(env, argv[1]);
+    if (type != napi_null && partitions == NULL) return NULL;
+    ValueCtx* ctx = value_ctx_new(env, c, argv[3]);
+    if (ctx != NULL && !timed) {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_Consumer_committed_cb(c->view, partitions, committed_on_complete, ctx);
+    } else if (ctx != NULL) {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_Consumer_committed_with_timeout_cb(c->view, partitions, timeout, committed_on_complete, ctx);
+    }
+    list_free(env, partitions, tp_item_destroy);
+    return NULL;
+}
+
+// consumerGroupMetadata(handle): Java's groupMetadata() through its fallible
+// form, as [groupId, generationId, memberId, groupInstanceId (null for none)].
+napi_value js_consumer_group_metadata(napi_env env, napi_callback_info info) {
+    Consumer* c = handle_arg(env, info, "groupMetadata(handle)");
+    if (c == NULL) return NULL;
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_consumer_ConsumerGroupMetadata_t* m = NULL;
+    kafka_common_Error_t* err = FFI_SET(m, kafka_consumer_Consumer_group_metadata(c->view, &ffi_err));
+    if (err != NULL) {
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    const char* group_id = NULL;
+    const char* member_id = NULL;
+    const char* instance_id = NULL;
+    int32_t generation = -1;
+    // The strings are borrowed from the metadata, read before it is freed.
+    err = FFI_SET(group_id, kafka_consumer_ConsumerGroupMetadata_group_id_err(m, &ffi_err));
+    if (err == NULL) err = FFI_SET(generation, kafka_consumer_ConsumerGroupMetadata_generation_id_err(m, &ffi_err));
+    if (err == NULL) err = FFI_SET(member_id, kafka_consumer_ConsumerGroupMetadata_member_id_err(m, &ffi_err));
+    if (err == NULL) err = FFI_SET(instance_id, kafka_consumer_ConsumerGroupMetadata_group_instance_id_err(m, &ffi_err));
+    napi_value arr = NULL, v;
+    if (err == NULL) {
+        if (napi_create_array_with_length(env, 4, &arr) != napi_ok
+            || napi_create_string_utf8(env, group_id != NULL ? group_id : "", NAPI_AUTO_LENGTH, &v) != napi_ok
+            || napi_set_element(env, arr, 0, v) != napi_ok || napi_create_int32(env, generation, &v) != napi_ok
+            || napi_set_element(env, arr, 1, v) != napi_ok
+            || napi_create_string_utf8(env, member_id != NULL ? member_id : "", NAPI_AUTO_LENGTH, &v) != napi_ok
+            || napi_set_element(env, arr, 2, v) != napi_ok
+            || (instance_id != NULL ? napi_create_string_utf8(env, instance_id, NAPI_AUTO_LENGTH, &v) : napi_get_null(env, &v)) != napi_ok
+            || napi_set_element(env, arr, 3, v) != napi_ok) {
+            js_throw_last_napi_error(env, "reading the group metadata");
+            arr = NULL;
+        }
+    }
+    error_warn(env, 1, FFI_ERR(kafka_consumer_ConsumerGroupMetadata_destroy_err(m, &ffi_err)));
+    if (err != NULL) error_throw_owned(env, err);
+    return arr;
+}
+
+// ---- seeks, positions and lag -----------------------------------------------
+
+// A [topic, partition] argument as an owned TopicPartition, or NULL for null,
+// which the FFI reports. 0, or -1 with a JS exception pending.
+static int partition_arg(napi_env env, napi_value value, kafka_common_TopicPartition_t** out) {
+    napi_valuetype type;
+    *out = NULL;
+    NAPI_CHECK(env, napi_typeof(env, value, &type), -1);
+    if (type == napi_null) return 0;
+    *out = tp_from_js(env, value);
+    return *out == NULL ? -1 : 0;
+}
+
+static void partition_free(napi_env env, kafka_common_TopicPartition_t* tp) {
+    kafka_common_Error_t* ffi_err = NULL;
+    if (tp != NULL) error_warn(env, 1, FFI_ERR(kafka_common_TopicPartition_destroy_err(tp, &ffi_err)));
+}
+
+// consumerSeek(handle, partition, withMetadata, offset, done): Java's
+// seek(TopicPartition, long) through seek_with_offset_cb when `withMetadata`
+// is false, `offset` a bigint or a number, else seek(TopicPartition,
+// OffsetAndMetadata) through seek_with_offset_and_metadata_cb, `offset` the
+// OffsetAndMetadata's [offset, leaderEpoch (-1 for none), metadata], or
+// null, which the FFI reports. A null partition crosses as NULL too.
+napi_value js_consumer_seek(napi_env env, napi_callback_info info) {
+    size_t argc = 5;
+    napi_value argv[5];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    bool with_metadata = false;
+    if (argc != 5 || napi_get_value_bool(env, argv[2], &with_metadata) != napi_ok || !is_function(env, argv[4])) {
+        napi_throw_type_error(env, NULL, "seek(handle, partition, withMetadata, offset, done)");
+        return NULL;
+    }
+    Consumer* c = unwrap_consumer(env, argv[0]);
+    if (c == NULL) return NULL;
+    int64_t offset = 0;
+    kafka_consumer_OffsetAndMetadata_t* om = NULL;
+    if (!with_metadata) {
+        if (js_int64(env, argv[3], "seek offset", &offset) != 0) return NULL;
+    } else {
+        napi_valuetype type;
+        NAPI_CHECK(env, napi_typeof(env, argv[3], &type), NULL);
+        if (type != napi_null && (om = offset_and_metadata_from_js(env, argv[3])) == NULL) return NULL;
+    }
+    kafka_common_TopicPartition_t* tp = NULL;
+    if (partition_arg(env, argv[1], &tp) != 0) {
+        offset_and_metadata_free(env, om);
+        return NULL;
+    }
+    VoidCtx* ctx = void_ctx_new(env, c, argv[4]);
+    if (ctx != NULL && !with_metadata) {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_Consumer_seek_with_offset_cb(c->view, tp, offset, void_on_complete, ctx);
+    } else if (ctx != NULL) {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_Consumer_seek_with_offset_and_metadata_cb(c->view, tp, om, void_on_complete, ctx);
+    }
+    // The call copied the partition and the offset.
+    partition_free(env, tp);
+    offset_and_metadata_free(env, om);
+    return NULL;
+}
+
+// The position_cb completion: `done(error | null, position | null)`, the
+// position a bigint.
+static void position_on_complete(int64_t value, kafka_common_Error_t* error, void* opaque) {
+    error_stat_owned(error);
+    ValueCtx* ctx = (ValueCtx*)opaque;
+    Consumer* c = ctx->c;
+    napi_env env = c->env;
+    if (!c->queue.finalizing) {
+        napi_value position = NULL;
+        if (error == NULL && napi_create_bigint_int64(env, value, &position) != napi_ok) {
+            js_throw_last_napi_error(env, "napi_create_bigint_int64");
+            position = NULL;
+        }
+        value_settle(env, ctx, error, position, "converting a position() answer");
+        error = NULL;
+    }
+    error_discard(error);
+    delete_ref(env, &ctx->done);
+    free(ctx);
+    cbq_call_end(env, &c->queue);
+}
+
+// consumerPosition(handle, partition, timeoutMs, done): Java's
+// position(TopicPartition) and position(TopicPartition, Duration).
+napi_value js_consumer_position(napi_env env, napi_callback_info info) {
+    size_t argc = 4;
+    napi_value argv[4];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    if (argc != 4 || !is_function(env, argv[3])) {
+        napi_throw_type_error(env, NULL, "position(handle, partition, timeoutMs, done)");
+        return NULL;
+    }
+    Consumer* c = unwrap_consumer(env, argv[0]);
+    if (c == NULL) return NULL;
+    int timed = 0;
+    int64_t timeout = 0;
+    if (timeout_arg(env, argv[2], "position timeoutMs", &timed, &timeout) != 0) return NULL;
+    kafka_common_TopicPartition_t* tp = NULL;
+    if (partition_arg(env, argv[1], &tp) != 0) return NULL;
+    ValueCtx* ctx = value_ctx_new(env, c, argv[3]);
+    if (ctx != NULL && !timed) {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_Consumer_position_cb(c->view, tp, position_on_complete, ctx);
+    } else if (ctx != NULL) {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_Consumer_position_with_timeout_cb(c->view, tp, timeout, position_on_complete, ctx);
+    }
+    partition_free(env, tp);
+    return NULL;
+}
+
+// The current_lag_cb completion: `done(error | null, lag)`, the lag a bigint,
+// or null for Java's empty OptionalLong.
+static void current_lag_on_complete(int8_t present, int64_t lag, kafka_common_Error_t* error, void* opaque) {
+    error_stat_owned(error);
+    ValueCtx* ctx = (ValueCtx*)opaque;
+    Consumer* c = ctx->c;
+    napi_env env = c->env;
+    if (!c->queue.finalizing) {
+        napi_value value = NULL;
+        if (error == NULL
+            && (present ? napi_create_bigint_int64(env, lag, &value) : napi_get_null(env, &value)) != napi_ok) {
+            js_throw_last_napi_error(env, "reading the lag");
+            value = NULL;
+        }
+        value_settle(env, ctx, error, value, "converting a currentLag() answer");
+        error = NULL;
+    }
+    error_discard(error);
+    delete_ref(env, &ctx->done);
+    free(ctx);
+    cbq_call_end(env, &c->queue);
+}
+
+// consumerCurrentLag(handle, partition, done): Java's
+// currentLag(TopicPartition) through current_lag_cb.
+napi_value js_consumer_current_lag(napi_env env, napi_callback_info info) {
+    size_t argc = 3;
+    napi_value argv[3];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    if (argc != 3 || !is_function(env, argv[2])) {
+        napi_throw_type_error(env, NULL, "currentLag(handle, partition, done)");
+        return NULL;
+    }
+    Consumer* c = unwrap_consumer(env, argv[0]);
+    if (c == NULL) return NULL;
+    kafka_common_TopicPartition_t* tp = NULL;
+    if (partition_arg(env, argv[1], &tp) != 0) return NULL;
+    ValueCtx* ctx = value_ctx_new(env, c, argv[2]);
+    if (ctx != NULL) {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_Consumer_current_lag_cb(c->view, tp, current_lag_on_complete, ctx);
+    }
+    partition_free(env, tp);
+    return NULL;
 }
 
 // ---- a record's headers -----------------------------------------------------
