@@ -17,7 +17,8 @@
 // check-zero-copy (javascript/CLAUDE.md boundary rule 8: no copy of the
 // app's key and value; the addon borrows each Buffer until the hand-over). A
 // heuristic (PLAN.md §8 decision 13), on the send path (native/record.c,
-// native/producer.c):
+// native/producer.c, and native/mock_values.c, where a mock's send keeps its
+// record):
 //   - the key and value cross from JavaScript through
 //     `napi_get_typedarray_info` / `napi_get_buffer_info` into a
 //     `kafka_Bytes_t` (a function that reads one of them sets a `.data`
@@ -56,7 +57,7 @@
 const { cModel, applyAllowlist, siteKey } = require('../c_model');
 const { scan } = require('../c_source');
 
-const SEND_PATH = ['native/record.c', 'native/producer.c'];
+const SEND_PATH = ['native/record.c', 'native/producer.c', 'native/mock_values.c'];
 
 /** The mark of a file `cargo xtask generate-error-codes` writes. */
 const GENERATED = /GENERATED, DO NOT EDIT/;
@@ -153,10 +154,10 @@ const ALLOWED = [
   { key: 'native/producer.c:producer_handle_new:calloc#1', reason: 'the producer struct' },
   { key: 'native/producer.c:js_mock_producer_send:calloc#1', reason: "a mock's send's context" },
   {
-    key: 'native/producer.c:js_mock_producer_send:calloc#2',
-    reason: "the record a mock keeps: a reference to the app's ProducerRecord, no copy of its key or value",
+    key: 'native/mock_values.c:mock_record_new:calloc#1',
+    reason: "the record a mock keeps: a reference to the app's record, no copy of its key or value",
   },
-  { key: 'native/producer.c:injected_error_new:calloc#1', reason: 'an error JS gives a mock: a reference to it, no record' },
+  { key: 'native/mock_values.c:injected_error_new:calloc#1', reason: 'an error JS gives a mock: a reference to it, no record' },
 ];
 
 /** The text of each argument naming `field` (`&ctx->key_ref`) among the calls of `names` in `fns`. */

@@ -458,11 +458,48 @@ napi_value node_to_js(napi_env env, const kafka_common_Node_t* n);
 napi_value partitions_to_js(napi_env env, const kafka_List_t* list);
 napi_value partitions_take_to_js(napi_env env, kafka_List_t* list);
 
-// producer.c: the JS value an error JS gave a mock carries, for the
-// LocalCallbackError `opaque` the mock's error holds, or NULL when `opaque`
-// is not one (another callback's error) or its value is gone (the mock
-// destroyed).
+// ---- mock_values.c ---------------------------------------------------------
+
+// A record a mock keeps: its key and value cross as the `void *` addresses of
+// `key_tag` and `value_tag`, which the FFI's mock keeps without reading, and
+// the mock finds the record again from the key it hands back. The reference
+// holds the app's record, and so its key and value, as long as the mock
+// keeps the record.
+typedef struct MockRecord MockRecord;
+struct MockRecord {
+    napi_ref record;
+    char key_tag;
+    char value_tag;
+    MockRecord* next;
+};
+
+// A new MockRecord holding `record`; NULL with a JS exception pending.
+MockRecord* mock_record_new(napi_env env, napi_value record);
+void mock_record_free(napi_env env, MockRecord* r);
+// Frees every record of `list` and empties it.
+void mock_records_free(napi_env env, MockRecord** list);
+// The record whose key crossed as `key`, or NULL for NULL.
+MockRecord* mock_record_of(const void* key);
+
+// An error JS gave a mock, which the core carries as a LocalCallbackError.
+typedef struct InjectedError InjectedError;
+// The core's error for JS value `value`: NULL for `null`, else a
+// LocalCallbackError carrying it, held on the mock's `list` until the core
+// holds no copy of it. Throws and returns -1 on failure.
+int injected_error_new(napi_env env, InjectedError** list, napi_value value, kafka_common_Error_t** out);
+// Lets go of every error of `list`, at the mock's destroy.
+void injected_errors_release(napi_env env, InjectedError** list);
+// Lets go of the errors of `list` the core holds no copy of any more: run by
+// every mock call.
+void injected_errors_sweep(napi_env env, InjectedError** list);
+// The JS value an error JS gave a mock carries, for the LocalCallbackError
+// `opaque` the mock's error holds, or NULL when `opaque` is not one (another
+// callback's error) or its value is gone (the mock destroyed).
 napi_value injected_error_value(napi_env env, void* opaque);
+// Test-only: the counts of every mock's records and injected errors, made and
+// freed, set on `obj` (producerStats(), consumerStats()). -1 when Node-API
+// failed, with no JS exception pending.
+int mock_values_stats_put(napi_env env, napi_value obj);
 
 // ---- the native functions addon.c registers -----------------------------------
 

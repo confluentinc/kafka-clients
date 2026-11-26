@@ -81,8 +81,6 @@
 #include "util.h"
 
 typedef struct SendCtx SendCtx;
-typedef struct MockRecord MockRecord;
-typedef struct InjectedError InjectedError;
 
 typedef struct {
     napi_env env;                              // the environment that created it (JS thread)
@@ -192,10 +190,6 @@ static atomic_long stat_deferrals_reported;
 static atomic_long stat_deferrals_released;
 static atomic_long stat_buffer_refs_taken;
 static atomic_long stat_buffer_refs_released;
-static atomic_long stat_mock_records_made;
-static atomic_long stat_mock_records_freed;
-static atomic_long stat_injected_made;
-static atomic_long stat_injected_freed;
 
 static void producer_release(Producer* p) {
     atomic_fetch_add(&stat_owner_units_released, 1);
@@ -238,106 +232,6 @@ static void slot_give_back(Producer* p, int32_t i) {
     p->free_next[i] = p->free_head;
     p->free_head = i;
     atomic_fetch_add(&stat_slots_returned, 1);
-}
-
-// ---- a mock's records and errors --------------------------------------------
-
-// A record a MockProducer keeps (javascript/CLAUDE.md, JavaScript Binding
-// Conventions, Implementation over the FFI): its key and value cross as
-// the `void *` addresses of `key_tag` and `value_tag`, which the FFI's mock
-// keeps without reading, and `history()` finds the record again from the key
-// it hands back. The reference holds the app's ProducerRecord, and so its key
-// and value, from the send until clear() (for a record its hand-over took)
-// or the destroy.
-struct MockRecord {
-    napi_ref record;
-    char key_tag;
-    char value_tag;
-    MockRecord* next;
-};
-
-static void mock_record_free(napi_env env, MockRecord* r) {
-    delete_ref(env, &r->record);
-    free(r);
-    atomic_fetch_add(&stat_mock_records_freed, 1);
-}
-
-static void mock_records_free(napi_env env, MockRecord** list) {
-    while (*list != NULL) {
-        MockRecord* r = *list;
-        *list = r->next;
-        mock_record_free(env, r);
-    }
-}
-
-// The record whose key crossed as `key`, or NULL for a pointer no mock's
-// send made (none: the FFI's mock hands back the pointers it was given).
-static MockRecord* mock_record_of(const void* key) {
-    if (key == NULL) return NULL;
-    return (MockRecord*)((const char*)key - offsetof(MockRecord, key_tag));
-}
-
-// An error JS gave a mock (setSendException, errorNext, ...): the core
-// carries it as a LocalCallbackError whose opaque is this struct, and
-// error.c hands the very same JS value back (javascript/CLAUDE.md, JavaScript
-// Binding Conventions, Errors). Two owners: the core's error, which
-// releases it from any thread once its last copy is dropped
-// (injected_error_release), and the producer struct, which deletes the
-// reference on the JS thread once the core's copies are gone (the sweep of
-// every mock call, injected_errors_sweep) or at the destroy
-// (injected_errors_release); the struct is freed by the last of them, and a
-// value read after the destroy is the core's plain error.
-struct InjectedError {
-    uint32_t magic;
-    atomic_int owners;
-    napi_env env;
-    napi_ref value;
-    InjectedError* next;
-};
-
-#define INJECTED_ERROR_MAGIC 0x4a53494eu
-
-static void injected_error_release(void* opaque) {
-    InjectedError* e = (InjectedError*)opaque;
-    if (atomic_fetch_sub(&e->owners, 1) == 1) {
-        free(e);
-        atomic_fetch_add(&stat_injected_freed, 1);
-    }
-}
-
-static void injected_errors_release(napi_env env, Producer* p) {
-    while (p->injected != NULL) {
-        InjectedError* e = p->injected;
-        p->injected = e->next;
-        delete_ref(env, &e->value);
-        injected_error_release(e);
-    }
-}
-
-// The errors the core holds no copy of any more (the producer struct is their
-// last owner): their references are deleted, on the JS thread, so a value JS
-// gave the mock is collectable once the core is done with it. Run by every
-// mock call (unwrap_mock).
-static void injected_errors_sweep(napi_env env, Producer* p) {
-    InjectedError** link = &p->injected;
-    while (*link != NULL) {
-        InjectedError* e = *link;
-        if (atomic_load(&e->owners) == 1) {
-            *link = e->next;
-            delete_ref(env, &e->value);
-            injected_error_release(e);
-        } else {
-            link = &e->next;
-        }
-    }
-}
-
-napi_value injected_error_value(napi_env env, void* opaque) {
-    InjectedError* e = (InjectedError*)opaque;
-    napi_value value = NULL;
-    if (e == NULL || e->magic != INJECTED_ERROR_MAGIC || e->env != env || e->value == NULL) return NULL;
-    if (napi_get_reference_value(env, e->value, &value) != napi_ok) return NULL;
-    return value;
 }
 
 // ---- RecordMetadata ---------------------------------------------------------
@@ -427,8 +321,6 @@ static void send_ctx_destroy_future(napi_env env, SendCtx* ctx) {
 static void send_ctx_maybe_destroy_future(napi_env env, SendCtx* ctx) {
     if (ctx->delivered && ctx->waits == 0 && (ctx->js_settled || !ctx->js_holds)) send_ctx_destroy_future(env, ctx);
 }
-
-static void mock_record_free(napi_env env, MockRecord* r);
 
 // Takes a mock's send off p->mock_pending, once.
 static void mock_pending_unlink(SendCtx* ctx) {
@@ -1573,7 +1465,7 @@ static void producer_destroy(napi_env env, Producer* p) {
     }
     free_orphans(env, p);
     mock_records_free(env, &p->kept);
-    injected_errors_release(env, p);
+    injected_errors_release(env, &p->injected);
     cbq_release(env, &p->queue);
 }
 
@@ -1876,7 +1768,7 @@ static Producer* unwrap_mock(napi_env env, napi_value handle) {
         napi_throw_type_error(env, NULL, "not a mock producer handle");
         return NULL;
     }
-    injected_errors_sweep(env, p);
+    injected_errors_sweep(env, &p->injected);
     return p;
 }
 
@@ -1938,30 +1830,23 @@ napi_value js_mock_producer_send(napi_env env, napi_callback_info info) {
     char* topic = js_string_dup(env, argv[1], "topic must be a string");
     if (topic == NULL) return NULL;
     SendCtx* ctx = (SendCtx*)calloc(1, sizeof(SendCtx));
-    MockRecord* kept = (MockRecord*)calloc(1, sizeof(MockRecord));
-    if (ctx == NULL || kept == NULL) {
+    if (ctx == NULL) {
         free(topic);
-        free(ctx);
-        free(kept);
         napi_throw_error(env, NULL, "out of memory");
         return NULL;
     }
+    MockRecord* kept = mock_record_new(env, argv[4]);
+    if (kept == NULL) {
+        free(topic);
+        free(ctx);
+        return NULL;
+    }
     atomic_fetch_add(&stat_contexts_made, 1);
-    atomic_fetch_add(&stat_mock_records_made, 1);
     ctx->p = p;
     ctx->refs = 2;
     ctx->slot = -1;
     ctx->key.is_null = 1;
     ctx->value.is_null = 1;
-    if (napi_create_reference(env, argv[4], 1, &kept->record) != napi_ok) {
-        free(topic);
-        free(ctx);
-        free(kept);
-        atomic_fetch_add(&stat_contexts_freed, 1);
-        atomic_fetch_add(&stat_mock_records_freed, 1);
-        js_throw_last_napi_error(env, "napi_create_reference");
-        return NULL;
-    }
     ctx->mock_record = kept;
     // Pending until its delivery, or the destroy (SendCtx.mock_pending).
     ctx->mock_pending = 1;
@@ -2056,52 +1941,6 @@ napi_value js_mock_producer_clear(napi_env env, napi_callback_info info) {
     return NULL;
 }
 
-// The core's error for JS value `value`: NULL for `null`, else a
-// LocalCallbackError carrying it (InjectedError), which the producer struct
-// holds until the destroy. Throws and returns -1 on failure.
-static int injected_error_new(napi_env env, Producer* p, napi_value value, kafka_common_Error_t** out) {
-    *out = NULL;
-    napi_valuetype type;
-    NAPI_CHECK(env, napi_typeof(env, value, &type), -1);
-    if (type == napi_null) return 0;
-    InjectedError* e = (InjectedError*)calloc(1, sizeof(InjectedError));
-    if (e == NULL) {
-        napi_throw_error(env, NULL, "out of memory");
-        return -1;
-    }
-    e->magic = INJECTED_ERROR_MAGIC;
-    e->env = env;
-    atomic_init(&e->owners, 2);
-    if (napi_create_reference(env, value, 1, &e->value) != napi_ok) {
-        free(e);
-        js_throw_last_napi_error(env, "napi_create_reference");
-        return -1;
-    }
-    // The text the core logs: the error's String(), as Java's toString().
-    napi_value text;
-    char* message = NULL;
-    if (napi_coerce_to_string(env, value, &text) == napi_ok) message = js_string_dup(env, text, "the error's text");
-    if (message == NULL) {
-        napi_value ignored;
-        napi_get_and_clear_last_exception(env, &ignored);
-    }
-    kafka_common_Error_t* ffi_err = NULL;
-    kafka_common_Error_t* err =
-        FFI_SET(*out, kafka_common_Error_local_callback_err(message, e, injected_error_release, &ffi_err));
-    free(message);
-    if (err != NULL) {
-        delete_ref(env, &e->value);
-        free(e);
-        error_throw_owned(env, err);
-        return -1;
-    }
-    e->next = p->injected;
-    p->injected = e;
-    atomic_fetch_add(&stat_injected_made, 1);
-    error_stat_made(*out);
-    return 0;
-}
-
 // mockProducerSetError(handle, field, error): Java's public error field
 // `field` ("send", "flush", "partitionsFor" or "close") of the mock set to
 // `error`, or cleared by `null`, through MockProducer_set_<field>_error; the
@@ -2117,7 +1956,7 @@ napi_value js_mock_producer_set_error(napi_env env, napi_callback_info info) {
     }
     Producer* p = unwrap_mock(env, argv[0]);
     kafka_common_Error_t* error = NULL;
-    if (p == NULL || injected_error_new(env, p, argv[2], &error) != 0) {
+    if (p == NULL || injected_error_new(env, &p->injected, argv[2], &error) != 0) {
         free(field);
         return NULL;
     }
@@ -2156,7 +1995,7 @@ napi_value js_mock_producer_complete_next(napi_env env, napi_callback_info info)
     }
     Producer* p = unwrap_mock(env, argv[0]);
     kafka_common_Error_t* error = NULL;
-    if (p == NULL || injected_error_new(env, p, argv[1], &error) != 0) return NULL;
+    if (p == NULL || injected_error_new(env, &p->injected, argv[1], &error) != 0) return NULL;
     kafka_common_Error_t* ffi_err = NULL;
     int8_t completed = 0;
     error_stat_given(error);
@@ -2239,10 +2078,7 @@ napi_value js_producer_stats(napi_env env, napi_callback_info info) {
         || stat_put(env, obj, "deferralsReleased", &stat_deferrals_released)
         || stat_put(env, obj, "bufferRefsTaken", &stat_buffer_refs_taken)
         || stat_put(env, obj, "bufferRefsReleased", &stat_buffer_refs_released)
-        || stat_put(env, obj, "mockRecordsMade", &stat_mock_records_made)
-        || stat_put(env, obj, "mockRecordsFreed", &stat_mock_records_freed)
-        || stat_put(env, obj, "injectedMade", &stat_injected_made)
-        || stat_put(env, obj, "injectedFreed", &stat_injected_freed)) {
+        || mock_values_stats_put(env, obj) != 0) {
         js_throw_last_napi_error(env, "producerStats");
         return NULL;
     }

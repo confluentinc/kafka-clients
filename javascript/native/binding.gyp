@@ -50,6 +50,7 @@
         "error_payload.c",
         "headers.c",
         "metrics.c",
+        "mock_values.c",
         "producer.c",
         "record.c",
         "record_spy.c",

@@ -1716,7 +1716,8 @@ static int stat_put(napi_env env, napi_value obj, const char* name, atomic_long*
 }
 
 // consumerStats(): the counts of the consumers, batches, external buffers,
-// header sources and copies made and freed. Test-only.
+// header sources and copies made and freed, and the mocks' records and
+// injected errors. Test-only.
 napi_value js_consumer_stats(napi_env env, napi_callback_info info) {
     (void)info;
     napi_value obj;
@@ -1727,6 +1728,11 @@ napi_value js_consumer_stats(napi_env env, napi_callback_info info) {
         || stat_put(env, obj, "sourcesMade", &stat_sources_made) || stat_put(env, obj, "sourcesFreed", &stat_sources_freed)
         || stat_put(env, obj, "copies", &stat_copies))
         return NULL;
+    // The mocks' records and injected errors, counted for every mock.
+    if (mock_values_stats_put(env, obj) != 0) {
+        js_throw_last_napi_error(env, "consumerStats");
+        return NULL;
+    }
     return obj;
 }
 

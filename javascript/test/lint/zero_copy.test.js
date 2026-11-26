@@ -47,7 +47,7 @@ test('each finding kind, with its exact text', () => {
   ]);
   r = runN(RULE, { 'native/record.c': RECORD_C.replace('    out->bytes.data = data;\n', '') });
   assert.deepEqual(findings(r), [
-    'native/record.c, native/producer.c: no function reads a key or value with napi_get_typedarray_info / napi_get_buffer_info into a kafka_Bytes_t',
+    'native/record.c, native/producer.c, native/mock_values.c: no function reads a key or value with napi_get_typedarray_info / napi_get_buffer_info into a kafka_Bytes_t',
   ]);
 });
 
