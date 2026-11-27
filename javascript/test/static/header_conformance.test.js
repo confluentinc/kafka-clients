@@ -274,7 +274,7 @@ test('no blocking consumer call: every waiting call is a _cb twin (rule 4)', () 
   }
 });
 
-test("the consumer's listeners, their reports and the window use their entry points", () => {
+test("the consumer's listeners, commit callbacks, their reports and the window use their entry points", () => {
   const called = new Set(sources.flatMap((s) => [...calledFunctions(path.join(NATIVE, s))]));
   for (const name of [
     'kafka_consumer_Consumer_subscribe_with_topics_listener_cb',
@@ -282,6 +282,12 @@ test("the consumer's listeners, their reports and the window use their entry poi
     'kafka_consumer_ConsumerRebalanceListener_new_err',
     'kafka_consumer_ConsumerRebalanceListener_destroy_err',
     'kafka_consumer_Consumer__set_callback_result_err',
+    'kafka_consumer_Consumer_commit_async_with_callback_cb',
+    'kafka_consumer_Consumer_commit_async_with_offsets_callback_cb',
+    'kafka_consumer_OffsetCommitCallback_new_err',
+    'kafka_consumer_OffsetCommitCallback_destroy_err',
+    'kafka_consumer_ConsumerHandle_commit_async_with_callback_cb',
+    'kafka_consumer_ConsumerHandle_commit_async_with_offsets_callback_cb',
     'kafka_consumer_Consumer_handle_err',
     'kafka_consumer_ConsumerHandle_destroy_err',
     'kafka_consumer_ConsumerHandle_commit_sync_cb',
@@ -319,7 +325,7 @@ test("the consumer's listeners, their reports and the window use their entry poi
   }
 });
 
-test("no blocking listener or handle call, and none of the C invokers of a listener's methods", () => {
+test("no blocking listener, commit callback or handle call, and none of the C invokers of a listener's or commit callback's methods", () => {
   // Every blocking ConsumerHandle form, read from the header: each one with a _cb twin.
   const handleBlocking = [...stripComments(header).matchAll(/\b(kafka_consumer_ConsumerHandle_\w+)_cb\s*\(/g)].map((m) => m[1]);
   assert.ok(handleBlocking.length > 20, handleBlocking.join(', '));
@@ -333,6 +339,10 @@ test("no blocking listener or handle call, and none of the C invokers of a liste
     'kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked_cb',
     'kafka_consumer_ConsumerRebalanceListener_on_partitions_assigned_cb',
     'kafka_consumer_ConsumerRebalanceListener_on_partitions_lost_cb',
+    'kafka_consumer_Consumer_commit_async_with_callback',
+    'kafka_consumer_Consumer_commit_async_with_offsets_callback',
+    'kafka_consumer_OffsetCommitCallback_on_complete',
+    'kafka_consumer_OffsetCommitCallback_on_complete_cb',
   ]) {
     for (const source of sources) {
       const code = stripComments(fs.readFileSync(path.join(NATIVE, source), 'utf8'));

@@ -67,6 +67,7 @@
 
 typedef struct Batch Batch;
 typedef struct Listener Listener;
+typedef struct CommitCallback CommitCallback;
 typedef struct Deferred Deferred;
 
 typedef struct {
@@ -78,6 +79,7 @@ typedef struct {
     MockRecord* kept;                          // the records added to a mock, held until the destroy
     InjectedError* injected;                   // the JS values the core carries, held while it holds a copy
     Listener* listener;                        // the listener the core holds, NULL for none
+    CommitCallback* commits;                   // the commit callbacks given the core, until each reported
     Deferred* deferred;                        // the reports waiting for a callback's Promise
     int reports;                               // the listener and commit callback reports not made yet
     int destroyed;                             // the class handle's destroy returned: no report from now on
@@ -96,6 +98,17 @@ struct Listener {
     int refs;
 };
 
+// An OffsetCommitCallback's context, the `self_` of its FFI registration: the
+// function src/ built for it (src/internal/consumer_calls.ts, commitRun), held
+// until it reported (its Deferred's report, for one that returned a Promise),
+// or until the destroy.
+struct CommitCallback {
+    Consumer* c;
+    napi_ref run;
+    CommitCallback* prev;
+    CommitCallback* next;
+};
+
 // A report waiting for the Promise a callback returned: its two handlers, each
 // owning it until finalized, held strongly until the report, and the handle
 // object, held until the report.
@@ -103,6 +116,7 @@ struct Deferred {
     Consumer* c;
     int64_t callback_id;                       // stays in C: the core may number past 2^53
     Listener* listener;                        // the listener whose method it is, held until the report
+    CommitCallback* commit;                    // or the commit callback, freed by the report
     napi_ref handlers[2];                      // on fulfilled, on rejected
     napi_ref hold;                             // the consumer's handle object
     int functions;                             // the handlers not yet finalized
@@ -175,6 +189,8 @@ static atomic_long stat_sources_freed;
 static atomic_long stat_copies;
 static atomic_long stat_listeners_made;
 static atomic_long stat_listeners_freed;
+static atomic_long stat_commit_callbacks_made;
+static atomic_long stat_commit_callbacks_freed;
 static atomic_long stat_deferrals_made;
 static atomic_long stat_deferrals_freed;
 
@@ -230,6 +246,18 @@ static void listener_release(napi_env env, Listener* l) {
     for (int i = 0; i < 3; i++) delete_ref(env, &l->runs[i]);
     free(l);
     atomic_fetch_add(&stat_listeners_freed, 1);
+}
+
+// Frees a commit callback's context: once it reported, or at the destroy.
+static void commit_callback_free(napi_env env, CommitCallback* cb) {
+    if (cb == NULL) return;
+    Consumer* c = cb->c;
+    if (cb->prev != NULL) cb->prev->next = cb->next;
+    else c->commits = cb->next;
+    if (cb->next != NULL) cb->next->prev = cb->prev;
+    delete_ref(env, &cb->run);
+    free(cb);
+    atomic_fetch_add(&stat_commit_callbacks_freed, 1);
 }
 
 // The reentrancy handle a call goes through while a listener's or commit
@@ -296,6 +324,9 @@ static void deferred_report(napi_env env, Deferred* d, int rejected, napi_value 
     }
     listener_release(env, d->listener);
     d->listener = NULL;
+    // A commit callback is invoked once: it reported.
+    commit_callback_free(env, d->commit);
+    d->commit = NULL;
 }
 
 // Reports every callback still waiting for its Promise as fulfilled, before
@@ -343,7 +374,7 @@ static void deferred_finalize(napi_env env, void* data, void* hint) {
 // settles: `promise.then(onFulfilled, onRejected)`, at once, so no rejection
 // is left unhandled. Returns -1, nothing deferred, when a Node-API call failed
 // before a handler was registered; the report is then made at once.
-static int deferred_new(napi_env env, Consumer* c, napi_value promise, int64_t callback_id, Listener* l) {
+static int deferred_new(napi_env env, Consumer* c, napi_value promise, int64_t callback_id, Listener* l, CommitCallback* cb) {
     Deferred* d = (Deferred*)calloc(1, sizeof(Deferred));
     napi_value then, fns[2], obj, ignored;
     if (d == NULL || napi_get_named_property(env, promise, "then", &then) != napi_ok
@@ -366,6 +397,7 @@ static int deferred_new(napi_env env, Consumer* c, napi_value promise, int64_t c
     d->callback_id = callback_id;
     d->listener = l;
     if (l != NULL) l->refs++;
+    d->commit = cb;
     d->next = c->deferred;
     if (c->deferred != NULL) c->deferred->prev = d;
     c->deferred = d;
@@ -400,7 +432,7 @@ static int deferred_new(napi_env env, Consumer* c, napi_value promise, int64_t c
 // waits for the Promise it returned (deferred_new), else 0, `*report` the
 // error to report, NULL for none.
 static int callback_answer(napi_env env, Consumer* c, napi_value result, char* thrown, int64_t callback_id, Listener* l,
-                           kafka_common_Error_t** report) {
+                           CommitCallback* cb, kafka_common_Error_t** report) {
     *report = NULL;
     if (result == NULL) {
         *report = callback_failure(thrown != NULL ? thrown : "the callback could not be run");
@@ -410,7 +442,7 @@ static int callback_answer(napi_env env, Consumer* c, napi_value result, char* t
     free(thrown);
     bool is_promise = false;
     if (napi_is_promise(env, result, &is_promise) != napi_ok || !is_promise) return 0;
-    if (deferred_new(env, c, result, callback_id, l) == 0) return 1;
+    if (deferred_new(env, c, result, callback_id, l, cb) == 0) return 1;
     *report = callback_failure("the callback's Promise could not be awaited");
     return 0;
 }
@@ -433,7 +465,7 @@ static void listener_invoke(Listener* l, int method, const kafka_List_t* partiti
         napi_value pairs = tp_list_to_js(env, partitions);
         napi_value result = pairs != NULL ? call_ref(env, l->runs[method], 1, &pairs, &thrown) : NULL;
         if (pairs == NULL) js_warn_thrown(env);
-        if (callback_answer(env, c, result, thrown, callback_id, l, &report) == 1) return;
+        if (callback_answer(env, c, result, thrown, callback_id, l, NULL, &report) == 1) return;
     }
     if (!c->destroyed) {
         error_stat_given(report);
@@ -496,6 +528,68 @@ static Listener* listener_new(napi_env env, Consumer* c, napi_value runs, kafka_
 static void listener_handle_free(napi_env env, kafka_consumer_ConsumerRebalanceListener_t* handle) {
     kafka_common_Error_t* ffi_err = NULL;
     if (handle != NULL) error_warn(env, 1, FFI_ERR(kafka_consumer_ConsumerRebalanceListener_destroy_err(handle, &ffi_err)));
+}
+
+// An OffsetCommitCallback's on_complete: it runs the callback's JS side once,
+// with the offsets' entries as offset_map_to_js reads the borrowed map and the
+// borrowed error as JS, or null, then reports once, at once or once the
+// Promise it returned settled, and the context is freed with the report. A
+// run the destroy makes runs no JS and reports at once.
+static void commit_on_complete(void* self_, const kafka_Map_t* offsets, const kafka_common_Error_t* error, int64_t callback_id) {
+    CommitCallback* cb = (CommitCallback*)self_;
+    Consumer* c = cb->c;
+    napi_env env = c->env;
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_common_Error_t* report = NULL;
+    // The window opens: a call made until the report goes through the handle.
+    c->reports++;
+    if (!c->queue.finalizing) {
+        injected_errors_sweep(env, &c->injected);
+        char* thrown = NULL;
+        napi_value argv[2] = {NULL, NULL};
+        if (offsets != NULL) argv[0] = offset_map_to_js(env, offsets);
+        else napi_get_null(env, &argv[0]);
+        if (argv[0] != NULL) argv[1] = error != NULL ? error_to_js(env, error) : NULL;
+        if (argv[0] != NULL && error == NULL) napi_get_null(env, &argv[1]);
+        napi_value result = argv[0] != NULL && argv[1] != NULL ? call_ref(env, cb->run, 2, argv, &thrown) : NULL;
+        if (argv[0] == NULL || argv[1] == NULL) js_warn_thrown(env);
+        if (callback_answer(env, c, result, thrown, callback_id, NULL, cb, &report) == 1) return;
+    }
+    if (!c->destroyed) {
+        error_stat_given(report);
+        error_warn(env, !c->queue.finalizing,
+                   FFI_ERR(kafka_consumer_Consumer__set_callback_result_err(c->view, callback_id, NULL, report, &ffi_err)));
+    } else {
+        error_discard(report);
+    }
+    c->reports--;
+    commit_callback_free(env, cb);
+}
+
+// The commit callback `run` (src/'s function) as a context, on the
+// consumer's list, and its FFI registration, *handle, which the commit
+// copies. NULL with a JS exception pending on failure.
+static CommitCallback* commit_callback_new(napi_env env, Consumer* c, napi_value run, kafka_consumer_OffsetCommitCallback_t** handle) {
+    *handle = NULL;
+    CommitCallback* cb = (CommitCallback*)calloc(1, sizeof(CommitCallback));
+    if (cb == NULL || napi_create_reference(env, run, 1, &cb->run) != napi_ok) {
+        free(cb);
+        js_throw_last_napi_error(env, "napi_create_reference");
+        return NULL;
+    }
+    cb->c = c;
+    cb->next = c->commits;
+    if (c->commits != NULL) c->commits->prev = cb;
+    c->commits = cb;
+    atomic_fetch_add(&stat_commit_callbacks_made, 1);
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_common_Error_t* err = FFI_SET(*handle, kafka_consumer_OffsetCommitCallback_new_err(cb, commit_on_complete, &ffi_err));
+    if (err != NULL) {
+        commit_callback_free(env, cb);
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    return cb;
 }
 
 // ---- the batch --------------------------------------------------------------
@@ -1372,28 +1466,63 @@ napi_value js_consumer_commit_sync(napi_env env, napi_callback_info info) {
     return NULL;
 }
 
-// consumerCommitAsync(handle, done): Java's commitAsync() through
-// commit_async_cb, settling once the core took the commit.
+// consumerCommitAsync(handle, form, offsets, run, done): Java's
+// commitAsync() (form 0) through commit_async_cb, commitAsync(callback) (form
+// 1) through commit_async_with_callback_cb, and commitAsync(offsets, callback)
+// (form 2) through commit_async_with_offsets_callback_cb, settling once the
+// core took the commit: `offsets` the entries commitSync takes, or null,
+// which the FFI reports; `run` src/'s function for the callback, or null for
+// form 2's null callback, which the FFI refuses.
 napi_value js_consumer_commit_async(napi_env env, napi_callback_info info) {
-    size_t argc = 2;
-    napi_value argv[2];
+    size_t argc = 5;
+    napi_value argv[5];
     NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
-    if (argc != 2 || !is_function(env, argv[1])) {
-        napi_throw_type_error(env, NULL, "commitAsync(handle, done)");
+    int32_t form = 0;
+    if (argc != 5 || napi_get_value_int32(env, argv[1], &form) != napi_ok || form < 0 || form > 2 || !is_function(env, argv[4])) {
+        napi_throw_type_error(env, NULL, "commitAsync(handle, form, offsets, run, done)");
         return NULL;
     }
     Consumer* c = unwrap_consumer(env, argv[0]);
     if (c == NULL) return NULL;
-    CallCtx* ctx = call_ctx_new(env, c, argv[1]);
-    if (ctx == NULL) return NULL;
-    const kafka_consumer_ConsumerHandle_t* h = window_of(c);
-    if (h != NULL) {
-        cbq_call_begin(env, &c->queue);
-        kafka_consumer_ConsumerHandle_commit_async_cb(h, void_on_complete, ctx);
-    } else {
-        cbq_call_begin(env, &c->queue);
-        kafka_consumer_Consumer_commit_async_cb(c->view, void_on_complete, ctx);
+    napi_valuetype type;
+    NAPI_CHECK(env, napi_typeof(env, argv[2], &type), NULL);
+    kafka_Map_t* offsets = NULL;
+    if (form == 2 && type != napi_null && (offsets = offset_map_from_js(env, argv[2])) == NULL) return NULL;
+    kafka_consumer_OffsetCommitCallback_t* callback = NULL;
+    if (form != 0 && is_function(env, argv[3]) && commit_callback_new(env, c, argv[3], &callback) == NULL) {
+        offset_map_free(env, offsets);
+        return NULL;
     }
+    CallCtx* ctx = call_ctx_new(env, c, argv[4]);
+    const kafka_consumer_ConsumerHandle_t* h = window_of(c);
+    if (ctx != NULL && h != NULL) {
+        if (form == 0) {
+            cbq_call_begin(env, &c->queue);
+            kafka_consumer_ConsumerHandle_commit_async_cb(h, void_on_complete, ctx);
+        } else if (form == 1) {
+            cbq_call_begin(env, &c->queue);
+            kafka_consumer_ConsumerHandle_commit_async_with_callback_cb(h, callback, void_on_complete, ctx);
+        } else {
+            cbq_call_begin(env, &c->queue);
+            kafka_consumer_ConsumerHandle_commit_async_with_offsets_callback_cb(h, offsets, callback, void_on_complete, ctx);
+        }
+    } else if (ctx != NULL) {
+        if (form == 0) {
+            cbq_call_begin(env, &c->queue);
+            kafka_consumer_Consumer_commit_async_cb(c->view, void_on_complete, ctx);
+        } else if (form == 1) {
+            cbq_call_begin(env, &c->queue);
+            kafka_consumer_Consumer_commit_async_with_callback_cb(c->view, callback, void_on_complete, ctx);
+        } else {
+            cbq_call_begin(env, &c->queue);
+            kafka_consumer_Consumer_commit_async_with_offsets_callback_cb(c->view, offsets, callback, void_on_complete, ctx);
+        }
+    }
+    // The call copied the offsets and the callback's registration; the
+    // callback's context stays until it reported, or the destroy.
+    kafka_common_Error_t* ffi_err = NULL;
+    if (callback != NULL) error_warn(env, 1, FFI_ERR(kafka_consumer_OffsetCommitCallback_destroy_err(callback, &ffi_err)));
+    offset_map_free(env, offsets);
     return NULL;
 }
 
@@ -2210,6 +2339,7 @@ static void consumer_destroy(napi_env env, Consumer* c) {
     injected_errors_release(env, &c->injected);
     listener_release(env, c->listener);
     c->listener = NULL;
+    while (c->commits != NULL) commit_callback_free(env, c->commits);
     cbq_release(env, &c->queue);
 }
 
@@ -2632,8 +2762,9 @@ static int stat_put(napi_env env, napi_value obj, const char* name, atomic_long*
 }
 
 // consumerStats(): the counts of the consumers, batches, external buffers,
-// header sources and copies made and freed, the listeners' contexts and the
-// deferred reports, and the mocks' records and the carried values. Test-only.
+// header sources and copies made and freed, the listeners' and commit
+// callbacks' contexts and the deferred reports, and the mocks' records and
+// the carried values. Test-only.
 napi_value js_consumer_stats(napi_env env, napi_callback_info info) {
     (void)info;
     napi_value obj;
@@ -2643,7 +2774,9 @@ napi_value js_consumer_stats(napi_env env, napi_callback_info info) {
         || stat_put(env, obj, "buffersMade", &stat_buffers_made) || stat_put(env, obj, "buffersFreed", &stat_buffers_freed)
         || stat_put(env, obj, "sourcesMade", &stat_sources_made) || stat_put(env, obj, "sourcesFreed", &stat_sources_freed)
         || stat_put(env, obj, "copies", &stat_copies) || stat_put(env, obj, "listenersMade", &stat_listeners_made)
-        || stat_put(env, obj, "listenersFreed", &stat_listeners_freed) || stat_put(env, obj, "deferralsMade", &stat_deferrals_made)
+        || stat_put(env, obj, "listenersFreed", &stat_listeners_freed)
+        || stat_put(env, obj, "commitCallbacksMade", &stat_commit_callbacks_made)
+        || stat_put(env, obj, "commitCallbacksFreed", &stat_commit_callbacks_freed) || stat_put(env, obj, "deferralsMade", &stat_deferrals_made)
         || stat_put(env, obj, "deferralsFreed", &stat_deferrals_freed))
         return NULL;
     // The mocks' records and injected errors, counted for every mock.

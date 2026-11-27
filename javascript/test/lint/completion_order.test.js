@@ -247,7 +247,7 @@ test('an unlisted completion and an unused entry are findings', () => {
   ]);
   assert.deepEqual(
     require('../../scripts/lint/rules/completion_order').COMPLETIONS.map((e) => e.key),
-    ['send_on_completion', 'listener_on_revoked', 'listener_on_assigned', 'listener_on_lost'],
+    ['send_on_completion', 'listener_on_revoked', 'listener_on_assigned', 'listener_on_lost', 'commit_on_complete'],
   );
   void LISTS;
 });

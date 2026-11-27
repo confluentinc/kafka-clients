@@ -19,7 +19,8 @@
 // context is kept until a later successful subscribe replaces it, kept by a
 // failed one, by assign() and unsubscribe() and by a KafkaConsumer's empty
 // topic list, let go once a KafkaConsumer's close() returns and kept by a mock
-// until its destroy; a report that waited for a Promise is freed once made;
+// until its destroy; a commit callback's context is freed once it reported,
+// or at the destroy; a report that waited for a Promise is freed once made;
 // and everything is freed once the consumers are closed and collected. Each
 // probe runs in a child with --expose-gc and the allocator's poisoning.
 
@@ -114,5 +115,45 @@ test("a listener's report that waited for its Promise is freed once made, and a 
   `);
   assert.ok(out.counts.deferrals >= 20, JSON.stringify(out.counts));
   assert.equal(out.counts.pending, 0);
+  assert.deepEqual(out.leaks, NO_LEAKS);
+});
+
+test("a commit callback's context is freed once it reported, or at the destroy", () => {
+  const out = probe(`
+    const { CloseOptions, KafkaConsumer, MockConsumer, OffsetAndMetadata } = require(D + '/consumer');
+    const { TopicPartition, TopicPartitionMap } = require(D + '/common');
+    const live = () => { const s = native.consumerStats(); return s.commitCallbacksMade - s.commitCallbacksFreed; };
+    (async () => {
+      const hold = setInterval(() => {}, 1000);
+      const counts = {};
+      const tp = new TopicPartition({ topic: 't', partition: 0 });
+      const offsets = new TopicPartitionMap([[tp, new OffsetAndMetadata(1n)]]);
+      await (async () => {
+        const m = new MockConsumer('earliest');
+        await m.assign([tp]);
+        // The mock runs each callback inside commitAsync(): reported at once,
+        // or once its Promise settled, or with what it threw.
+        await m.commitAsync({ offsets, callback: () => {} });
+        await m.commitAsync({ offsets, callback: () => new Promise((resolve) => setImmediate(resolve)) });
+        await m.commitAsync({ offsets, callback: () => { throw new Error('boom'); } }).catch(() => {});
+        counts.mock = live();
+        await m.close();
+        // A KafkaConsumer with no broker: the commit never completes, so the
+        // callback is kept until the destroy.
+        const kc = new KafkaConsumer({ 'bootstrap.servers': '127.0.0.1:1', 'group.id': 'g', 'group.protocol': 'consumer' });
+        await kc.assign([tp]);
+        await kc.commitAsync({ offsets, callback: () => {} });
+        counts.kafkaPending = live();
+        await kc.close({ option: CloseOptions.timeout({ timeout: 0 }) }).catch(() => {});
+      })();
+      await settle();
+      counts.collected = live();
+      console.log(JSON.stringify({ counts, leaks: leaks() }));
+      clearInterval(hold);
+    })();
+  `);
+  assert.deepEqual(out.counts.mock, 0);
+  assert.ok(out.counts.kafkaPending <= 1, JSON.stringify(out.counts));
+  assert.equal(out.counts.collected, 0);
   assert.deepEqual(out.leaks, NO_LEAKS);
 });

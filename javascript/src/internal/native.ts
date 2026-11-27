@@ -158,6 +158,13 @@ type NativePartitionRecords = [string, number, unknown[]];
  */
 type ListenerRun = (pairs: Array<[string, number]>) => Promise<unknown> | undefined;
 
+/**
+ * An `OffsetCommitCallback` as the addon calls it, with the offsets as
+ * `[topic, partition, offset, leaderEpoch, metadata]` entries and the error or
+ * null: `undefined` once it returned, or a Promise the report waits for.
+ */
+type CommitRun = (entries: NativeNextOffset[], error: Error | null) => Promise<unknown> | undefined;
+
 /** A next offset of a poll, as the addon reads it: topic, partition, offset, leader epoch (-1 for none), metadata. */
 type NativeNextOffset = [string, number, bigint, number, string];
 
@@ -201,6 +208,9 @@ interface ConsumerStats {
   // The rebalance listeners' contexts, made and freed.
   listenersMade: number;
   listenersFreed: number;
+  // The commit callbacks' contexts, made and freed.
+  commitCallbacksMade: number;
+  commitCallbacksFreed: number;
   // The reports that waited for a callback's Promise, made and freed.
   deferralsMade: number;
   deferralsFreed: number;
@@ -379,8 +389,17 @@ interface Native {
     timeoutMs: number | bigint | null,
     done: (error: unknown) => void,
   ): void;
-  // Java's commitAsync(), settling once the core took the commit.
-  consumerCommitAsync(handle: ConsumerHandle, done: (error: unknown) => void): void;
+  // Java's commitAsync(), commitAsync(callback) and commitAsync(offsets,
+  // callback) (form 0, 1 or 2), settling once the core took the commit:
+  // `offsets` as consumerCommitSync's, `run` the callback, null for form 2's
+  // null one, which the FFI refuses.
+  consumerCommitAsync(
+    handle: ConsumerHandle,
+    form: number,
+    offsets: Array<[[string | null, number] | null, [bigint, number, string] | null]> | null,
+    run: CommitRun | null,
+    done: (error: unknown) => void,
+  ): void;
   // Java's seek(TopicPartition, long), or with withMetadata
   // seek(TopicPartition, OffsetAndMetadata), `offset` then the
   // OffsetAndMetadata's [offset, leaderEpoch (-1 for none), metadata]; a null

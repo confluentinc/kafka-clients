@@ -23,7 +23,10 @@
 // table (the calls a listener makes while its report is pending), a test per
 // row of the errors' table for a listener's error, each with a KafkaError
 // and with another value, a listener without onPartitionsLost, and a
-// listener that does not settle past a wakeup().
+// listener that does not settle past a wakeup(). Then the commit callbacks:
+// one runs inside the next waiting call, its offsets are null for a failed
+// commit and an empty one, and its error comes back from each row of the
+// errors' table, with a KafkaError and with another value.
 
 const assert = require('node:assert/strict');
 
@@ -868,4 +871,148 @@ listenerTest(
     }
   },
   120000,
+);
+
+// ---- the commit callbacks ---------------------------------------------------
+
+/**
+ * A consumer of a new group assigned the one partition of a new topic, whose
+ * coordinator is known: a first commitSync() found it.
+ *
+ * @param {string} what
+ * @returns {Promise<{ consumer: KafkaConsumer<Buffer, Buffer>, tp: TopicPartition }>} the consumer and its partition
+ */
+async function assignedConsumer(what) {
+  const topic = freshTopic(what);
+  await createTopic(BOOTSTRAP, topic);
+  const tp = new TopicPartition({ topic, partition: 0 });
+  const consumer = new KafkaConsumer({
+    configs: {
+      'bootstrap.servers': BOOTSTRAP,
+      'group.protocol': 'consumer',
+      'group.id': `${topic}-group`,
+      'enable.auto.commit': false,
+    },
+  });
+  await consumer.assign([tp]);
+  await consumer.commitSync({ offsets: new TopicPartitionMap([[tp, new OffsetAndMetadata(0n)]]) });
+  return { consumer, tp };
+}
+
+listenerTest(
+  'a commit callback runs inside the next waiting call, with null offsets for a failed commit and an empty one',
+  async () => {
+    const { consumer, tp } = await assignedConsumer('commit-callback');
+    try {
+      /** @type {Array<[string, string | null, string | null]>} */
+      const seen = [];
+      /** @param {string} what */
+      const record =
+        (what) =>
+        /** @param {{ offsets: TopicPartitionMap<OffsetAndMetadata> | null, exception: Error | null }} answer */
+        ({ offsets, exception }) => {
+          seen.push([what, offsets === null ? null : String(offsets), exception === null ? null : exception.constructor.name]);
+        };
+      await consumer.commitAsync({ offsets: new TopicPartitionMap([[tp, new OffsetAndMetadata(1n)]]), callback: record('ok') });
+      // Beyond the broker's offset.metadata.max.bytes, 4096: the commit fails.
+      const tooLarge = new OffsetAndMetadata({ offset: 2n, leaderEpoch: null, metadata: 'x'.repeat(5000) });
+      await consumer.commitAsync({ offsets: new TopicPartitionMap([[tp, tooLarge]]), callback: record('failed') });
+      await consumer.commitAsync({ offsets: new TopicPartitionMap(), callback: record('empty') });
+      // Not yet: the callbacks run inside a later waiting call.
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      assert.deepEqual(seen, []);
+      await consumer.commitSync();
+      assert.deepEqual(
+        [...seen].sort(),
+        [
+          ['empty', null, null],
+          ['failed', null, 'OffsetMetadataTooLarge'],
+          ['ok', `{${tp}=OffsetAndMetadata{offset=1, leaderEpoch=null, metadata=''}}`, null],
+        ].sort(),
+      );
+    } finally {
+      await closeQuietly(consumer);
+    }
+  },
+  120000,
+);
+
+/** A commit callback's error: a KafkaError, and another value. */
+const CALLBACK_ERRORS = () => [new KafkaError('the callback failed'), new TypeError('cbt')];
+
+/**
+ * Commits with a callback that throws `value`, once the commit completed, and
+ * returns what `next` rejects with.
+ *
+ * @param {string} what
+ * @param {unknown} value
+ * @param {(consumer: KafkaConsumer<Buffer, Buffer>) => Promise<unknown>} next
+ * @returns {Promise<unknown>} the rejection
+ */
+async function callbackErrorFrom(what, value, next) {
+  const { consumer, tp } = await assignedConsumer(what);
+  try {
+    let done = false;
+    await consumer.commitAsync({
+      offsets: new TopicPartitionMap([[tp, new OffsetAndMetadata(1n)]]),
+      callback: () => {
+        done = true;
+        throw value;
+      },
+    });
+    // The commit's answer comes back; its callback waits for a waiting call.
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    const error = await next(consumer).then(
+      () => null,
+      (e) => e,
+    );
+    assert.equal(done, true);
+    return error;
+  } finally {
+    await closeQuietly(consumer);
+  }
+}
+
+listenerTest(
+  "a commit callback's error from commitSync() and commitAsync(): as itself",
+  async () => {
+    for (const value of CALLBACK_ERRORS()) {
+      assert.equal(await callbackErrorFrom('cb-commit-sync', value, (c) => c.commitSync()), value);
+      assert.equal(await callbackErrorFrom('cb-commit-async', value, (c) => c.commitAsync()), value);
+    }
+  },
+  240000,
+);
+
+listenerTest(
+  "a commit callback's error from poll(): a KafkaError as itself, another value inside a KafkaError built from it",
+  async () => {
+    for (const value of CALLBACK_ERRORS()) {
+      const error = await callbackErrorFrom('cb-poll', value, async (c) => {
+        const deadline = Date.now() + 30000;
+        while (Date.now() < deadline) await c.poll({ timeout: 200 });
+      });
+      if (value instanceof KafkaError) {
+        assert.equal(error, value);
+      } else {
+        assert.ok(error instanceof KafkaError);
+        assert.equal(error.message, 'TypeError: cbt');
+        assert.equal(error.cause, value);
+      }
+    }
+  },
+  240000,
+);
+
+listenerTest(
+  "a commit callback's error from close(): itself, the cause of KafkaError('Failed to close kafka consumer')",
+  async () => {
+    for (const value of CALLBACK_ERRORS()) {
+      const error = await callbackErrorFrom('cb-close', value, (c) => c.close());
+      assert.ok(error instanceof KafkaError);
+      assert.equal(error.message, 'Failed to close kafka consumer');
+      assert.equal(error.cause, value);
+    }
+  },
+  240000,
 );

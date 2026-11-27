@@ -1123,7 +1123,7 @@ async function consumerUsage(): Promise<void> {
   expectTypeOf(consumer.assignment()).toEqualTypeOf<TopicPartitionSet>();
   expectTypeOf(consumer.paused()).toEqualTypeOf<TopicPartitionSet>();
   expectTypeOf(consumer.subscription()).toEqualTypeOf<Set<string>>();
-  // The commits: four commitSync forms, commitAsync() without a callback yet.
+  // The commits: four commitSync forms and three commitAsync forms.
   const offsets = new TopicPartitionMap<OffsetAndMetadata>([[tp, new OffsetAndMetadata(5)]]);
   expectTypeOf(consumer.commitSync()).toEqualTypeOf<Promise<void>>();
   await consumer.commitSync({ timeout: 100 });
@@ -1134,8 +1134,18 @@ async function consumerUsage(): Promise<void> {
   // @ts-expect-error a Map keyed by TopicPartition is no TopicPartitionMap
   await consumer.commitSync({ offsets: new Map([[tp, new OffsetAndMetadata(5)]]) });
   expectTypeOf(consumer.commitAsync()).toEqualTypeOf<Promise<void>>();
-  // @ts-expect-error the callback forms come with the commit callbacks
-  await consumer.commitAsync({ callback: () => undefined });
+  await consumer.commitAsync({ callback: commitCallback });
+  await consumer.commitAsync(commitCallback);
+  await consumer.commitAsync({ offsets, callback: commitCallback });
+  // A callback may return a Promise, and its offsets may be null.
+  await consumer.commitAsync({ callback: async ({ offsets: done }) => void done?.size() });
+  // Java's commitAsync() is commitAsync(null).
+  await consumer.commitAsync({ callback: null });
+  await consumer.commitAsync(null);
+  // @ts-expect-error the FFI refuses a null callback with offsets
+  await consumer.commitAsync({ offsets, callback: null });
+  // @ts-expect-error offsets on their own: Java has no commitAsync(Map)
+  await consumer.commitAsync({ offsets });
   // The seeks and the position.
   await consumer.seek({ partition: tp, offset: 5 });
   await consumer.seek({ partition: tp, offset: 5n });

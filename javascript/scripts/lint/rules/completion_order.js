@@ -104,6 +104,7 @@ const COMPLETIONS = [
     via: 'listener_invoke',
     reason: "a ConsumerRebalanceListener's on_partitions_lost (kafka_consumer_ConsumerRebalanceListener_new_err)",
   },
+  { key: 'commit_on_complete', reason: "an OffsetCommitCallback's on_complete (kafka_consumer_OffsetCommitCallback_new_err)" },
 ];
 
 /** The native functions whose function argument completes a wait on a record's future, not a delivery. */

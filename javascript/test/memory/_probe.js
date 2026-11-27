@@ -91,6 +91,7 @@ function leaks() {
     consumerBuffers: c.buffersMade - c.buffersFreed,
     headerSources: c.sourcesMade - c.sourcesFreed,
     listeners: c.listenersMade - c.listenersFreed,
+    commitCallbacks: c.commitCallbacksMade - c.commitCallbacksFreed,
     consumerDeferrals: c.deferralsMade - c.deferralsFreed,
   };
 }
@@ -118,6 +119,7 @@ const NO_LEAKS = {
   consumerBuffers: 0,
   headerSources: 0,
   listeners: 0,
+  commitCallbacks: 0,
   consumerDeferrals: 0,
 };
 

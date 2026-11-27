@@ -29,8 +29,7 @@
 // unregisterMetricFromSubscription and addedMetrics. Left out, as in Python:
 // enforceRebalance(), enforceRebalance(reason), shouldRebalance() and
 // resetShouldRebalance(). Left out as on KafkaConsumer: the
-// subscribe(Pattern...) forms, and until the client has commit callbacks,
-// the forms taking one. Left out because Java
+// subscribe(Pattern...) forms. Left out because Java
 // deprecates them: MockConsumer(OffsetResetStrategy) and close(Duration).
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- src/internal/native.ts is an `export =` module, which TypeScript imports this way (the addon is loaded there alone, javascript/CLAUDE.md "Files and layout")
@@ -53,6 +52,7 @@ import type { Duration } from '../duration';
 import type { CloseOptions } from './close_options';
 import type { Consumer } from './consumer';
 import type { ConsumerRebalanceListener } from './consumer_rebalance_listener';
+import type { OffsetCommitCallback } from './offset_commit_callback';
 import type { ConsumerGroupMetadata } from './consumer_group_metadata';
 import { ConsumerRecord } from './consumer_record';
 import type { ConsumerRecords } from './consumer_records';
@@ -257,8 +257,20 @@ export class MockConsumer<K, V> implements Consumer<K, V> {
   }
 
   commitAsync(): Promise<void>;
+  commitAsync(options: {
+    /** Callback to invoke when the commit completes. */
+    callback: OffsetCommitCallback | null;
+    offsets?: never;
+  }): Promise<void>;
+  commitAsync(callback: OffsetCommitCallback | null): Promise<void>;
+  commitAsync(options: {
+    /** A map of offsets by partition with associated metadata, copied by the call. */
+    offsets: TopicPartitionMap<OffsetAndMetadata>;
+    /** Callback to invoke when the commit completes. */
+    callback: OffsetCommitCallback;
+  }): Promise<void>;
   commitAsync(options?: unknown): Promise<void> {
-    return calls.commitAsync(this.#handle, options, arguments.length);
+    return calls.commitAsync(this.#handle, options, arguments.length, true);
   }
 
   seek(options: {

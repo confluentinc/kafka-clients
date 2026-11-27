@@ -28,6 +28,7 @@ import type { CloseOptions } from './close_options';
 import type { ConsumerGroupMetadata } from './consumer_group_metadata';
 import type { ConsumerRebalanceListener } from './consumer_rebalance_listener';
 import type { ConsumerRecords } from './consumer_records';
+import type { OffsetCommitCallback } from './offset_commit_callback';
 import type { OffsetAndMetadata } from './offset_and_metadata';
 import type { OffsetAndTimestamp } from './offset_and_timestamp';
 import type { SubscriptionPattern } from './subscription_pattern';
@@ -638,6 +639,95 @@ export interface Consumer<K = Buffer, V = Buffer> {
    * Await it: a commit that isn't awaited keeps the consumer busy.
    */
   commitAsync(): Promise<void>;
+  /**
+   * Commit offsets returned on the last `poll()` for the subscribed list of
+   * topics and partitions.
+   *
+   * This commits offsets only to Kafka. The offsets committed using this API
+   * will be used on the first fetch after every rebalance and also on startup.
+   * As such, if you need to store offsets in anything other than Kafka, this
+   * API should not be used.
+   *
+   * This is an asynchronous call and will not block. Any errors encountered
+   * are either passed to the callback (if provided) or discarded.
+   *
+   * Offsets committed through multiple calls to this API are guaranteed to be
+   * sent in the same order as the invocations. Corresponding commit callbacks
+   * are also invoked in the same order. Additionally note that offsets
+   * committed through this API are guaranteed to complete before a subsequent
+   * call to `commitSync()` (and variants) returns.
+   *
+   * @param options - the callback to invoke when the commit completes, or
+   *   null for none, the same as `commitAsync()`
+   * @returns settling once the core took the commit, not when the broker
+   *   answered
+   * @throws `InvalidGroupIdError` rejects with it if the consumer has no
+   *   `group.id`
+   * @throws `TypeError` rejects with it if the callback is no function
+   *
+   * @remarks Java's `void` call returns a Promise here. The callback runs
+   * inside a later waiting call, such as `poll()`, `commitSync()` or
+   * `close()`, and may return a Promise, which that call awaits. On a
+   * `KafkaConsumer` it gets `null` offsets for a failed commit, as Java's does.
+   */
+  commitAsync(options: {
+    /** Callback to invoke when the commit completes. */
+    callback: OffsetCommitCallback | null;
+    offsets?: never;
+  }): Promise<void>;
+  /**
+   * Commit offsets returned on the last `poll()`: the callback on its own, the
+   * same as `commitAsync({ callback })`.
+   *
+   * @param callback - Callback to invoke when the commit completes
+   * @returns settling once the core took the commit
+   */
+  commitAsync(callback: OffsetCommitCallback | null): Promise<void>;
+  /**
+   * Commit the specified offsets for the specified list of topics and
+   * partitions to Kafka.
+   *
+   * This commits offsets to Kafka. The offsets committed using this API will
+   * be used on the first fetch after every rebalance and also on startup. As
+   * such, if you need to store offsets in anything other than Kafka, this API
+   * should not be used. The committed offset should be the next message your
+   * application will consume, i.e. `nextRecordToBeProcessed.offset` (or
+   * `ConsumerRecords.nextOffsets()`). You should also add the leader epoch as
+   * commit metadata, which can be obtained from `ConsumerRecord.leaderEpoch`
+   * or `ConsumerRecords.nextOffsets()`. If automatic group management with
+   * `subscribe` is used, then the committed offsets must belong to the
+   * currently auto-assigned partitions.
+   *
+   * This is an asynchronous call and will not block. Any errors encountered
+   * are either passed to the callback (if provided) or discarded.
+   *
+   * Offsets committed through multiple calls to this API are guaranteed to be
+   * sent in the same order as the invocations. Corresponding commit callbacks
+   * are also invoked in the same order. Additionally note that offsets
+   * committed through this API are guaranteed to complete before a subsequent
+   * call to `commitSync()` (and variants) returns.
+   *
+   * @param options - the offsets to commit, copied by the call, and the
+   *   callback to invoke when the commit completes
+   * @returns settling once the core took the commit, not when the broker
+   *   answered
+   * @throws `InvalidGroupIdError` rejects with it if the consumer has no
+   *   `group.id`
+   * @throws `TypeError` rejects with it if `offsets` is null or not a
+   *   `TopicPartitionMap`, or the callback is null or no function
+   *
+   * @remarks Java's `void` call returns a Promise here. The callback runs as
+   * `commitAsync({ callback })`'s does; on a `KafkaConsumer`, an empty map
+   * committed gives it `null` offsets, as Java's does.
+   * *(deviation: a null callback is refused, where Java's commits without one.
+   * Why: the FFI refuses a NULL callback. Goes when: it takes one.)*
+   */
+  commitAsync(options: {
+    /** A map of offsets by partition with associated metadata, copied by the call. */
+    offsets: TopicPartitionMap<OffsetAndMetadata>;
+    /** Callback to invoke when the commit completes. */
+    callback: OffsetCommitCallback;
+  }): Promise<void>;
 
   /**
    * Overrides the fetch offsets that the consumer will use on the next

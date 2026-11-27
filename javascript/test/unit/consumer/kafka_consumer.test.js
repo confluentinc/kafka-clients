@@ -1061,21 +1061,60 @@ test('commitSync: its four forms, bare and by name, and their errors', async () 
   await assert.rejects(consumer.commitSync({ offsets, timeout: null }), { constructor: TypeError, message: 'timeout must not be null' });
 });
 
-test('commitAsync() settles once the core took the commit, and takes no argument', async () => {
+test('commitAsync: its three forms, a null callback, and their errors', async () => {
   const consumer = newConsumer();
+  const forms = 'commitAsync() takes one of (), (callback), (offsets, callback)';
+  const offsets = new TopicPartitionMap([[TP0, new OffsetAndMetadata(1)]]);
+  const callback = () => {};
   await consumer.assign({ partitions: [TP0] });
+  // Each form settles once the core took the commit.
   await consumer.commitAsync();
-  // The forms with a callback are not in this release.
+  await consumer.commitAsync({ callback });
+  await consumer.commitAsync(callback);
+  await consumer.commitAsync({ offsets, callback });
+  // Java's commitAsync() is commitAsync(null): a null callback commits without one.
+  await consumer.commitAsync({ callback: null });
+  await consumer.commitAsync(null);
+  // The FFI refuses a null callback with offsets, where Java's takes it.
+  // @ts-expect-error a null callback with offsets
+  await assert.rejects(consumer.commitAsync({ offsets, callback: null }), { constructor: TypeError, message: 'callback must not be null' });
+  // @ts-expect-error a null map
+  await assert.rejects(consumer.commitAsync({ offsets: null, callback }), { constructor: TypeError, message: 'offsets must not be null' });
+  // @ts-expect-error offsets on their own: Java has no commitAsync(Map)
+  await assert.rejects(consumer.commitAsync({ offsets }), { constructor: IllegalArgumentError, message: `${forms}; got (offsets)` });
+  // @ts-expect-error a bare map
+  await assert.rejects(consumer.commitAsync(offsets), { constructor: IllegalArgumentError, message: `${forms}; got a TopicPartitionMap` });
+  // @ts-expect-error a number is no callback
+  await assert.rejects(consumer.commitAsync(5), { constructor: IllegalArgumentError, message: `${forms}; got a number` });
+  // @ts-expect-error an object is no callback
+  await assert.rejects(consumer.commitAsync({ callback: {} }), {
+    constructor: TypeError,
+    message: 'callback must be an OffsetCommitCallback',
+  });
   await assert.rejects(
-    // @ts-expect-error a callback
-    consumer.commitAsync(() => {}),
-    { constructor: IllegalArgumentError, message: 'commitAsync() takes one of (); got a function' },
-  );
-  await assert.rejects(
-    // @ts-expect-error an argument
+    // @ts-expect-error an undefined callback
     consumer.commitAsync(undefined),
-    { constructor: TypeError, message: 'commitAsync() takes no argument: leave it out rather than pass undefined' },
+    { constructor: TypeError, message: "callback must not be undefined. Leave the argument out, or pass null for Java's null" },
   );
+  // @ts-expect-error an undefined callback
+  await assert.rejects(consumer.commitAsync({ offsets, callback: undefined }), {
+    constructor: TypeError,
+    message: "callback must not be undefined. Leave the key out, or pass null for Java's null",
+  });
+  // @ts-expect-error a second argument, Java's commitAsync(offsets, callback) written positionally
+  await assert.rejects(consumer.commitAsync(offsets, callback), {
+    constructor: IllegalArgumentError,
+    message: `${forms}; got 2 arguments, not one object of named parameters`,
+  });
+  // The commit of the offsets never completes with no broker: close(0)
+  // reports it, as Java's close records the timeout of the last pending
+  // async commit.
+  await assert.rejects(consumer.close({ option: CloseOptions.timeout({ timeout: 0 }) }), (error) => {
+    assert.ok(error instanceof KafkaError);
+    assert.equal(error.message, 'Failed to close kafka consumer');
+    assert.equal(/** @type {Error} */ (error.cause).message, 'Timed out waiting for last pending async commit to complete');
+    return true;
+  });
 });
 
 test('seek: its two forms and their errors', async () => {

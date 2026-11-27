@@ -35,6 +35,7 @@ import { UnsupportedOperationError } from '../unsupported_operation_error';
 import type { CloseOptions } from './close_options';
 import type { Consumer } from './consumer';
 import type { ConsumerRebalanceListener } from './consumer_rebalance_listener';
+import type { OffsetCommitCallback } from './offset_commit_callback';
 import type { ConsumerConfigs } from './consumer_configs';
 import type { ConsumerGroupMetadata } from './consumer_group_metadata';
 import type { ConsumerRecords } from './consumer_records';
@@ -214,8 +215,20 @@ export class KafkaConsumer<K = Buffer, V = Buffer> implements Consumer<K, V> {
   }
 
   commitAsync(): Promise<void>;
+  commitAsync(options: {
+    /** Callback to invoke when the commit completes. */
+    callback: OffsetCommitCallback | null;
+    offsets?: never;
+  }): Promise<void>;
+  commitAsync(callback: OffsetCommitCallback | null): Promise<void>;
+  commitAsync(options: {
+    /** A map of offsets by partition with associated metadata, copied by the call. */
+    offsets: TopicPartitionMap<OffsetAndMetadata>;
+    /** Callback to invoke when the commit completes. */
+    callback: OffsetCommitCallback;
+  }): Promise<void>;
   commitAsync(options?: unknown): Promise<void> {
-    return calls.commitAsync(this.#handle, options, arguments.length);
+    return calls.commitAsync(this.#handle, options, arguments.length, false);
   }
 
   seek(options: {

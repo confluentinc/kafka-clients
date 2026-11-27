@@ -52,6 +52,7 @@ import { ConsumerRecords } from '../consumer/consumer_records';
 import { OffsetAndMetadata } from '../consumer/offset_and_metadata';
 import { OffsetAndTimestamp } from '../consumer/offset_and_timestamp';
 import type { ConsumerRebalanceListener } from '../consumer/consumer_rebalance_listener';
+import type { OffsetCommitCallback } from '../consumer/offset_commit_callback';
 import { SubscriptionPattern } from '../consumer/subscription_pattern';
 
 /** The native consumer handle (`internal/native.ts`). */
@@ -112,7 +113,10 @@ const COMMIT_SYNC_FORMS = new JavaForms('commitSync', [[], ['timeout'], ['offset
     offsets: (value) => value instanceof TopicPartitionMap || value instanceof Map,
   },
 });
-const COMMIT_ASYNC_FORMS = new JavaForms('commitAsync', [[]]);
+const COMMIT_ASYNC_FORMS = new JavaForms('commitAsync', [[], ['callback'], ['offsets', 'callback']], {
+  order: ['offsets', 'callback'],
+  bareTypes: { callback: (value) => value === null || typeof value === 'function' },
+});
 const SEEK_FORMS = new JavaForms('seek', [
   ['partition', 'offset'],
   ['partition', 'offsetAndMetadata'],
@@ -204,6 +208,56 @@ function listenerRuns(listener: unknown): [ListenerRun | null, ListenerRun | nul
         : ConsumerRebalanceListenerDefaults.prototype.onPartitionsLost.call(l, { partitions });
     });
   return [revoked, assigned, lost];
+}
+
+/** An `OffsetCommitCallback` as the addon calls it (`internal/native.ts`). */
+type CommitRun = (entries: NativeOffsetEntry[], error: Error | null) => Promise<unknown> | undefined;
+
+/**
+ * The function the addon calls for an `OffsetCommitCallback`, Java's
+ * `onComplete(offsets, exception)`, as `callback({ offsets, exception })`.
+ * On a `KafkaConsumer`, `offsets` is `null` where Java's is: for a failed
+ * commit, and for an empty map committed (Java's `completedFuture(null)`),
+ * where the FFI hands over an empty map *(temporary. Why: the FFI passes an
+ * empty map where Java passes null. Goes when: the FFI passes NULL)*. On a
+ * mock it is the map committed, as Java's mock passes it.
+ *
+ * @param callback - the callback given
+ * @param mock - whether the consumer is a mock
+ * @param emptyCommitted - whether the commit is of an empty map
+ * @returns the function
+ */
+function commitRun(callback: OffsetCommitCallback, mock: boolean, emptyCommitted: boolean): CommitRun {
+  return (entries, error) =>
+    callbackResult(() =>
+      callback({ offsets: !mock && (error !== null || emptyCommitted) ? null : offsetMapOf(entries), exception: error }),
+    );
+}
+
+/**
+ * The offsets a commit callback gets, as a `TopicPartitionMap`.
+ *
+ * @param entries - the addon's entries
+ * @returns the map
+ */
+function offsetMapOf(entries: NativeOffsetEntry[]): TopicPartitionMap<OffsetAndMetadata> {
+  const map = new TopicPartitionMap<OffsetAndMetadata>();
+  for (const [topic, partition, offset, leaderEpoch = -1, metadata = ''] of entries) {
+    if (offset !== null) map.set(new TopicPartition({ topic, partition }), offsetAndMetadataOf(offset, leaderEpoch, metadata));
+  }
+  return map;
+}
+
+/**
+ * An `OffsetAndMetadata` of the addon's fields.
+ *
+ * @param offset - the offset
+ * @param leaderEpoch - the leader epoch, -1 for none
+ * @param metadata - the metadata
+ * @returns the offset and its metadata
+ */
+function offsetAndMetadataOf(offset: bigint, leaderEpoch: number, metadata: string): OffsetAndMetadata {
+  return new OffsetAndMetadata({ offset, leaderEpoch: leaderEpoch < 0 ? null : leaderEpoch, metadata });
 }
 
 /**
@@ -502,6 +556,22 @@ export function poll<K, V>(handle: ConsumerHandle, options: unknown, count: numb
   });
 }
 
+/** The offsets of a commit as the addon takes them: `[[topic, partition], [offset, leaderEpoch, metadata]]` entries. */
+type OffsetEntries = Array<[[string | null, number] | null, [bigint, number, string] | null]>;
+
+/**
+ * The offsets of a commit as the addon takes them, or null for a null map. A
+ * null map, key or value goes to the FFI as NULL, which refuses it.
+ *
+ * @param value - the offsets given
+ * @returns the entries
+ */
+function offsetEntries(value: unknown): OffsetEntries | null {
+  const offsets = topicPartitionOffsetMap.take(value, 'offsets') as TopicPartitionMap<OffsetAndMetadata | null> | null;
+  if (offsets === null) return null;
+  return [...offsets.entries()].map(([tp, om]) => [tp === null ? null : [tp.topic, tp.partition], om === null ? null : offsetFields(om)]);
+}
+
 /**
  * The body of `Consumer#commitSync`, over a native consumer handle.
  *
@@ -514,21 +584,7 @@ export function commitSync(handle: ConsumerHandle, options: unknown, count: numb
   return rejecting(() => {
     const form = COMMIT_SYNC_FORMS.match(options, count);
     const withOffsets = form >= 2;
-    let entries: Array<[[string | null, number] | null, [bigint, number, string] | null]> | null = null;
-    if (withOffsets) {
-      const offsets = topicPartitionOffsetMap.take(
-        COMMIT_SYNC_FORMS.value(options, 'offsets'),
-        'offsets',
-      ) as TopicPartitionMap<OffsetAndMetadata | null> | null;
-      // A null map, key or value goes to the FFI as NULL, which refuses it.
-      entries =
-        offsets === null
-          ? null
-          : [...offsets.entries()].map(([tp, om]) => [
-              tp === null ? null : [tp.topic, tp.partition],
-              om === null ? null : offsetFields(om),
-            ]);
-    }
+    const entries = withOffsets ? offsetEntries(COMMIT_SYNC_FORMS.value(options, 'offsets')) : null;
     const timeoutMs = timeoutOf(COMMIT_SYNC_FORMS, options, form === 1 || form === 3);
     return completion((done) => native.consumerCommitSync(handle, withOffsets, entries, timeoutMs, done));
   });
@@ -540,14 +596,21 @@ export function commitSync(handle: ConsumerHandle, options: unknown, count: numb
  * @param handle - the native consumer handle
  * @param options - the argument given
  * @param count - the number of arguments given
+ * @param mock - whether the consumer is a mock, whose callback gets the map committed
  * @returns what the method returns
  */
-export function commitAsync(handle: ConsumerHandle, options: unknown, count: number): Promise<void> {
+export function commitAsync(handle: ConsumerHandle, options: unknown, count: number, mock: boolean): Promise<void> {
   return rejecting(() => {
-    // The argument is read, so a callback, whose forms are not in this
-    // release, gets the form error.
-    COMMIT_ASYNC_FORMS.match(options, count);
-    return completion((done) => native.consumerCommitAsync(handle, done));
+    let form = COMMIT_ASYNC_FORMS.match(options, count);
+    const callback = form === 0 ? null : COMMIT_ASYNC_FORMS.value(options, 'callback');
+    if (callback !== null && typeof callback !== 'function') throw new TypeError('callback must be an OffsetCommitCallback');
+    // Java's commitAsync() is commitAsync(null), so a null callback is the
+    // FFI's commit_async_cb, Java's failure log included; the FFI has no such
+    // form with offsets, and refuses a null callback there.
+    if (form === 1 && callback === null) form = 0;
+    const entries = form === 2 ? offsetEntries(COMMIT_ASYNC_FORMS.value(options, 'offsets')) : null;
+    const run = callback === null ? null : commitRun(callback as OffsetCommitCallback, mock, entries !== null && entries.length === 0);
+    return completion((done) => native.consumerCommitAsync(handle, form, entries, run, done));
   });
 }
 
@@ -650,10 +713,7 @@ export function committed(
     const entries = await answer<NativeOffsetEntry[]>((done) => native.consumerCommitted(handle, pairs, timeoutMs, done));
     const map = new TopicPartitionMap<OffsetAndMetadata | null>();
     for (const [topic, partition, offset, leaderEpoch = -1, metadata = ''] of entries) {
-      map.set(
-        new TopicPartition({ topic, partition }),
-        offset === null ? null : new OffsetAndMetadata({ offset, leaderEpoch: leaderEpoch < 0 ? null : leaderEpoch, metadata }),
-      );
+      map.set(new TopicPartition({ topic, partition }), offset === null ? null : offsetAndMetadataOf(offset, leaderEpoch, metadata));
     }
     return map;
   });
