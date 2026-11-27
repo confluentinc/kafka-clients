@@ -182,8 +182,7 @@ function callbackResult(run: () => unknown): Promise<unknown> | undefined {
  * with `{ partitions }`, a `TopicPartitionSet`, and the listener as `this`:
  * null for a missing required method, which the FFI refuses; a missing
  * `onPartitionsLost` runs Java's default (`ConsumerRebalanceListenerDefaults`),
- * which the binding checks for at each call (javascript/CLAUDE.md, JavaScript
- * Binding Conventions, Class family).
+ * looked up at each call (JS conventions, Class family).
  *
  * @param listener - the listener given
  * @returns the three functions, or null for a null listener, which the FFI refuses
@@ -297,9 +296,9 @@ function unwrapLayer(error: unknown): unknown {
 
 /**
  * The error a consumer call rejects with, a listener's or commit callback's
- * put back where Java has it (javascript/CLAUDE.md, JavaScript Binding
- * Conventions, Errors): the value it threw or rejected with comes back as
- * itself, inside the layer Java's call wraps it in. `close()` keeps its own
+ * put back where Java has it (JS conventions, Errors): the value it threw or
+ * rejected with comes back as itself, inside the layer Java's call wraps it
+ * in. `close()` keeps its own
  * layer, "Failed to close kafka consumer", Java's `new KafkaException(msg,
  * e)`, and the rule is applied to its cause.
  *

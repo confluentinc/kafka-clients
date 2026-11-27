@@ -48,16 +48,15 @@
 // running no JS.
 //
 // The listeners, the commit callbacks and the window: a rebalance listener's
-// methods (Listener) and an OffsetCommitCallback run on the JS thread, inside
+// methods (Listener) and an OffsetCommitCallback (CommitCallback) run inside
 // the drain of the waiting call that delivers them, and each reports once,
-// through __set_callback_result, at once or, for a Promise, once it settled
+// through __set_callback_result, at once or once its Promise settled
 // (Deferred). While a report is pending (`reports`), every call the
-// ConsumerHandle has goes through it, the handle the core admits while it runs
-// a callback, and every other call goes to the consumer, whose single-owner
-// flag refuses it. The handle is made with the consumer and destroyed after
-// it. A pending report holds the handle object, so the finalizer cannot run
-// before it is made; one the destroy itself runs is made at once, running no
-// JS, and none is made once the destroy has returned (`destroyed`).
+// ConsumerHandle has goes through the handle, which the core admits while it
+// runs a callback; every other call goes to the consumer, whose single-owner
+// flag refuses it. A pending report holds the handle object, so the finalizer
+// cannot run before it is made; one the destroy runs is made at once, running
+// no JS, and none once the destroy has returned (`destroyed`).
 
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -299,10 +298,10 @@ static void deferred_unlink(Deferred* d) {
 }
 
 // The one report of a callback whose Promise settled: `rejected` with the
-// value `reason`, or fulfilled. A no-op once reported. No report once the
-// destroy has returned (line 150 of javascript/CLAUDE.md): it is dropped.
-// `js` is false in a finalizer, where no JS runs: the report is then a
-// fulfilled one, and the handlers' references are the runtime's to drop.
+// value `reason`, or fulfilled. A no-op once reported, and dropped once the
+// destroy has returned (JS conventions, Threads and callbacks). `js` is false
+// in a finalizer, where no JS runs: the report is a fulfilled one, and the
+// handlers' references are the runtime's to drop.
 static void deferred_report(napi_env env, Deferred* d, int rejected, napi_value reason, int js) {
     if (d->reported) return;
     d->reported = 1;

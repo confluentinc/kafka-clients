@@ -122,10 +122,9 @@ static napi_value error_object(napi_env env, const kafka_common_Error_t* e, int 
 
     // A value the core carries (an error JS gave a mock, what a listener
     // method or commit callback threw or rejected with) comes back as the very
-    // same value (javascript/CLAUDE.md, JavaScript Binding Conventions,
-    // Errors), under `carried`, so a value of any type is never read as an
-    // error's fields, with the LocalCallbackError's message, which a layer the
-    // core built from it alone repeats.
+    // same value (JS conventions, Errors), under `carried`, so no value is
+    // read as an error's fields, with the LocalCallbackError's message, which
+    // a layer the core built from it alone repeats.
     napi_value injected = NULL;
     if (code == kafka_common_Error_LOCAL_CALLBACK) {
         const kafka_common_LocalCallbackError_t* local = NULL;

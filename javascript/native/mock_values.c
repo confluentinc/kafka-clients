@@ -12,9 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// What a client keeps of the app's JavaScript values (javascript/CLAUDE.md,
-// JavaScript Binding Conventions, Implementation over the FFI and Errors): a
-// mock's record whose key and value cross as the FFI's `void *` (MockRecord),
+// What a client keeps of the app's JavaScript values (JS conventions,
+// Implementation over the FFI and Errors): a mock's record whose key and value cross as the FFI's `void *` (MockRecord),
 // and a JS value the core carries as a LocalCallbackError (InjectedError): an
 // error JS gave a mock, or what a consumer's listener method or commit
 // callback threw or rejected with. Each client keeps its own lists of them;
@@ -76,8 +75,7 @@ MockRecord* mock_record_of(const void* key) {
 // struct: an error JS gave a mock (setSendException, errorNext,
 // setPollException, ...), or what a consumer's listener method or commit
 // callback threw or rejected with, which may be any value. error.c hands the
-// very same JS value back (javascript/CLAUDE.md, JavaScript Binding
-// Conventions, Errors). Two owners: the core's error, which releases it from
+// very same JS value back (JS conventions, Errors). Two owners: the core's error, which releases it from
 // any thread once its last copy is dropped (injected_error_release), and the
 // client's list, which deletes the reference on the JS thread once the core's
 // copies are gone (injected_errors_sweep, run by every mock call and every
