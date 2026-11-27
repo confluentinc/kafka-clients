@@ -21,7 +21,7 @@
 
 const assert = require('node:assert/strict');
 
-const { JavaForms } = require('../../../dist/internal/args');
+const { JavaForms, formOrder } = require('../../../dist/internal/args');
 const { IllegalArgumentError } = require('@confluentinc/kafka-javascript');
 const { KafkaError } = require('@confluentinc/kafka-javascript/common');
 
@@ -323,4 +323,74 @@ test('the message order may be given, and must hold every name', () => {
   assert.throws(() => new JavaForms('m', [['a', 'b']], { order: ['a'] }), {
     message: "JavaForms(m): the order a is not the forms' names a, b",
   });
+});
+
+// Python's Signatures rule: each overload keeps its own order, and where that
+// leaves a choice, the parameter of the earliest-declared overload goes first.
+test("formOrder keeps every form's order, a tie going to the earliest-declared form", () => {
+  // Java's Consumer.subscribe forms and TopicIdPartition's constructors, the
+  // rule's own examples.
+  assert.deepEqual(formOrder('subscribe', [['topics'], ['topics', 'callback'], ['pattern', 'callback'], ['pattern']]), [
+    'topics',
+    'pattern',
+    'callback',
+  ]);
+  assert.deepEqual(
+    formOrder('TopicIdPartition', [
+      ['topicId', 'topicPartition'],
+      ['topicId', 'partition', 'topic'],
+    ]),
+    ['topicId', 'topicPartition', 'partition', 'topic'],
+  );
+  // First appearance would put options before topics; the last form orders
+  // topics first, and nothing orders them the other way.
+  assert.deepEqual(formOrder('describeTopics', [['options'], ['topics', 'options']]), ['topics', 'options']);
+  // A name a later form places before an earlier one's name comes first.
+  assert.deepEqual(
+    formOrder('TokenInformation', [
+      ['tokenId', 'owner', 'renewers', 'issueTimestamp'],
+      ['tokenId', 'owner', 'tokenRequester', 'renewers', 'issueTimestamp'],
+    ]),
+    ['tokenId', 'owner', 'tokenRequester', 'renewers', 'issueTimestamp'],
+  );
+  // Names no form orders against each other: the earliest-declared form's
+  // first, then by position.
+  assert.deepEqual(formOrder('m', [['b'], ['a'], ['c', 'a']]), ['b', 'c', 'a']);
+  assert.deepEqual(formOrder('none', [[]]), []);
+  // The form error lists the names in that order.
+  assert.throws(() => new JavaForms('describeTopics', [['options'], ['topics', 'options']]).match({ x: 1 }, 1), {
+    constructor: IllegalArgumentError,
+    message: 'describeTopics() takes one of (options), (topics, options); got (x)',
+  });
+});
+
+test('forms that order two names both ways throw when the table is made', () => {
+  assert.throws(
+    () =>
+      formOrder('m', [
+        ['a', 'b'],
+        ['b', 'a'],
+      ]),
+    { message: 'JavaForms(m): the forms order a, b both ways' },
+  );
+  assert.throws(
+    () =>
+      new JavaForms('m', [
+        ['a', 'b', 'c'],
+        ['c', 'a'],
+      ]),
+    { message: 'JavaForms(m): the forms order a, b, c both ways' },
+  );
+  // An explicit order skips the sort.
+  assert.doesNotThrow(
+    () =>
+      new JavaForms(
+        'm',
+        [
+          ['a', 'b'],
+          ['b', 'a'],
+        ],
+        { order: ['a', 'b'] },
+      ),
+  );
 });

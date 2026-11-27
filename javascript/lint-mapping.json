@@ -4,6 +4,7 @@
     "src/duration.ts:Duration": "the type of every parameter taking a Java Duration: a number of milliseconds or a Temporal.Duration, which the root exports",
     "src/producer/producer_configs.ts:ProducerConfigs": "the type of the configuration map the constructor takes, Java's Map and Properties as one, its known keys generated from Java's ProducerConfig",
     "src/producer/kafka_producer.ts:CloseArgs": "the options object of Java's close(Duration), the timed form of the close() overload set",
+    "KafkaProducer.create": "KafkaProducer.create(), JavaScript's way to build an object that must wait: it awaits the serde config functions that return a Promise, which a constructor cannot (javascript/CLAUDE.md, JavaScript Binding Conventions, Lifetime)",
     "KafkaProducer.[Symbol.asyncDispose]": "[Symbol.asyncDispose] on the clients, JavaScript's form of Java's Closeable, so `await using` closes the producer",
     "MockProducer.[Symbol.asyncDispose]": "[Symbol.asyncDispose] on the clients, JavaScript's form of Java's Closeable, so `await using` closes the mock",
     "KafkaConsumer.[Symbol.asyncDispose]": "[Symbol.asyncDispose] on the clients, JavaScript's form of Java's Closeable, so `await using` closes the consumer",

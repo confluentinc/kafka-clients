@@ -968,7 +968,11 @@ test("a record's future is Java's FutureRecordMetadata: never cancelled", async 
 // Java's answers, from KafkaFutureImpl.cancel (CompletableFuture.cancel:
 // `cancelled || isCancelled()`, where a dependant cancelled through its source
 // or by its own function holds a CompletionException, so it is not "cancelled"
-// to CompletableFuture), while isCancelled() answers true for each.
+// to CompletableFuture). Java's KafkaFutureImpl.isCancelled answers true for
+// those, a CompletionException wrapping a CancellationException, but false
+// for a dependant cancelled with its own cancel(), which holds a bare
+// CancellationException; this client answers true there, as the Python and
+// .NET clients do.
 test("cancel() answers as Java's KafkaFutureImpl for each way a future is cancelled", () => {
   /** @type {FutureImpl<number>} */
   const src = newFuture();
@@ -986,6 +990,7 @@ test("cancel() answers as Java's KafkaFutureImpl for each way a future is cancel
   assert.equal(d2.isCancelled(), true);
   assert.equal(d2.cancel(true), false);
 
+  // Cancelled with its own cancel(): Java's isCancelled() answers false here.
   const d3 = newFuture().thenApply((x) => x);
   assert.equal(d3.cancel(true), true);
   assert.equal(d3.cancel(true), true);
@@ -1244,6 +1249,9 @@ test('cancelling a dependant cancels it and its own dependants, never its source
   assertIsNotCompleted(source);
   complete(source, 2);
   assert.equal(sibling.getNow(null), 6);
+  // isCancelled() answers true for the dependant cancelled with its own
+  // cancel(), as in the Python and .NET clients; Java's KafkaFutureImpl
+  // answers false.
   await assertIsCancelled(dependant);
 });
 

@@ -382,14 +382,40 @@ const producer = new KafkaProducer({ configs, keySerializer: stringSerializer(),
 const same = new KafkaProducer({ ...configs, 'key.serializer': stringSerializer, 'value.serializer': stringSerializer });
 ```
 
+A function in a config key may also return a Promise of the serializer, as a
+Schema Registry serializer's does when it fetches what it needs first. The
+constructor can't wait, so it throws `ConfigError` for one; build the producer
+with `await KafkaProducer.create(...)` instead *(js-only)*. It takes the
+constructor's arguments, awaits each function in turn, the key's first, and
+then builds the producer as the constructor does, with no network call of its
+own. A function that throws, or whose Promise rejects, rejects it with
+`KafkaError` "Failed to construct kafka producer", whose `cause` is the
+failure, and the serializers already made are closed. `Admin.create()` stays
+synchronous: it is Java's factory, and the admin client takes no serializers.
+`MockProducer` takes no serializer config keys, so it has no `create()`.
+
+<!-- snippet: fragment -->
+```js
+const producer = await KafkaProducer.create({
+  ...configs,
+  'schema.registry.url': 'http://localhost:8081',
+  'value.serializer': async ({ configs: given }) => {
+    // A Schema Registry serializer would fetch its schema from
+    // given['schema.registry.url'] here, before the producer is built.
+    await Promise.resolve(given['schema.registry.url']);
+    return stringSerializer();
+  },
+});
+```
+
 `stringSerializer()` writes Java's six standard charsets (`US-ASCII`,
 `ISO-8859-1`, `UTF-8`, `UTF-16BE`, `UTF-16LE` and `UTF-16`, under Java's names
 and aliases) byte for byte as Java does, UTF-8 by default: a
 `key.serializer.encoding`, `value.serializer.encoding` or
 `serializer.encoding` naming another charset throws `SerializationError`
 "Unsupported encoding <name>", as Node has no Java charset providers. A class name, a
-serializer object or a function that returns a Promise in a config key
-throws `ConfigError`.
+serializer object or a class in a config key throws `ConfigError`, a class
+with the hint "did you mean `() => new X()`?" naming it.
 
 What a serializer throws, or its Promise rejects with, is answered as Java's
 `KafkaProducer` answers it. An `ApiError` (any class from `common/errors`
@@ -711,7 +737,7 @@ code relying on them keeps running with another meaning: check each.
 | a bare value of the wrong type threw `TypeError` | it fits no overload: `IllegalArgumentError` "… takes one of (…); got a number" |
 | a Temporal.Duration with years, months or weeks was an `IllegalArgumentError` | **silent** for `instanceof RangeError`: it is a plain `RangeError` |
 | `SslConfigs.RECONFIGURABLE_CONFIGS` a frozen array (`.includes`) | a read-only set (`.has`) |
-| `key.serializer` / `value.serializer` reached the core | they take a synchronous function `({ configs, isKey }) => serializer`, which the producer calls once and keeps from the core; a class name, a serializer object or a function returning a Promise throws `ConfigError` |
+| `key.serializer` / `value.serializer` reached the core | they take a synchronous function `({ configs, isKey }) => serializer`, which the producer calls once and keeps from the core; a class name, a serializer object or a class throws `ConfigError`, and so does a function returning a Promise, which `await KafkaProducer.create(...)` takes |
 | `metadata.offset` / `metadata.timestamp` / `record.timestamp` numbers | bigints, Java's `long`; a timestamp is given as a bigint or a whole number up to 2^53 - 1 |
 | a config value was checked against its key's type, and an unknown key's value had to be a string, a number or a boolean | every value is written as a string (`true` as `"true"`, numbers and bigints in decimal, arrays joined with `,`, anything else by `String()`) and the core checks it; `null` and `undefined` leave the key unset |
 | the preview warning had the code `CONFLUENT_KAFKA_PREVIEW` | it has no code: filter on its type, `ExperimentalWarning` |

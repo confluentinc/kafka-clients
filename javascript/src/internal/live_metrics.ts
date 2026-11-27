@@ -31,13 +31,19 @@ type MetricsView = ReturnType<typeof native.producerMetrics>;
 type MetricEntry = ReturnType<typeof native.metricsViewEntries>[number];
 
 /**
- * A key's tags as the addon takes them: `[key, value]` pairs.
+ * A key's tags as the addon takes them: `[key, value]` pairs, or `null` when a
+ * tag value is null, which no metric of the core has (its tags are strings).
  *
  * @param name - the metric name
- * @returns its tags
+ * @returns its tags, or `null` when no metric of the core can have them
  */
-function tagPairs(name: MetricName): Array<[string, string]> {
-  return [...name.tags()];
+function tagPairs(name: MetricName): Array<[string, string]> | null {
+  const pairs: Array<[string, string]> = [];
+  for (const [key, value] of name.tags()) {
+    if (value === null) return null;
+    pairs.push([key, value]);
+  }
+  return pairs;
 }
 
 /**
@@ -67,9 +73,13 @@ export function liveMetrics(view: MetricsView): MetricNameMap<Metric> {
   };
   return MetricNameMap.internalLive<Metric>({
     size: () => native.metricsViewSize(view),
-    has: (key) => native.metricsViewHas(view, key.name(), key.group(), tagPairs(key)),
+    has: (key) => {
+      const tags = tagPairs(key);
+      return tags !== null && native.metricsViewHas(view, key.name(), key.group(), tags);
+    },
     get: (key) => {
-      const entry = native.metricsViewGet(view, key.name(), key.group(), tagPairs(key));
+      const tags = tagPairs(key);
+      const entry = tags === null ? null : native.metricsViewGet(view, key.name(), key.group(), tags);
       if (entry === null) {
         cache.delete(key.internalKey());
         return null;

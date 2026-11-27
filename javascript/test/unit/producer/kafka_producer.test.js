@@ -979,8 +979,12 @@ test('close() while a send waits for metadata rejects that send with a bare Kafk
     () => (settled = true),
     () => (settled = true),
   );
-  // Let the record reach the core, where it waits for the topic's metadata.
-  await new Promise((resolve) => setImmediate(resolve));
+  // Let the record reach the core and start waiting for the topic's metadata.
+  // The wait starts on the core's own task, so one turn of the event loop is
+  // not enough on a loaded machine: close() could win, and the send would be
+  // refused as closed (IllegalStateError) instead. max.block.ms (60 s) keeps
+  // the send pending meanwhile.
+  await new Promise((resolve) => setTimeout(resolve, 1000));
   assert.equal(settled, false);
   const started = Date.now();
   await producer.close();
@@ -2390,6 +2394,12 @@ test('a serde config key that is no synchronous function throws ConfigError, say
       return null;
     }
   }
+  /** A serializer class bound to a name, which JavaScript gives the class. */
+  const MySerializer = class {
+    serialize() {
+      return null;
+    }
+  };
   for (const [key, argument] of [
     ['key.serializer', 'keySerializer'],
     ['value.serializer', 'valueSerializer'],
@@ -2404,10 +2414,33 @@ test('a serde config key that is no synchronous function throws ConfigError, say
         `Invalid value an object for configuration ${key}: a serializer object is not a configuration value; ${pass(argument)}`,
       ],
       [5, `Invalid value a number for configuration ${key}: ${pass(argument)}`],
-      [StringSerializer, `Invalid value a function for configuration ${key}: a class is not called; ${pass(argument)}`],
+      [
+        StringSerializer,
+        `Invalid value a function for configuration ${key}: a class is not called (did you mean \`() => new StringSerializer()\`?); ${pass(argument)}`,
+      ],
+      // A class bound to a name is written under it; an anonymous one, whose
+      // inferred name is the config key, gets the message without a name.
+      [
+        MySerializer,
+        `Invalid value a function for configuration ${key}: a class is not called (did you mean \`() => new MySerializer()\`?); ${pass(argument)}`,
+      ],
+      [
+        /** An anonymous serializer class. */
+        class {
+          serialize() {
+            return null;
+          }
+        },
+        `Invalid value a function for configuration ${key}: a class is not called; ${pass(argument)}`,
+      ],
+      [
+        /** An anonymous subclass, whose source starts `class extends`. */
+        class extends StringSerializer {},
+        `Invalid value a function for configuration ${key}: a class is not called; ${pass(argument)}`,
+      ],
       [
         async () => ({ serialize: () => null }),
-        `Invalid value a function for configuration ${key}: the function returned a Promise; it must return the serializer itself, synchronously`,
+        `Invalid value a function for configuration ${key}: the function returned a Promise, which the constructor cannot wait for; build the producer with await KafkaProducer.create(...), which waits for it`,
       ],
       [
         () => 'org.example.Serializer',
@@ -2423,6 +2456,22 @@ test('a serde config key that is no synchronous function throws ConfigError, say
         },
       );
     }
+    // A class written in the key itself infers the key as its name, which
+    // is no class name: the message names none.
+    assert.throws(
+      () =>
+        new KafkaProducer({
+          ...UNREACHABLE,
+          /** A serializer class written in the key. */
+          // @ts-expect-error a class in a serde config key: the check throws ConfigError
+          'key.serializer': class {
+            serialize() {
+              return null;
+            }
+          },
+        }),
+      { message: `Invalid value a function for configuration key.serializer: a class is not called; ${pass('keySerializer')}` },
+    );
     // null and undefined leave the key unset: no serializer.
     for (const value of [null, undefined]) {
       const producer = new KafkaProducer({ ...UNREACHABLE, [key]: value });
@@ -2510,6 +2559,201 @@ test('a serde config function that throws is a construction failure, and the ser
   });
   await producer.close();
   assert.deepEqual(closed, ['value']);
+});
+
+// KafkaProducer.create() (javascript/CLAUDE.md, JavaScript Binding
+// Conventions, Lifetime): the constructor's arguments, each serde config
+// function awaited in turn, the key's first, then the producer built as the
+// constructor builds it.
+test("create() awaits each serde config function, the key's first, then builds the producer", async () => {
+  /** @type {string[]} */
+  const events = [];
+  /** @type {(() => void) | undefined} */
+  let releaseKey;
+  const keyReady = new Promise((resolve) => (releaseKey = () => resolve(undefined)));
+  /** @param {string} name */
+  const serializer = (name) => ({ serialize: () => null, close: () => events.push(`close ${name}`) });
+  const creating = KafkaProducer.create({
+    ...UNREACHABLE,
+    'key.serializer': async (/** @type {{ isKey: boolean }} */ { isKey }) => {
+      events.push(`key called, isKey=${isKey}`);
+      await keyReady;
+      events.push('key resolved');
+      return serializer('key');
+    },
+    'value.serializer': ({ isKey }) => {
+      events.push(`value called, isKey=${isKey}`);
+      return Promise.resolve(serializer('value'));
+    },
+  });
+  assert.ok(creating instanceof Promise);
+  // The value's function waits for the key's Promise.
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(events, ['key called, isKey=true']);
+  /** @type {() => void} */ (releaseKey)();
+  const producer = await creating;
+  assert.ok(producer instanceof KafkaProducer);
+  assert.deepEqual(events, ['key called, isKey=true', 'key resolved', 'value called, isKey=false']);
+  await producer.close();
+  assert.deepEqual(events.slice(3), ['close key', 'close value']);
+});
+
+test("create() takes the constructor's forms: a serializer given skips its key, and a synchronous function is taken", async () => {
+  /** @type {string[]} */
+  const calls = [];
+  const producer = await KafkaProducer.create({
+    configs: {
+      ...UNREACHABLE,
+      'key.serializer': () => {
+        calls.push('key');
+        return { serialize: () => null };
+      },
+      'value.serializer': () => {
+        calls.push('value');
+        return { serialize: () => null };
+      },
+    },
+    keySerializer: { serialize: () => null },
+    valueSerializer: null,
+  });
+  assert.deepEqual(calls, ['value']);
+  await producer.close();
+  // No serde key at all, the bare configs form.
+  await (await KafkaProducer.create(UNREACHABLE)).close();
+  // A form error, or an argument error, rejects: create() never throws.
+  // @ts-expect-error no arguments: the form check rejects with IllegalArgumentError
+  const noArguments = KafkaProducer.create();
+  await assert.rejects(noArguments, {
+    constructor: IllegalArgumentError,
+    message: 'create() takes one of (configs), (configs, keySerializer, valueSerializer); got ()',
+  });
+  // @ts-expect-error a keySerializer that is no serializer: the check rejects with TypeError
+  await assert.rejects(KafkaProducer.create({ configs: UNREACHABLE, keySerializer: 5, valueSerializer: null }), {
+    constructor: TypeError,
+    message: 'keySerializer must be a Serializer: an object with a serialize({ topic, headers, data }) method, or null',
+  });
+});
+
+test("create() wraps a throw or a rejection as Java's construction failure, and closes the serializers already returned", async () => {
+  /** @type {string[]} */
+  const closed = [];
+  /** @param {string} name */
+  const serializer = (name) => ({ serialize: () => null, close: () => closed.push(name) });
+  const cause = new Error('cannot build');
+  /** @param {unknown} e */
+  const failed = (e) => {
+    assert.equal(/** @type {Error} */ (e).constructor, KafkaError);
+    assert.equal(/** @type {Error} */ (e).message, 'Failed to construct kafka producer');
+    assert.equal(/** @type {Error} */ (e).cause, cause);
+    return true;
+  };
+  // The key's function throws: nothing was returned, nothing is closed.
+  await assert.rejects(
+    KafkaProducer.create({
+      ...UNREACHABLE,
+      'key.serializer': () => {
+        throw cause;
+      },
+      'value.serializer': async () => serializer('value'),
+    }),
+    failed,
+  );
+  assert.deepEqual(closed, []);
+  // The value's Promise rejects: the key's serializer is closed.
+  await assert.rejects(
+    KafkaProducer.create({
+      ...UNREACHABLE,
+      'key.serializer': async () => serializer('key'),
+      'value.serializer': () => Promise.reject(cause),
+    }),
+    failed,
+  );
+  assert.deepEqual(closed, ['key']);
+  // The value's function throws with a key serializer given: the key one is
+  // taken, so it is closed too, as the constructor closes it.
+  closed.length = 0;
+  await assert.rejects(
+    KafkaProducer.create({
+      configs: {
+        ...UNREACHABLE,
+        'value.serializer': () => {
+          throw cause;
+        },
+      },
+      keySerializer: serializer('key argument'),
+      valueSerializer: null,
+    }),
+    failed,
+  );
+  assert.deepEqual(closed, ['key argument']);
+  // A serde config key's ConfigError is not wrapped, and closes only the
+  // serializer a function returned.
+  closed.length = 0;
+  await assert.rejects(
+    KafkaProducer.create({
+      configs: {
+        ...UNREACHABLE,
+        // @ts-expect-error a function that returns no serializer: the check rejects with ConfigError
+        'key.serializer': async () => serializer('key'),
+        'value.serializer': async () => 'org.example.Serializer',
+      },
+      keySerializer: null,
+      valueSerializer: null,
+    }),
+    {
+      constructor: ConfigError,
+      message:
+        'Invalid value a function for configuration value.serializer: the function returned a string, not a serializer: an object with a serialize({ topic, headers, data }) method',
+    },
+  );
+  assert.deepEqual(closed, ['key']);
+  closed.length = 0;
+  await assert.rejects(
+    // @ts-expect-error a class name in a serde config key: the check rejects with ConfigError
+    KafkaProducer.create({ ...UNREACHABLE, 'key.serializer': async () => serializer('key'), 'value.serializer': 'x.Y' }),
+    {
+      constructor: ConfigError,
+      message:
+        'Invalid value x.Y for configuration value.serializer: a class name cannot be loaded in JavaScript; pass a function ({ configs, isKey }) => serializer, or one returning a Promise of it, such as stringSerializer, or the serializer itself as the valueSerializer argument',
+    },
+  );
+  assert.deepEqual(closed, ['key']);
+  // The core's check of the configuration fails once both were returned:
+  // both are closed, as only the producer holds them.
+  closed.length = 0;
+  await assert.rejects(
+    KafkaProducer.create({
+      'bootstrap.servers': '127.0.0.1:1',
+      acks: 'sometimes',
+      'key.serializer': async () => serializer('key'),
+      'value.serializer': async () => serializer('value'),
+    }),
+    { name: 'ConfigError', message: 'Invalid value sometimes for configuration acks: String must be one of: all, -1, 0, 1' },
+  );
+  assert.deepEqual(closed, ['key', 'value']);
+});
+
+test('the constructor refuses a Promise from a serde config function, closes what it resolves to, and leaves no rejection unhandled', () => {
+  const r = runNode(`
+    const { KafkaProducer } = require('@confluentinc/kafka-javascript/producer');
+    process.on('unhandledRejection', (e) => console.log('unhandled:', e && e.message));
+    const configs = { 'bootstrap.servers': '127.0.0.1:1' };
+    for (const make of [
+      async () => ({ serialize: () => null, close: () => console.log('closed') }),
+      async () => { throw new Error('rejected'); },
+    ]) {
+      try {
+        new KafkaProducer({ ...configs, 'key.serializer': make });
+      } catch (e) {
+        console.log(e.name, e.message);
+      }
+    }
+    setTimeout(() => console.log('done'), 50);
+  `);
+  assert.equal(r.status, 0, r.stderr);
+  const refused =
+    'ConfigError Invalid value a function for configuration key.serializer: the function returned a Promise, which the constructor cannot wait for; build the producer with await KafkaProducer.create(...), which waits for it';
+  assert.equal(r.stdout, `${refused}\n${refused}\nclosed\ndone\n`);
 });
 
 test('stringSerializer goes in a serde config key without (), configured by its encoding keys', async () => {
@@ -2659,6 +2903,18 @@ test("metrics() is a MetricNameMap of KafkaMetric, keyed by Java's MetricName", 
       tags: new Map([['client-id', 'unit-metrics']]),
     });
     assert.equal(metrics.has(key), true);
+    // A null tag value, which Java's map holds, names no metric of the core,
+    // whose tags are strings, and the string "null" none either.
+    for (const tag of [null, 'null']) {
+      const nullTag = new MetricName({
+        name: 'record-send-total',
+        group: 'producer-metrics',
+        description: '',
+        tags: new Map([['client-id', tag]]),
+      });
+      assert.equal(metrics.has(nullTag), false);
+      assert.equal(metrics.get(nullTag), null);
+    }
     const total = metrics.get(key);
     assert.ok(total instanceof KafkaMetric);
     assert.equal(total.isMeasurable(), true);

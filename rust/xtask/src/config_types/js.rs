@@ -19,8 +19,10 @@
 //! `ConfigDef` table and checks no value (javascript/CLAUDE.md, JavaScript Binding
 //! Conventions, Configuration): only the key names are read from Java, a type
 //! with no run-time part. The producer's serde keys, `key.serializer` and
-//! `value.serializer`, take a synchronous function `({ configs, isKey }) =>
-//! serializer` instead (Serialization, Q53), and so may an unknown key.
+//! `value.serializer`, take a function `({ configs, isKey }) => serializer`
+//! instead, one returning a Promise of it included, which only
+//! `KafkaProducer.create()` waits for (Serialization and Lifetime), and so may
+//! an unknown key.
 //!
 //! It also writes `src/consumer/consumer_configs.ts`, the type of a
 //! consumer's configuration: every key Java's `ConsumerConfig` defines, the
@@ -234,15 +236,16 @@ fn configs_type(repo_root: &Path, keys: &[String]) -> (PathBuf, String) {
          * (`true` as `\"true\"`, numbers and bigints in decimal, arrays joined with\n \
          * `,`, anything else by `String()`); `null` and `undefined` leave the key\n \
          * out. The core checks every key and value, with Java's messages.\n \
-         * `key.serializer` and `value.serializer` take a synchronous function\n \
+         * `key.serializer` and `value.serializer` take a function\n \
          * `({ configs, isKey }) => serializer`, such as `stringSerializer`, and\n \
-         * never reach the core.\n \
+         * never reach the core. The constructor takes only a synchronous one;\n \
+         * `KafkaProducer.create()` also waits for one that returns a Promise.\n \
          *\n \
-         * @remarks *(js-only)* The type of the configuration the constructor takes,\n \
-         * Java's `Map<String, Object>` and `Properties` as one. It lists the keys\n \
-         * Java's `ProducerConfig` defines, for autocompletion, and takes any other\n \
-         * string too, through `(string & {})`, since an unknown key goes to the\n \
-         * core.\n \
+         * @remarks *(js-only)* The type of the configuration the constructor and\n \
+         * `create()` take, Java's `Map<String, Object>` and `Properties` as one. It\n \
+         * lists the keys Java's `ProducerConfig` defines, for autocompletion, and\n \
+         * takes any other string too, through `(string & {})`, since an unknown key\n \
+         * goes to the core.\n \
          */\n\
          export type ProducerConfigs = {\n  \
          [key in\n",
@@ -263,9 +266,10 @@ fn configs_type(repo_root: &Path, keys: &[String]) -> (PathBuf, String) {
          // A value the core parses.\n\
          type ConfigValue = string | number | boolean | bigint | ReadonlyArray<string | number | bigint> | null | undefined;\n\
          \n\
-         // A serde config key's value: the function that makes the serializer.\n\
+         // A serde config key's value: the function that makes the serializer,\n\
+         // or a Promise of it, which only `create()` waits for.\n\
          type SerializerConfig =\n  \
-         | ((options: { configs: Readonly<Record<string, unknown>>; isKey: boolean }) => AnySerializer)\n  \
+         | ((options: { configs: Readonly<Record<string, unknown>>; isKey: boolean }) => AnySerializer | PromiseLike<AnySerializer>)\n  \
          | null\n  \
          | undefined;\n\
          \n\
@@ -389,7 +393,8 @@ mod tests {
             "    | 'linger.ms'\n",
             "    | (string & {})]?: key extends 'key.serializer' | 'value.serializer'\n",
             "type ConfigValue = string | number | boolean | bigint",
-            "=> AnySerializer)",
+            "=> AnySerializer | PromiseLike<AnySerializer>)",
+            "`KafkaProducer.create()` also waits for one that returns a Promise.",
             "serialize(options: { topic: string; headers: Headers })",
         ] {
             assert!(text.contains(line), "missing {line}");

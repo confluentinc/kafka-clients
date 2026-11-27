@@ -355,6 +355,12 @@ pub(crate) fn modules(repo_root: &Path) -> Res<Vec<JsModule>> {
                 anyhow::bail!("config constants: the note on `{c}.{k}` names no constant");
             }
         }
+        // Java's constants are static finals: the class is frozen once its
+        // static fields are set, so none can be reassigned.
+        text.push_str(
+            "\n  // Java's constants are static finals: the class is frozen once its static\n  \
+             // fields are set, so none can be reassigned.\n  static {\n    Object.freeze(this);\n  }\n",
+        );
         text.push_str("}\n");
         let stem = crate::error_hierarchy::snake(name);
         out.push(JsModule {
@@ -436,6 +442,14 @@ mod tests {
         assert!(producer
             .content
             .contains("@remarks *(deviation)* Constants only: `new` throws `TypeError`."));
+        // Every class ends frozen, so no constant can be reassigned.
+        for m in &modules {
+            assert!(
+                m.content.ends_with("  static {\n    Object.freeze(this);\n  }\n}\n"),
+                "{}",
+                m.name
+            );
+        }
         let sasl = modules.iter().find(|m| m.name == "SaslConfigs").unwrap();
         assert!(sasl
             .content

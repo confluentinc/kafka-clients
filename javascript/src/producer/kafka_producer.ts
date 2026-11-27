@@ -21,12 +21,21 @@
 import native = require('../internal/native');
 import { JavaForms } from '../internal/args';
 import { checkConfigs, configEntries } from '../internal/config';
+import { finalStatics } from '../internal/static_finals';
 import { debug } from '../internal/debug';
 import { durationToMillis, isDurationOrNull } from '../internal/duration';
 import { liveMetrics } from '../internal/live_metrics';
 import { warnPreview } from '../internal/lifecycle';
 import { partitionInfoOf } from '../internal/metadata';
-import { checkSerializer, closeSerializer, configuredSerializer, isThenable, serializedBytes, serializerFailure } from '../internal/serde';
+import {
+  awaitedSerializers,
+  checkSerializer,
+  closeSerializer,
+  configuredSerializer,
+  isThenable,
+  serializedBytes,
+  serializerFailure,
+} from '../internal/serde';
 import { ApiError } from '../common/errors/api_error';
 import { KafkaError } from '../common/kafka_error';
 import { KafkaFuture } from '../common/kafka_future';
@@ -63,12 +72,22 @@ export type CloseArgs = {
 /**
  * The serde config keys of a producer's configuration, typed by the
  * serializers their functions return, so that a producer built through them
- * infers its type arguments as one built with serializer arguments does.
+ * infers its type arguments as one built with serializer arguments does. The
+ * constructor and `create()` share it: a function returning a Promise is
+ * typed for both, and only `create()` waits for one.
  */
 type SerdeConfigs<K, V> = {
-  'key.serializer'?: ((options: { configs: Readonly<Record<string, unknown>>; isKey: boolean }) => Serializer<K>) | null;
-  'value.serializer'?: ((options: { configs: Readonly<Record<string, unknown>>; isKey: boolean }) => Serializer<V>) | null;
+  'key.serializer'?:
+    ((options: { configs: Readonly<Record<string, unknown>>; isKey: boolean }) => Serializer<K> | PromiseLike<Serializer<K>>) | null;
+  'value.serializer'?:
+    ((options: { configs: Readonly<Record<string, unknown>>; isKey: boolean }) => Serializer<V> | PromiseLike<Serializer<V>>) | null;
 };
+
+/**
+ * The serializers `create()` awaited, handed to the constructor it calls
+ * next, and the keys their functions read; null outside that call.
+ */
+let awaited: { key: Serializer<unknown> | null; value: Serializer<unknown> | null; read: Set<string> } | null = null;
 
 /** The native producer handle (`internal/native.ts`). */
 type ProducerHandle = ReturnType<typeof native.producerCreate>;
@@ -81,6 +100,11 @@ type ProducerHandle = ReturnType<typeof native.producerCreate>;
 // then refused as the configuration), the record a ProducerRecord, the timeout
 // a number or a Temporal.Duration; `null` is Java's null.
 const CONSTRUCTOR_FORMS = new JavaForms('KafkaProducer', [['configs'], ['configs', 'keySerializer', 'valueSerializer']], {
+  bareIsPlainObject: true,
+  bareTypes: { configs: (value) => typeof value === 'object' },
+});
+// create() takes the constructor's forms.
+const CREATE_FORMS = new JavaForms('create', [['configs'], ['configs', 'keySerializer', 'valueSerializer']], {
   bareIsPlainObject: true,
   bareTypes: { configs: (value) => typeof value === 'object' },
 });
@@ -290,6 +314,11 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
   /** The group of the producer's metrics. */
   static readonly PRODUCER_METRIC_GROUP_NAME: string = 'producer-metrics';
 
+  // Java's static finals: they can't be reassigned.
+  static {
+    finalStatics(this, 'NETWORK_THREAD_PREFIX', 'PRODUCER_METRIC_GROUP_NAME');
+  }
+
   #handle: ProducerHandle;
   // The serializers given, or null: the record's bytes cross as they are.
   // (Typed over unknown: send() reads the record as ProducerRecord<unknown, unknown>.)
@@ -328,13 +357,13 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
    *   neither null nor an object with a `serialize` method
    *
    * @remarks Java's `Map` and `Properties` forms are `configs`.
-   * `key.serializer` and `value.serializer` take a function
-   * `({ configs, isKey }) => serializer` *(deviation: Java takes a class)*.
-   * These keys, and any non-producer key the function reads, don't reach the
-   * core. *(deviation)* The function gets the configuration as given, without
-   * Java's `client.id`, before the core checks it. Without serializers, keys
-   * and values are sent as bytes *(deviation)*. Once per process it emits an
-   * `ExperimentalWarning`.
+   * `key.serializer` and `value.serializer` take a synchronous function
+   * `({ configs, isKey }) => serializer` *(deviation: Java takes a class)*,
+   * or, through `create()`, one returning a Promise; these keys don't reach
+   * the core. *(deviation)* The function gets the configuration as given,
+   * without Java's `client.id`, before the core checks it. Without
+   * serializers, keys and values are sent as bytes *(deviation)*. Once per
+   * process it emits an `ExperimentalWarning`.
    */
   constructor(options: {
     /** The producer configs: a plain object of Java's ProducerConfig keys. */
@@ -381,6 +410,10 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
    */
   constructor(configs: ProducerConfigs & SerdeConfigs<K, V>);
   constructor(options: unknown) {
+    // The serializers create() awaited for this construction, taken before
+    // anything else runs.
+    const given = awaited;
+    awaited = null;
     const form = CONSTRUCTOR_FORMS.match(options, arguments.length);
     const configs = checkConfigs(CONSTRUCTOR_FORMS.value(options, 'configs'));
     const keyArgument = form === 0 ? null : checkSerializer(CONSTRUCTOR_FORMS.value(options, 'keySerializer'), 'keySerializer');
@@ -388,17 +421,17 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
     // A serializer given wins, and its config key is ignored; a null one (or
     // none) is the config key's, as Java's `if (keySerializer == null)`. The
     // keys the config functions read stay out of the core's configuration.
-    const read = new Set<string>();
-    let keyConfigured: Serializer<unknown> | null = null;
-    let valueConfigured: Serializer<unknown> | null = null;
+    const read = given?.read ?? new Set<string>();
+    let keyConfigured: Serializer<unknown> | null = given?.key ?? null;
+    let valueConfigured: Serializer<unknown> | null = given?.value ?? null;
     // How many serializers construction has taken, key first: Java's
     // constructor assigns the key serializer's plugin, then the value's, and
     // its catch closes only those already assigned.
     let taken = 0;
     try {
-      if (keyArgument === null) keyConfigured = configuredSerializer(configs, 'key.serializer', read);
+      if (keyArgument === null && given === null) keyConfigured = configuredSerializer(configs, 'key.serializer', read);
       taken = 1;
-      if (valueArgument === null) valueConfigured = configuredSerializer(configs, 'value.serializer', read);
+      if (valueArgument === null && given === null) valueConfigured = configuredSerializer(configs, 'value.serializer', read);
       taken = 2;
       this.#keySerializer = keyArgument ?? keyConfigured;
       this.#valueSerializer = valueArgument ?? valueConfigured;
@@ -418,6 +451,83 @@ export class KafkaProducer<K = Uint8Array, V = Uint8Array> implements Producer<K
     }
     warnPreview();
     debug('KafkaProducer created');
+  }
+
+  /**
+   * Builds a producer as the constructor does, once the functions of its
+   * serde config keys have returned: each may return a Promise, which is
+   * awaited, the key's first, then the value's. It makes no network call of
+   * its own.
+   *
+   * @param options - the producer configs
+   * @returns a Promise of the producer
+   * @throws `KafkaError` (a rejection) as the constructor, and "Failed to
+   *   construct kafka producer", with the failure as its `cause`, when a
+   *   serde config function throws or its Promise rejects; a serializer
+   *   already made is then closed
+   * @throws `ConfigError` (a rejection) when a serde config key holds no
+   *   function, or its function gives no serializer
+   * @throws `IllegalArgumentError` (a rejection) when the given parameters
+   *   are not `{configs}` or `{configs, keySerializer, valueSerializer}`
+   * @throws `TypeError` (a rejection) as the constructor
+   *
+   * @remarks *(js-only)* A constructor cannot wait, so a serde config
+   * function returning a Promise, as a Schema Registry serializer's may, needs
+   * `create()`; `new KafkaProducer(...)` refuses one with a `ConfigError`.
+   * `Admin.create()` is Java's factory and stays synchronous: the admin
+   * client takes no serializers.
+   */
+  static create<K = Uint8Array, V = Uint8Array>(options: {
+    /** The producer configs: a plain object of Java's ProducerConfig keys. */
+    configs: ProducerConfigs & SerdeConfigs<K, V>;
+    keySerializer?: never;
+    valueSerializer?: never;
+  }): Promise<KafkaProducer<K, V>>;
+  /**
+   * Builds a producer with a key and a value `Serializer`, as the
+   * constructor does, once the functions of the serde config keys whose
+   * serializer is null have returned.
+   *
+   * @param options - the producer configs and the serializers
+   * @returns a Promise of the producer
+   */
+  static create<K = Uint8Array, V = Uint8Array>(options: {
+    /** The producer configs: a plain object of Java's ProducerConfig keys. */
+    configs: ProducerConfigs & SerdeConfigs<K, V>;
+    /** The serializer for key that implements `Serializer`, or null. */
+    keySerializer: Serializer<K> | null;
+    /** The serializer for value that implements `Serializer`, or null. */
+    valueSerializer: Serializer<V> | null;
+  }): Promise<KafkaProducer<K, V>>;
+  /**
+   * Builds a producer from the configs on their own, the same as
+   * `create({configs})`.
+   *
+   * @param configs - The producer configs
+   * @returns a Promise of the producer
+   */
+  static create<K = Uint8Array, V = Uint8Array>(configs: ProducerConfigs & SerdeConfigs<K, V>): Promise<KafkaProducer<K, V>>;
+  static create(options: unknown): Promise<KafkaProducer<unknown, unknown>> {
+    try {
+      const form = CREATE_FORMS.match(options, arguments.length);
+      // The arguments as checked now, so that the constructor gets the same
+      // ones once the functions have returned.
+      const configs = { ...checkConfigs(CREATE_FORMS.value(options, 'configs')) };
+      const keySerializer = form === 0 ? null : checkSerializer(CREATE_FORMS.value(options, 'keySerializer'), 'keySerializer');
+      const valueSerializer = form === 0 ? null : checkSerializer(CREATE_FORMS.value(options, 'valueSerializer'), 'valueSerializer');
+      const read = new Set<string>();
+      return awaitedSerializers(configs, [keySerializer, valueSerializer], read).then(([key, value]) => {
+        awaited = { key, value, read };
+        try {
+          return new KafkaProducer<unknown, unknown>({ configs: configs as ProducerConfigs, keySerializer, valueSerializer });
+        } finally {
+          awaited = null;
+        }
+      });
+    } catch (error) {
+      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with what the checks threw: an Error of the client's or JavaScript's (typed unknown by catch)
+      return Promise.reject(error);
+    }
   }
 
   // Java's close closes both serializers; a failure is a process warning.

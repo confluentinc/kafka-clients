@@ -183,9 +183,11 @@ object `{ serialize({ topic, headers, data }) }` (or `null`), whose
 `key.serializer` and `value.serializer`, which take a synchronous function
 `({ configs, isKey }) => serializer`, such as `stringSerializer`, called once
 with the whole configuration in place of Java's class and its `configure()`.
-A class name, a serializer object or a function that returns a Promise
-there throws `ConfigError`. A constructor argument wins, and its config key
-is then ignored.
+A class name, a serializer object or a class there throws `ConfigError`,
+and so does a function that returns a Promise, which the constructor cannot
+wait for: `await KafkaProducer.create(...)` takes the constructor's arguments
+and awaits each such function, the key's first, before it builds the
+producer. A constructor argument wins, and its config key is then ignored.
 
 **Schema Registry.** Keep `@confluentinc/schemaregistry`, its imports and its
 calls, and upgrade it to its release that supports 4.x, which ships its own
@@ -199,6 +201,24 @@ keeps working with any release:
 ```js
 const value = await serializer.serialize(topic, { fullName: 'John Doe' });
 await (await producer.send(new ProducerRecord({ topic, key: Buffer.from('k'), value }))).get();
+```
+
+A serializer whose config function waits, as a Schema Registry one does to
+fetch its schema, goes in `key.serializer` or `value.serializer` of
+`KafkaProducer.create()`, which awaits it before the producer is built:
+
+<!-- snippet: fragment -->
+```js
+const registered = await KafkaProducer.create({
+  ...configs,
+  'schema.registry.url': 'http://localhost:8081',
+  'value.serializer': async ({ configs: given }) => {
+    // Fetch the schema from given['schema.registry.url'], then return the serializer.
+    await Promise.resolve(given['schema.registry.url']);
+    return { serialize: ({ data }) => (data === null ? null : Buffer.from(JSON.stringify(data))) };
+  },
+});
+await registered.close();
 ```
 
 ### Calls and arguments

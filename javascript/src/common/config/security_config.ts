@@ -35,4 +35,10 @@ export class SecurityConfig {
    * Java's default constructor. The class holds only its constants, which are static.
    */
   constructor() {}
+
+  // Java's constants are static finals: the class is frozen once its static
+  // fields are set, so none can be reassigned.
+  static {
+    Object.freeze(this);
+  }
 }

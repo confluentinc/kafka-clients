@@ -16,6 +16,7 @@
 // Conventions, Class family): Java's getters are readonly fields of a frozen
 // object, set in the constructor.
 
+import { finalStatics } from '../internal/static_finals';
 import { JavaForms } from '../internal/args';
 import { checkInt, checkLong } from '../internal/java_number';
 import { TopicPartition } from '../common/topic_partition';
@@ -83,6 +84,11 @@ export class RecordMetadata {
    * Partition value for record without partition assigned
    */
   static readonly UNKNOWN_PARTITION: -1 = -1;
+
+  // Java's static final: it can't be reassigned.
+  static {
+    finalStatics(this, 'UNKNOWN_PARTITION');
+  }
 
   /**
    * Makes `RecordMetadata` nominal: TypeScript checks it by name, not by

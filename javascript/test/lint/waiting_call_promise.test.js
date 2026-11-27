@@ -25,13 +25,13 @@ const { FILES, PRODUCER_TS } = require('./_native_fixture');
 
 const RULE = 'check-waiting-call-promise';
 
-// The fixture has no KafkaFuture: the rule runs without the real tree's
-// DEPENDANTS, which would match nothing there.
+// The fixture has no KafkaFuture or KafkaProducer: the rule runs without the
+// real tree's DEPENDANTS and CREATES, which would match nothing there.
 /**
  * @param {string} root
  * @param {string[]} names
  */
-const lint = (root, names) => lintAll(root, names, { rules: [withLists(WAITING, { DEPENDANTS: [] })] });
+const lint = (root, names, lists = {}) => lintAll(root, names, { rules: [withLists(WAITING, { DEPENDANTS: [], CREATES: [], ...lists })] });
 
 const fixture = (files = {}) => project({ 'tsconfig.json': TSCONFIG, ...FILES, ...files });
 
@@ -124,11 +124,36 @@ test('no method with a native call fails: 0 items checked', () => {
 });
 
 test('a DEPENDANTS entry that matches nothing is a finding; the real tree lists allOf', () => {
-  const r = lintAll(fixture(), [RULE], { rules: [withLists(WAITING, { DEPENDANTS: [{ key: 'Producer.nothing', reason: 'the test' }] })] });
+  const r = lint(fixture(), [RULE], { DEPENDANTS: [{ key: 'Producer.nothing', reason: 'the test' }] });
   assert.equal(r.status, 1);
   assert.deepEqual(findings(r), ['Producer.nothing: is allowed as the test, but nothing matches it any more: delete the entry']);
   assert.deepEqual(
     WAITING.DEPENDANTS.map((d) => d.key),
     ['KafkaFuture.allOf'],
+  );
+});
+
+// A static create() returning a Promise with no _cb twin on its path passes
+// only when CREATES lists it; a listed one that matches nothing, and any other
+// static, are findings.
+test('a static create() listed in CREATES may return a Promise; nothing else may', () => {
+  const create = PRODUCER_TS.replace(
+    'pump(): void {\n    native.pump();',
+    'static create(): Promise<Producer> {\n    native.pump();\n    return Promise.resolve(new Producer());\n  }\n\n  static make(): Promise<Producer> {\n    native.pump();\n    return Promise.resolve(new Producer());\n  }\n\n  pump(): void {\n    native.pump();',
+  );
+  const allowed = [{ key: 'Producer.create', reason: 'the test' }];
+  const r = lint(fixture({ 'src/producer/producer.ts': create }), [RULE], { CREATES: allowed });
+  assert.equal(r.status, 1);
+  assert.deepEqual(findings(r), ['Producer.make: returns Promise<Producer> but its native path (native.pump) reaches no _cb twin']);
+  const unlisted = lint(fixture({ 'src/producer/producer.ts': create }), [RULE]);
+  assert.deepEqual(findings(unlisted), [
+    'Producer.create: returns Promise<Producer> but its native path (native.pump) reaches no _cb twin',
+    'Producer.make: returns Promise<Producer> but its native path (native.pump) reaches no _cb twin',
+  ]);
+  const unused = lint(fixture(), [RULE], { CREATES: allowed });
+  assert.deepEqual(findings(unused), ['Producer.create: is allowed as the test, but nothing matches it any more: delete the entry']);
+  assert.deepEqual(
+    WAITING.CREATES.map((d) => d.key),
+    ['KafkaProducer.create'],
   );
 });

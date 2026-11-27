@@ -24,15 +24,16 @@ import type { Headers } from '../common/header/headers';
  * (`true` as `"true"`, numbers and bigints in decimal, arrays joined with
  * `,`, anything else by `String()`); `null` and `undefined` leave the key
  * out. The core checks every key and value, with Java's messages.
- * `key.serializer` and `value.serializer` take a synchronous function
+ * `key.serializer` and `value.serializer` take a function
  * `({ configs, isKey }) => serializer`, such as `stringSerializer`, and
- * never reach the core.
+ * never reach the core. The constructor takes only a synchronous one;
+ * `KafkaProducer.create()` also waits for one that returns a Promise.
  *
- * @remarks *(js-only)* The type of the configuration the constructor takes,
- * Java's `Map<String, Object>` and `Properties` as one. It lists the keys
- * Java's `ProducerConfig` defines, for autocompletion, and takes any other
- * string too, through `(string & {})`, since an unknown key goes to the
- * core.
+ * @remarks *(js-only)* The type of the configuration the constructor and
+ * `create()` take, Java's `Map<String, Object>` and `Properties` as one. It
+ * lists the keys Java's `ProducerConfig` defines, for autocompletion, and
+ * takes any other string too, through `(string & {})`, since an unknown key
+ * goes to the core.
  */
 export type ProducerConfigs = {
   [key in
@@ -168,9 +169,10 @@ export type ProducerConfigs = {
 // A value the core parses.
 type ConfigValue = string | number | boolean | bigint | ReadonlyArray<string | number | bigint> | null | undefined;
 
-// A serde config key's value: the function that makes the serializer.
+// A serde config key's value: the function that makes the serializer,
+// or a Promise of it, which only `create()` waits for.
 type SerializerConfig =
-  | ((options: { configs: Readonly<Record<string, unknown>>; isKey: boolean }) => AnySerializer)
+  | ((options: { configs: Readonly<Record<string, unknown>>; isKey: boolean }) => AnySerializer | PromiseLike<AnySerializer>)
   | null
   | undefined;
 

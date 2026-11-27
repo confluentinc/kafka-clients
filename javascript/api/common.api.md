@@ -98,7 +98,7 @@ export class MetricName {
         name: string;
         group: string;
         description: string;
-        tags: Map<string, string> | Readonly<Record<string, string>>;
+        tags: Map<string, string | null> | Readonly<Record<string, string | null>>;
     });
     description(): string;
     equals(options: {
@@ -108,7 +108,7 @@ export class MetricName {
     group(): string;
     hashCode(): number;
     name(): string;
-    tags(): Map<string, string>;
+    tags(): Map<string, string | null>;
     toString(): string;
 }
 
