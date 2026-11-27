@@ -24,6 +24,7 @@ import { TopicPartitionSet } from '../common/topic_partition_set';
 import { JavaForms } from '../internal/args';
 import { illegalArgument } from '../internal/errors';
 import { topicPartition } from '../internal/payload';
+import { finalStatics } from '../internal/static_finals';
 import type { ConsumerRecord } from './consumer_record';
 import { OffsetAndMetadata } from './offset_and_metadata';
 
@@ -75,8 +76,10 @@ export class ConsumerRecords<K, V> implements Iterable<ConsumerRecord<K, V>> {
     nextOffsets: new TopicPartitionMap(),
   });
 
+  // Java's static final, frozen: it can't be reassigned or changed.
   static {
     Object.freeze(ConsumerRecords.EMPTY);
+    finalStatics(this, 'EMPTY');
   }
 
   readonly #records: TopicPartitionMap<ConsumerRecord<K, V>[]> | null;

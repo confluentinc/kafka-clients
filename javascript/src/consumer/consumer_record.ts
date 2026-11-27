@@ -28,6 +28,7 @@ import { JavaForms } from '../internal/args';
 import { illegalArgument } from '../internal/errors';
 import { checkInt, checkLong } from '../internal/java_number';
 import { show } from '../internal/java_string';
+import { finalStatics } from '../internal/static_finals';
 import { headers as headersKind } from '../internal/payload';
 
 // Java's constructors, in Java declaration order (src/internal/args.ts); a
@@ -107,6 +108,11 @@ export class ConsumerRecord<out K = never, out V = never> {
 
   /** Java's `NULL_SIZE`, the serialized size of a null key or value. */
   static readonly NULL_SIZE: number = -1;
+
+  // Java's static finals: they can't be reassigned.
+  static {
+    finalStatics(this, 'NO_TIMESTAMP', 'NULL_SIZE');
+  }
 
   /** The topic this record is received from (never null) */
   readonly topic: string;
