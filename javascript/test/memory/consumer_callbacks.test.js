@@ -19,8 +19,10 @@
 // context is kept until a later successful subscribe replaces it, kept by a
 // failed one, by assign() and unsubscribe() and by a KafkaConsumer's empty
 // topic list, let go once a KafkaConsumer's close() returns and kept by a mock
-// until its destroy; a commit callback's context is freed once it reported,
-// or at the destroy; a report that waited for a Promise is freed once made;
+// until its destroy; a commit callback's function goes once it reported or
+// its commit failed, its context once it reported or at the destroy, so a
+// closed consumer it references is collected; a report that waited for a
+// Promise is freed once made;
 // and everything is freed once the consumers are closed and collected. Each
 // probe runs in a child with --expose-gc and the allocator's poisoning.
 
@@ -231,7 +233,58 @@ test("a commit callback's context is freed once it reported, or at the destroy",
     })();
   `);
   assert.deepEqual(out.counts.mock, 0);
-  assert.ok(out.counts.kafkaPending <= 1, JSON.stringify(out.counts));
+  assert.equal(out.counts.kafkaPending, 1);
   assert.equal(out.counts.collected, 0);
+  assert.deepEqual(out.leaks, NO_LEAKS);
+});
+
+test("a refused commit's callback lets go of its function at once, and a closed consumer whose callbacks reference it is collected", () => {
+  const out = probe(`
+    const { CloseOptions, KafkaConsumer, OffsetAndMetadata } = require(D + '/consumer');
+    const { TopicPartition, TopicPartitionMap } = require(D + '/common');
+    const live = () => { const s = native.consumerStats(); return s.commitCallbacksMade - s.commitCallbacksFreed; };
+    const configs = { 'bootstrap.servers': '127.0.0.1:1', 'group.id': 'g', 'group.protocol': 'consumer' };
+    (async () => {
+      const hold = setInterval(() => {}, 1000);
+      const counts = {};
+      const tp = new TopicPartition({ topic: 't', partition: 0 });
+      const refs = [];
+      await (async () => {
+        // Refused while a poll is pending: the core never runs the callbacks.
+        const kc = new KafkaConsumer(configs);
+        await kc.assign([tp]);
+        const polling = kc.poll(2000);
+        let refused = 0;
+        const refuse = () => {
+          const callback = () => kc.commitSync();
+          refs.push(new WeakRef(callback));
+          return kc.commitAsync({ callback });
+        };
+        for (let i = 0; i < 200; i++) await refuse().catch((e) => { if (e.name === 'ConcurrentModificationError') refused++; });
+        await polling;
+        counts.refused = refused;
+        await settle();
+        // Their contexts stay until the destroy; their functions are gone.
+        counts.contexts = live();
+        counts.functionsAlive = refs.filter((w) => w.deref() !== undefined).length;
+        await kc.close({ option: CloseOptions.timeout({ timeout: 0 }) }).catch(() => {});
+        // Refused on a closed consumer.
+        const closed = new KafkaConsumer(configs);
+        await closed.close({ option: CloseOptions.timeout({ timeout: 0 }) });
+        await closed.commitAsync({ callback: () => closed.commitSync() }).catch(() => {});
+        // Still pending at close(0).
+        const pending = new KafkaConsumer(configs);
+        await pending.assign([tp]);
+        await pending.commitAsync({ offsets: new TopicPartitionMap([[tp, new OffsetAndMetadata(1)]]), callback: () => pending.commitSync() });
+        await pending.close({ option: CloseOptions.timeout({ timeout: 0 }) }).catch(() => {});
+      })();
+      await settle();
+      console.log(JSON.stringify({ counts, stats: native.consumerStats(), leaks: leaks() }));
+      clearInterval(hold);
+    })();
+  `);
+  assert.deepEqual(out.counts, { refused: 200, contexts: 200, functionsAlive: 0 });
+  assert.equal(out.stats.consumersMade, 3);
+  assert.equal(out.stats.consumersFreed, 3);
   assert.deepEqual(out.leaks, NO_LEAKS);
 });

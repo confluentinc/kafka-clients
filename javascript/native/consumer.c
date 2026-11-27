@@ -113,11 +113,14 @@ struct Listener {
 
 // An OffsetCommitCallback's context, the `self_` of its FFI registration: the
 // function src/ built for it (src/internal/consumer_calls.ts, commitRun), held
-// until it reported (its Deferred's report, for one that returned a Promise),
-// or until the destroy.
+// through the handle object until it reported (its Deferred's report, for one
+// that returned a Promise) or its commit failed, which the core never runs it
+// for. The context itself is held by the core's registration, until the
+// report or the destroy, and by its commit's call, until the call's answer.
 struct CommitCallback {
     Consumer* c;
-    napi_ref run;
+    Held run;
+    int refs;
     CommitCallback* prev;
     CommitCallback* next;
 };
@@ -308,9 +311,22 @@ static void commit_callback_free(napi_env env, CommitCallback* cb) {
     if (cb->prev != NULL) cb->prev->next = cb->next;
     else c->commits = cb->next;
     if (cb->next != NULL) cb->next->prev = cb->prev;
-    delete_ref(env, &cb->run);
+    held_drop(env, c, &cb->run);
     free(cb);
     atomic_fetch_add(&stat_commit_callbacks_freed, 1);
+}
+
+// Lets go of one of a commit callback's two holders.
+static void commit_callback_release(napi_env env, CommitCallback* cb) {
+    if (cb != NULL && --cb->refs == 0) commit_callback_free(env, cb);
+}
+
+// A commit callback reported: the core never runs it again, so its function
+// goes, and the core's registration lets go of the context.
+static void commit_callback_fired(napi_env env, CommitCallback* cb) {
+    if (cb == NULL) return;
+    held_drop(env, cb->c, &cb->run);
+    commit_callback_release(env, cb);
 }
 
 // The reentrancy handle a call goes through while a listener's or commit
@@ -378,7 +394,7 @@ static void deferred_report(napi_env env, Deferred* d, int rejected, napi_value 
     listener_release(env, d->listener);
     d->listener = NULL;
     // A commit callback is invoked once: it reported.
-    commit_callback_free(env, d->commit);
+    commit_callback_fired(env, d->commit);
     d->commit = NULL;
 }
 
@@ -590,8 +606,8 @@ static void listener_handle_free(napi_env env, kafka_consumer_ConsumerRebalanceL
 // An OffsetCommitCallback's on_complete: it runs the callback's JS side once,
 // with the offsets' entries as offset_map_to_js reads the borrowed map and the
 // borrowed error as JS, or null, then reports once, at once or once the
-// Promise it returned settled, and the context is freed with the report. A
-// run the destroy makes runs no JS and reports at once.
+// Promise it returned settled, its function going with the report. A run the
+// destroy makes, or one whose function went, runs no JS and reports at once.
 static void commit_on_complete(void* self_, const kafka_Map_t* offsets, const kafka_common_Error_t* error, int64_t callback_id) {
     CommitCallback* cb = (CommitCallback*)self_;
     Consumer* c = cb->c;
@@ -600,7 +616,8 @@ static void commit_on_complete(void* self_, const kafka_Map_t* offsets, const ka
     kafka_common_Error_t* report = NULL;
     // The window opens: a call made until the report goes through the handle.
     c->reports++;
-    if (!c->queue.finalizing) {
+    // A callback whose function went (its commit failed) runs no JS.
+    if (!c->queue.finalizing && cb->run.ref != NULL) {
         injected_errors_sweep(env, &c->injected);
         char* thrown = NULL;
         napi_value argv[2] = {NULL, NULL};
@@ -608,7 +625,7 @@ static void commit_on_complete(void* self_, const kafka_Map_t* offsets, const ka
         else napi_get_null(env, &argv[0]);
         if (argv[0] != NULL) argv[1] = error != NULL ? error_to_js(env, error) : NULL;
         if (argv[0] != NULL && error == NULL) napi_get_null(env, &argv[1]);
-        napi_value result = argv[0] != NULL && argv[1] != NULL ? call_ref(env, cb->run, 2, argv, &thrown) : NULL;
+        napi_value result = argv[0] != NULL && argv[1] != NULL ? call_ref(env, cb->run.ref, 2, argv, &thrown) : NULL;
         if (argv[0] == NULL || argv[1] == NULL) js_warn_thrown(env);
         if (callback_answer(env, c, result, thrown, callback_id, NULL, cb, &report) == 1) return;
     }
@@ -620,7 +637,7 @@ static void commit_on_complete(void* self_, const kafka_Map_t* offsets, const ka
         error_discard(report);
     }
     c->reports--;
-    commit_callback_free(env, cb);
+    commit_callback_fired(env, cb);
 }
 
 // The commit callback `run` (src/'s function) as a context, on the
@@ -629,12 +646,16 @@ static void commit_on_complete(void* self_, const kafka_Map_t* offsets, const ka
 static CommitCallback* commit_callback_new(napi_env env, Consumer* c, napi_value run, kafka_consumer_OffsetCommitCallback_t** handle) {
     *handle = NULL;
     CommitCallback* cb = (CommitCallback*)calloc(1, sizeof(CommitCallback));
-    if (cb == NULL || napi_create_reference(env, run, 1, &cb->run) != napi_ok) {
+    if (cb == NULL) {
+        napi_throw_error(env, NULL, "out of memory");
+        return NULL;
+    }
+    if (held_set(env, c, run, &cb->run) != 0) {
         free(cb);
-        js_throw_last_napi_error(env, "napi_create_reference");
         return NULL;
     }
     cb->c = c;
+    cb->refs = 2;
     cb->next = c->commits;
     if (c->commits != NULL) c->commits->prev = cb;
     c->commits = cb;
@@ -648,6 +669,15 @@ static CommitCallback* commit_callback_new(napi_env env, Consumer* c, napi_value
     }
     return cb;
 }
+
+// The context of a commit with a callback: the call's, `call` first, as
+// value_settle reads it, and the callback its answer settles.
+typedef struct {
+    CallCtx call;
+    CommitCallback* callback;
+} CommitCallCtx;
+
+static void commit_async_on_complete(kafka_common_Error_t* error, void* opaque);
 
 // ---- the batch --------------------------------------------------------------
 
@@ -1561,11 +1591,27 @@ napi_value js_consumer_commit_async(napi_env env, napi_callback_info info) {
     kafka_Map_t* offsets = NULL;
     if (form == 2 && type != napi_null && (offsets = offset_map_from_js(env, argv[2])) == NULL) return NULL;
     kafka_consumer_OffsetCommitCallback_t* callback = NULL;
-    if (form != 0 && is_function(env, argv[3]) && commit_callback_new(env, c, argv[3], &callback) == NULL) {
+    CommitCallback* cb = NULL;
+    if (form != 0 && is_function(env, argv[3]) && (cb = commit_callback_new(env, c, argv[3], &callback)) == NULL) {
         offset_map_free(env, offsets);
         return NULL;
     }
-    CallCtx* ctx = call_ctx_new(env, c, argv[4]);
+    // A commit with a callback answers through commit_async_on_complete;
+    // one without, or with a null callback the FFI refuses, through
+    // void_on_complete.
+    CommitCallCtx* cctx = cb != NULL ? (CommitCallCtx*)calloc(1, sizeof(CommitCallCtx)) : NULL;
+    CallCtx* ctx = cb != NULL ? &cctx->call : call_ctx_new(env, c, argv[4]);
+    if (cb != NULL && (cctx == NULL || napi_create_reference(env, argv[4], 1, &cctx->call.done) != napi_ok)) {
+        free(cctx);
+        ctx = NULL;
+        // Never given the core: both its holders go.
+        commit_callback_release(env, cb);
+        commit_callback_release(env, cb);
+        js_throw_last_napi_error(env, "napi_create_reference");
+    } else if (cb != NULL) {
+        cctx->call.c = c;
+        cctx->callback = cb;
+    }
     const kafka_consumer_ConsumerHandle_t* h = window_of(c);
     if (ctx != NULL && h != NULL) {
         if (form == 0) {
@@ -1573,7 +1619,10 @@ napi_value js_consumer_commit_async(napi_env env, napi_callback_info info) {
             kafka_consumer_ConsumerHandle_commit_async_cb(h, void_on_complete, ctx);
         } else if (form == 1) {
             cbq_call_begin(env, &c->queue);
-            kafka_consumer_ConsumerHandle_commit_async_with_callback_cb(h, callback, void_on_complete, ctx);
+            kafka_consumer_ConsumerHandle_commit_async_with_callback_cb(h, callback, commit_async_on_complete, cctx);
+        } else if (cb != NULL) {
+            cbq_call_begin(env, &c->queue);
+            kafka_consumer_ConsumerHandle_commit_async_with_offsets_callback_cb(h, offsets, callback, commit_async_on_complete, cctx);
         } else {
             cbq_call_begin(env, &c->queue);
             kafka_consumer_ConsumerHandle_commit_async_with_offsets_callback_cb(h, offsets, callback, void_on_complete, ctx);
@@ -1584,14 +1633,16 @@ napi_value js_consumer_commit_async(napi_env env, napi_callback_info info) {
             kafka_consumer_Consumer_commit_async_cb(c->view, void_on_complete, ctx);
         } else if (form == 1) {
             cbq_call_begin(env, &c->queue);
-            kafka_consumer_Consumer_commit_async_with_callback_cb(c->view, callback, void_on_complete, ctx);
+            kafka_consumer_Consumer_commit_async_with_callback_cb(c->view, callback, commit_async_on_complete, cctx);
+        } else if (cb != NULL) {
+            cbq_call_begin(env, &c->queue);
+            kafka_consumer_Consumer_commit_async_with_offsets_callback_cb(c->view, offsets, callback, commit_async_on_complete, cctx);
         } else {
             cbq_call_begin(env, &c->queue);
             kafka_consumer_Consumer_commit_async_with_offsets_callback_cb(c->view, offsets, callback, void_on_complete, ctx);
         }
     }
-    // The call copied the offsets and the callback's registration; the
-    // callback's context stays until it reported, or the destroy.
+    // The call copied the offsets and the callback's registration.
     kafka_common_Error_t* ffi_err = NULL;
     if (callback != NULL) error_warn(env, 1, FFI_ERR(kafka_consumer_OffsetCommitCallback_destroy_err(callback, &ffi_err)));
     offset_map_free(env, offsets);
@@ -1616,6 +1667,30 @@ static void value_settle(napi_env env, CallCtx* ctx, kafka_common_Error_t* error
     }
     if (argv[0] != NULL && argv[1] != NULL) call_ref(env, ctx->done, 2, argv, NULL);
     else js_warn_thrown(env);
+}
+
+// The completion of a commit with a callback, `done(error | null)`. A commit
+// that failed never runs its callback: the core registers it only once the
+// commit is under way, and a mock's callback that failed it has already
+// reported. So its function goes now; its context stays with the core's
+// registration until the destroy, as the FFI's doc of the callback requires.
+static void commit_async_on_complete(kafka_common_Error_t* error, void* opaque) {
+    error_stat_owned(error);
+    CommitCallCtx* ctx = (CommitCallCtx*)opaque;
+    Consumer* c = ctx->call.c;
+    napi_env env = c->env;
+    if (error != NULL) held_drop(env, c, &ctx->callback->run);
+    commit_callback_release(env, ctx->callback);
+    if (!c->queue.finalizing) {
+        napi_value none = NULL;
+        if (napi_get_null(env, &none) != napi_ok) none = NULL;
+        value_settle(env, &ctx->call, error, none, "converting a commit's answer");
+        error = NULL;
+    }
+    error_discard(error);
+    delete_ref(env, &ctx->call.done);
+    free(ctx);
+    cbq_call_end(env, &c->queue);
 }
 
 // The committed_cb completion: the owned map of TopicPartition to

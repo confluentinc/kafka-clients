@@ -1108,11 +1108,13 @@ test('commitAsync: its three forms, a null callback, and their errors', async ()
   });
   // The commit of the offsets never completes with no broker: close(0)
   // reports it, as Java's close records the timeout of the last pending
-  // async commit.
+  // async commit. The cause's text is the core's: Java's is the toString() of
+  // a TimeoutException with no message, "java.util.concurrent.TimeoutException".
   await assert.rejects(consumer.close({ option: CloseOptions.timeout({ timeout: 0 }) }), (error) => {
     assert.ok(error instanceof KafkaError);
     assert.equal(error.message, 'Failed to close kafka consumer');
-    assert.equal(/** @type {Error} */ (error.cause).message, 'Timed out waiting for last pending async commit to complete');
+    assert.ok(error.cause instanceof KafkaTimeoutError);
+    assert.equal(error.cause.message, 'Timed out waiting for last pending async commit to complete');
     return true;
   });
 });

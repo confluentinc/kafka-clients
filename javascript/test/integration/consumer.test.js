@@ -937,12 +937,12 @@ listenerTest(
   120000,
 );
 
-/** A commit callback's error: a KafkaError, and another value. */
-const CALLBACK_ERRORS = () => [new KafkaError('the callback failed'), new TypeError('cbt')];
+/** A commit callback's error: a KafkaError, and other values, null included. */
+const CALLBACK_ERRORS = () => [new KafkaError('the callback failed'), new TypeError('cbt'), null];
 
 /**
  * Commits with a callback that throws `value`, once the commit completed, and
- * returns what `next` rejects with.
+ * returns what `next` rejects with, failing when it resolves.
  *
  * @param {string} what
  * @param {unknown} value
@@ -962,12 +962,13 @@ async function callbackErrorFrom(what, value, next) {
     });
     // The commit's answer comes back; its callback waits for a waiting call.
     await new Promise((resolve) => setTimeout(resolve, 1500));
-    const error = await next(consumer).then(
-      () => null,
-      (e) => e,
+    const outcome = await next(consumer).then(
+      () => ({ rejected: false, error: undefined }),
+      (e) => ({ rejected: true, error: /** @type {unknown} */ (e) }),
     );
     assert.equal(done, true);
-    return error;
+    assert.ok(outcome.rejected, 'the call resolved');
+    return outcome.error;
   } finally {
     await closeQuietly(consumer);
   }
@@ -996,7 +997,7 @@ listenerTest(
         assert.equal(error, value);
       } else {
         assert.ok(error instanceof KafkaError);
-        assert.equal(error.message, 'TypeError: cbt');
+        assert.equal(error.message, String(value));
         assert.equal(error.cause, value);
       }
     }
