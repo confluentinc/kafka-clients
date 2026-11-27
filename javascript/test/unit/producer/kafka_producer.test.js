@@ -3931,10 +3931,12 @@ test("a serializer's failure of null or undefined is passed on as it is, by Kafk
         const bytes = { serialize: () => Buffer.from('b') };
         const serializers = isKey ? { keySerializer: failing, valueSerializer: bytes } : { keySerializer: bytes, valueSerializer: failing };
         const what = `${String(thrown)} ${async ? 'rejected' : 'thrown'} by the ${isKey ? 'key' : 'value'} serializer`;
-        for (const producer of [
+        /** @type {Array<{ send(o: object): Promise<unknown>, close(): Promise<void> }>} */
+        const producers = [
           new KafkaProducer({ configs: UNREACHABLE, ...serializers }),
           new MockProducer({ autoComplete: true, partitioner: null, ...serializers }),
-        ]) {
+        ];
+        for (const producer of producers) {
           let called = 0;
           await assert.rejects(
             producer.send({ record: new ProducerRecord({ topic: 't', key: 'k', value: 'v' }), callback: () => void called++ }),
