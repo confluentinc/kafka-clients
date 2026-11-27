@@ -9,7 +9,8 @@ to P2. P2 is **done** (2026-11-26): its phase plan, `P2.md`, was approved with i
 approved with its choices 2(a) and 3(a), and its "Result" section has the commits, the review and the gate. P4 is
 **done** (2026-11-27): its phase plan, `P4.md`, was approved with its choice 2(a), and its "Result" section has the
 commits, the review and the gate. P5 is **done** (2026-11-27): its phase plan, `P5.md`, was approved with its choices
-2(a) and 3(a), and its "Result" section has the commits, the review and the gate. P6's phase plan is next.
+2(a) and 3(a), and its "Result" section has the commits, the review and the gate. The user then chose (a) in its
+"For the user" list: `commitAsync({ offsets, callback })`'s `callback` stays non-null. P6's phase plan is next.
 
 - Branch `dev/javascript-consumer-bindings`, on PR #312's head `f62d5fec9` (`origin/dev/javascript-producer-bindings`),
   an ancestor of the branch. The user moved the branch there on 2026-11-25 (from `208abeb64`); P1's commits came
@@ -553,6 +554,8 @@ Fourteen FFI and core behaviours the binding lives with for now:
     `commitAsync(callback)` and `commitAsync(offsets, callback)` take `null` and log a failed commit. The binding
     sends `commitAsync({ callback: null })` to `commit_async_cb`, which is Java's `commitAsync()`, so only
     `commitAsync({ offsets, callback: null })` meets it (P5.md, choice 2). Ask: take a NULL callback as Java's null.
+    Until then that form types its `callback` non-null, so `tsc` refuses the `null` (the user's choice (a) of
+    2026-11-27, P5.md); the type becomes `OffsetCommitCallback | null` once the FFI takes one.
 15. Found while planning P5: a commit callback gets an empty map where Java's gets `null`: for a failed commit, and
     for an empty map committed, which Java's `commit()` answers with `completedFuture(null)` (`register_async_commit`
     in `rust/src/consumer/internals/async_kafka_consumer.rs`). The binding passes `null` there for now (P5.md,
