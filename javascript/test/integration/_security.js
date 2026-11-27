@@ -17,20 +17,26 @@
 // The security suites' shared cases (ssl.test.js, sasl.test.js): the
 // certificates `make security-certs` wrote, the producer test's core case over
 // any security protocol, and the shape of a send whose connection fails its
-// authentication.
+// authentication. And the broker the consumer's broker tests run against
+// (consumer.test.js, kafka_consumer_broker.test.js), over the listener
+// KAFKA_TEST_LISTENER names: PLAINTEXT when unset, as `make test-integration`
+// runs them, SSL in `make test-integration-ssl`, SASL_SSL in `make
+// test-integration-sasl`.
 
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 
 const { ExecutionError } = require('@confluentinc/kafka-javascript');
-const { KafkaFuture } = require('@confluentinc/kafka-javascript/common');
+const { KafkaFuture, TopicPartition } = require('@confluentinc/kafka-javascript/common');
 const { AuthenticationError } = require('@confluentinc/kafka-javascript/common/errors');
 const { RecordHeader } = require('@confluentinc/kafka-javascript/common/header');
+const { CloseOptions, KafkaConsumer } = require('@confluentinc/kafka-javascript/consumer');
 const { KafkaProducer, ProducerRecord, RecordMetadata } = require('@confluentinc/kafka-javascript/producer');
-const { fetchRecords } = require('./_fetch_records');
+const { createTopic, fetchRecords } = require('./_fetch_records');
 
 /** @typedef {import('@confluentinc/kafka-javascript/producer').ProducerConfigs} ProducerConfigs */
+/** @typedef {import('@confluentinc/kafka-javascript/consumer').ConsumerConfigs} ConsumerConfigs */
 
 /**
  * The path of `name` in the certificates' directory, KAFKA_SECURITY_DIR.
@@ -50,6 +56,72 @@ function certPath(name) {
  */
 function pem(name) {
   return fs.readFileSync(certPath(name), 'utf8');
+}
+
+/**
+ * The configuration keys every client of a consumer broker test starts from:
+ * the listener's address, and its security keys.
+ *
+ * @typedef {{
+ *   'bootstrap.servers': string,
+ *   'security.protocol'?: string,
+ *   'ssl.truststore.location'?: string,
+ *   'sasl.mechanism'?: string,
+ *   'sasl.jaas.config'?: string,
+ * }} ClientKeys
+ */
+
+/**
+ * The broker the consumer's broker tests run against, over the listener
+ * KAFKA_TEST_LISTENER names. `plaintext` is the broker's PLAINTEXT listener,
+ * which `_fetch_records.js` speaks, to make topics and wait for the broker;
+ * `clientConfigs()` gives the keys every client the tests make starts from,
+ * the producers that write their records included: over SSL the truststore,
+ * over SASL_SSL the truststore and SASL/PLAIN as `admin`, a super user, so the
+ * StandardAuthorizer refuses nothing. `skip` is the reason the tests skip, or
+ * `false`.
+ *
+ * @returns {{ listener: string, plaintext: string, skip: string | false, clientConfigs: () => ClientKeys }}
+ */
+function testBroker() {
+  const listener = process.env.KAFKA_TEST_LISTENER || 'PLAINTEXT';
+  /** @type {Record<string, [string | undefined, string | undefined, string[]]>} */
+  const listeners = {
+    PLAINTEXT: [process.env.KAFKA_BOOTSTRAP_SERVERS, process.env.KAFKA_BOOTSTRAP_SERVERS, ['KAFKA_BOOTSTRAP_SERVERS']],
+    SSL: [
+      process.env.KAFKA_SSL_BOOTSTRAP_SERVERS,
+      process.env.KAFKA_SSL_PLAINTEXT_BOOTSTRAP_SERVERS,
+      ['KAFKA_SSL_BOOTSTRAP_SERVERS', 'KAFKA_SSL_PLAINTEXT_BOOTSTRAP_SERVERS', 'KAFKA_SECURITY_DIR'],
+    ],
+    SASL_SSL: [
+      process.env.KAFKA_SASL_SSL_BOOTSTRAP_SERVERS,
+      process.env.KAFKA_SASL_ADMIN_BOOTSTRAP_SERVERS,
+      ['KAFKA_SASL_SSL_BOOTSTRAP_SERVERS', 'KAFKA_SASL_ADMIN_BOOTSTRAP_SERVERS', 'KAFKA_SECURITY_DIR'],
+    ],
+  };
+  const entry = listeners[listener];
+  assert.ok(entry, `KAFKA_TEST_LISTENER is ${listener}: one of ${Object.keys(listeners).join(', ')}`);
+  const [client, plaintext, needs] = entry;
+  const missing = needs.filter((name) => !process.env[name]);
+  const skip = missing.length === 0 ? false : `${missing.join(', ')} not set: no broker to consume from over ${listener}`;
+  return {
+    listener,
+    plaintext: /** @type {string} */ (plaintext),
+    skip,
+    clientConfigs: () => {
+      /** @type {ClientKeys} */
+      const keys = { 'bootstrap.servers': /** @type {string} */ (client) };
+      if (listener === 'PLAINTEXT') return keys;
+      keys['security.protocol'] = listener;
+      keys['ssl.truststore.location'] = certPath('ca.pem');
+      if (listener === 'SASL_SSL') {
+        keys['sasl.mechanism'] = 'PLAIN';
+        keys['sasl.jaas.config'] =
+          'org.apache.kafka.common.security.plain.PlainLoginModule required username="admin" password="admin-secret";';
+      }
+      return keys;
+    },
+  };
 }
 
 let topicCount = 0;
@@ -183,4 +255,119 @@ async function sendFailingAuthentication(configs, what) {
   }
 }
 
-module.exports = { certPath, pem, freshTopic, produceOneRecord, sendFailingAuthentication };
+/**
+ * Writes one record with a key, a value and a header to a new topic through
+ * `plaintextBootstrap`.
+ *
+ * @param {string} plaintextBootstrap
+ * @param {string} what
+ * @returns {Promise<string>} the topic
+ */
+async function topicWithOneRecord(plaintextBootstrap, what) {
+  const topic = freshTopic(what);
+  await createTopic(plaintextBootstrap, topic);
+  const producer = new KafkaProducer({ configs: { 'bootstrap.servers': plaintextBootstrap, acks: 'all' } });
+  try {
+    const future = await producer.send(
+      new ProducerRecord({
+        topic,
+        partition: 0,
+        key: Buffer.from('k1'),
+        value: Buffer.from(`hello-over-${what}`),
+        headers: [['h1', Buffer.from('v1')]],
+      }),
+    );
+    await future.get();
+  } finally {
+    await producer.close();
+  }
+  return topic;
+}
+
+/**
+ * The consumer's core case over `configs`' security protocol: a record
+ * written through `plaintextBootstrap` is read back by a consumer that
+ * subscribes as a group member, its key, value and header included, its
+ * offset committed with commitSync() and read back with committed(), and the
+ * consumer closed.
+ *
+ * @param {ConsumerConfigs} configs
+ * @param {string} plaintextBootstrap
+ * @param {string} what
+ */
+async function consumeOneRecord(configs, plaintextBootstrap, what) {
+  const topic = await topicWithOneRecord(plaintextBootstrap, what);
+  const consumer = new KafkaConsumer({
+    configs: { 'group.protocol': 'consumer', 'group.id': `${topic}-group`, 'auto.offset.reset': 'earliest', ...configs },
+  });
+  try {
+    await consumer.subscribe([topic]);
+    /** @type {import('@confluentinc/kafka-javascript/consumer').ConsumerRecord<Buffer, Buffer>[]} */
+    const records = [];
+    const deadline = Date.now() + 60000;
+    while (records.length === 0) {
+      assert.ok(Date.now() < deadline, `no record consumed over ${what} within 60 s`);
+      records.push(...(await consumer.poll(500)));
+    }
+    assert.deepEqual(
+      records.map((r) => [
+        r.topic,
+        r.partition,
+        r.offset,
+        r.key && r.key.toString(),
+        r.value && r.value.toString(),
+        r.headers.toArray().map((h) => [h.key(), String(h.value())]),
+      ]),
+      [[topic, 0, 0n, 'k1', `hello-over-${what}`, [['h1', 'v1']]]],
+    );
+    await consumer.commitSync();
+    const tp = new TopicPartition({ topic, partition: 0 });
+    const committed = await consumer.committed([tp]);
+    assert.equal(committed.get(tp)?.offset, 1n);
+  } finally {
+    await consumer.close();
+  }
+}
+
+/**
+ * Polls a consumer with `configs`, assigned partition 0 of a topic made
+ * through `plaintextBootstrap`, until a poll rejects, and returns the error:
+ * Java's AsyncKafkaConsumer#poll throws the authentication error its network
+ * thread fails the poll's event with.
+ *
+ * @param {ConsumerConfigs} configs
+ * @param {string} plaintextBootstrap
+ * @param {string} what
+ * @returns {Promise<unknown>}
+ */
+async function pollFailingAuthentication(configs, plaintextBootstrap, what) {
+  const topic = await topicWithOneRecord(plaintextBootstrap, what);
+  const consumer = new KafkaConsumer({ configs: { 'group.protocol': 'consumer', 'auto.offset.reset': 'earliest', ...configs } });
+  try {
+    await consumer.assign([new TopicPartition({ topic, partition: 0 })]);
+    const deadline = Date.now() + 60000;
+    for (;;) {
+      assert.ok(Date.now() < deadline, `no poll over ${what} failed within 60 s`);
+      try {
+        const records = await consumer.poll(500);
+        assert.equal(records.count(), 0, 'a record came back over a connection that should fail its authentication');
+      } catch (e) {
+        return e;
+      }
+    }
+  } finally {
+    await consumer.close({ option: CloseOptions.timeout({ timeout: 0 }) });
+  }
+}
+
+module.exports = {
+  certPath,
+  pem,
+  freshTopic,
+  produceOneRecord,
+  sendFailingAuthentication,
+  topicWithOneRecord,
+  consumeOneRecord,
+  pollFailingAuthentication,
+  testBroker,
+};

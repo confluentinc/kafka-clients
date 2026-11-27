@@ -14,8 +14,8 @@
 
 'use strict';
 
-// The producer over SASL/PLAIN, on SASL_PLAINTEXT and SASL_SSL, and its
-// authorization: runs only when the SASL broker's variables are set
+// The producer and the consumer over SASL/PLAIN, on SASL_PLAINTEXT and
+// SASL_SSL, and their authorization: runs only when the SASL broker's variables are set
 // (`make -C javascript test-integration-sasl` starts the broker, which runs
 // the StandardAuthorizer with admin as a super user; alice has only the ACLs
 // a test gives her, through kafka-acls.sh in the broker's container).
@@ -25,17 +25,26 @@ const { spawnSync } = require('node:child_process');
 
 const { ExecutionError } = require('@confluentinc/kafka-javascript');
 const { KafkaFuture } = require('@confluentinc/kafka-javascript/common');
+const { TopicPartition } = require('@confluentinc/kafka-javascript/common');
 const {
   AuthenticationError,
   AuthorizationError,
+  GroupAuthorizationError,
   SaslAuthenticationError,
   TopicAuthorizationError,
 } = require('@confluentinc/kafka-javascript/common/errors');
+const { CloseOptions, KafkaConsumer } = require('@confluentinc/kafka-javascript/consumer');
 const { KafkaProducer, ProducerRecord, RecordMetadata } = require('@confluentinc/kafka-javascript/producer');
 const { createTopic, fetchRecords } = require('./_fetch_records');
-const { certPath, freshTopic, produceOneRecord, sendFailingAuthentication } = require('./_security');
-
-/** @typedef {import('@confluentinc/kafka-javascript/producer').ProducerConfigs} ProducerConfigs */
+const {
+  certPath,
+  consumeOneRecord,
+  freshTopic,
+  pollFailingAuthentication,
+  produceOneRecord,
+  sendFailingAuthentication,
+  topicWithOneRecord,
+} = require('./_security');
 
 const SASL_PLAINTEXT = process.env.KAFKA_SASL_PLAINTEXT_BOOTSTRAP_SERVERS;
 const SASL_SSL = process.env.KAFKA_SASL_SSL_BOOTSTRAP_SERVERS;
@@ -60,7 +69,7 @@ const admin = /** @type {string} */ (ADMIN);
  * @param {'SASL_PLAINTEXT' | 'SASL_SSL'} protocol
  * @param {string} username
  * @param {string} password
- * @returns {ProducerConfigs}
+ * @returns {Record<string, string>} keys a producer's and a consumer's configuration both take
  */
 function plain(protocol, username, password) {
   return {
@@ -205,6 +214,129 @@ async function allowAlice(operation, resource) {
       );
     } finally {
       await producer.close();
+    }
+  },
+  240000,
+);
+
+(SKIP ? test.skip : test)(
+  'consumes over SASL_PLAINTEXT with PLAIN: one record with its header, committed and read back',
+  async () => {
+    await consumeOneRecord(plain('SASL_PLAINTEXT', 'admin', 'admin-secret'), admin, 'consumer-sasl-plaintext');
+  },
+  120000,
+);
+
+(SKIP ? test.skip : test)(
+  'consumes over SASL_SSL with PLAIN: one record with its header, committed and read back',
+  async () => {
+    await consumeOneRecord(plain('SASL_SSL', 'admin', 'admin-secret'), admin, 'consumer-sasl-ssl');
+  },
+  120000,
+);
+
+// ClientAuthenticationFailureTest#testConsumerWithInvalidCredentials: after
+// assign(), poll() throws SaslAuthenticationException, the broker's message
+// (PlainSaslServer#evaluateResponse), which the metadata keeps as a fatal
+// error and AsyncKafkaConsumer#poll throws, as for an SSL handshake.
+(SKIP ? test.skip : test)(
+  "a wrong SASL password fails the consumer's poll() with SaslAuthenticationError, Java's broker message",
+  async () => {
+    const failure = await pollFailingAuthentication(
+      plain('SASL_PLAINTEXT', 'admin', 'anotherpassword'),
+      admin,
+      'consumer-sasl-wrong-password',
+    );
+    assert.ok(failure instanceof SaslAuthenticationError, String(failure));
+    assert.equal(failure.constructor, SaslAuthenticationError);
+    assert.ok(failure instanceof AuthenticationError);
+    assert.equal(failure.message, 'Authentication failed: Invalid username or password');
+  },
+  120000,
+);
+
+/**
+ * Polls `consumer` until a poll rejects, and returns the error.
+ *
+ * @param {KafkaConsumer<Buffer, Buffer>} consumer
+ * @param {string} what
+ * @returns {Promise<unknown>}
+ */
+async function pollUntilRejected(consumer, what) {
+  const deadline = Date.now() + 60000;
+  for (;;) {
+    assert.ok(Date.now() < deadline, `no poll failed with ${what} within 60 s`);
+    try {
+      assert.equal((await consumer.poll(500)).count(), 0, `a record came back before ${what}`);
+    } catch (e) {
+      return e;
+    }
+  }
+}
+
+// alice has DESCRIBE on the topic throughout, for its metadata, its offsets
+// and the heartbeat's subscription. Without READ on the group, the broker
+// answers her ConsumerGroupHeartbeat with GROUP_AUTHORIZATION_FAILED, which
+// Java's AbstractHeartbeatRequestManager#onErrorResponse makes fatal, as
+// GroupAuthorizationException.forGroupId(groupId)'s message: "Not authorized
+// to access group: <group>", thrown by the next poll(). With READ on the
+// group and not on the topic, the member joins, and the fetch's
+// TOPIC_AUTHORIZATION_FAILED is FetchCollector#handleInitializeErrors' new
+// TopicAuthorizationException(Collections.singleton(topic)), "Not authorized
+// to access topics: [<topic>]", thrown by poll(); the consumer stays usable,
+// so once READ is granted on the topic, it consumes.
+(SKIP_ACLS ? test.skip : test)(
+  'a user without READ on the group gets GroupAuthorizationError, then without READ on the topic TopicAuthorizationError; once READ is granted, she consumes',
+  async () => {
+    const topic = await topicWithOneRecord(admin, 'consumer-acl');
+    const group = `${topic}-group`;
+    await allowAlice('Describe', ['--topic', topic]);
+    const configs = {
+      ...plain('SASL_PLAINTEXT', 'alice', 'alice-secret'),
+      'group.protocol': 'consumer',
+      'group.id': group,
+      'auto.offset.reset': 'earliest',
+    };
+
+    const denied = new KafkaConsumer({ configs });
+    try {
+      await denied.subscribe([topic]);
+      const failure = await pollUntilRejected(denied, 'GroupAuthorizationError');
+      assert.ok(failure instanceof GroupAuthorizationError, String(failure));
+      assert.equal(failure.constructor, GroupAuthorizationError);
+      assert.ok(failure instanceof AuthorizationError);
+      assert.equal(failure.message, `Not authorized to access group: ${group}`);
+    } finally {
+      await denied.close({ option: CloseOptions.timeout({ timeout: 0 }) });
+    }
+
+    await allowAlice('Read', ['--group', group]);
+    const consumer = new KafkaConsumer({ configs });
+    try {
+      await consumer.subscribe([topic]);
+      const failure = await pollUntilRejected(consumer, 'TopicAuthorizationError');
+      assert.ok(failure instanceof TopicAuthorizationError, String(failure));
+      assert.equal(failure.constructor, TopicAuthorizationError);
+      assert.equal(failure.message, `Not authorized to access topics: [${topic}]`);
+      assert.deepEqual(failure.unauthorizedTopics(), new Set([topic]));
+
+      await allowAlice('Read', ['--topic', topic]);
+      /** @type {string[]} */
+      const values = [];
+      const deadline = Date.now() + 60000;
+      while (values.length === 0) {
+        assert.ok(Date.now() < deadline, 'no record consumed within 60 s of the READ grant');
+        try {
+          for (const r of await consumer.poll(500)) values.push(String(r.value));
+        } catch (e) {
+          // A fetch racing the ACL's propagation is still refused, with the same error.
+          assert.ok(e instanceof TopicAuthorizationError, String(e));
+        }
+      }
+      assert.deepEqual(values, ['hello-over-consumer-acl']);
+      assert.deepEqual([...consumer.assignment()], [new TopicPartition({ topic, partition: 0 })]);
+    } finally {
+      await consumer.close();
     }
   },
   240000,

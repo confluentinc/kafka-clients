@@ -38,11 +38,15 @@ const { InvalidTopicError } = require('@confluentinc/kafka-javascript/common/err
 const { CloseOptions, KafkaConsumer, NoOffsetForPartitionError, OffsetAndMetadata } = require('@confluentinc/kafka-javascript/consumer');
 const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
 const { createTopic, waitForBroker } = require('./_fetch_records');
+const { testBroker } = require('./_security');
 
 /** @typedef {import('@confluentinc/kafka-javascript/consumer').ConsumerConfigs} ConsumerConfigs */
 
-const BOOTSTRAP = /** @type {string} */ (process.env.KAFKA_BOOTSTRAP_SERVERS);
-const SKIP = BOOTSTRAP ? false : 'KAFKA_BOOTSTRAP_SERVERS is not set: no broker to consume from';
+// The broker's PLAINTEXT listener, for the topics; every client's keys come
+// from clientConfigs(), for the listener KAFKA_TEST_LISTENER names
+// (_security.js), so the SSL and SASL targets run this file again over TLS
+// and over SASL_SSL.
+const { plaintext: BOOTSTRAP, skip: SKIP, clientConfigs } = testBroker();
 if (SKIP) console.log(`skipping the KafkaConsumerTest broker cases: ${SKIP}`);
 const it = SKIP ? test.skip : test;
 
@@ -71,7 +75,7 @@ function freshName(what) {
  */
 function configs(extra = {}) {
   return {
-    'bootstrap.servers': BOOTSTRAP,
+    ...clientConfigs(),
     'group.protocol': 'consumer',
     'group.id': freshName('group'),
     'auto.offset.reset': 'earliest',
@@ -90,7 +94,7 @@ function configs(extra = {}) {
 async function topicWith(values, partitions = 1) {
   const topic = freshName('topic');
   await createTopic(BOOTSTRAP, topic, { partitions });
-  const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP, acks: 'all' } });
+  const producer = new KafkaProducer({ configs: { ...clientConfigs(), acks: 'all' } });
   try {
     for (let partition = 0; partition < partitions; partition++) {
       for (const value of values) await producer.send(new ProducerRecord({ topic, partition, key: null, value: Buffer.from(value) }));

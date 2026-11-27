@@ -426,6 +426,11 @@ security-certs:
 	  > kafka_server_jaas.conf; \
 	rm -f ./*.csr ./*.ext; chmod a+r ./*
 
+# The files the SSL broker runs: the producer's and the consumer's SSL tests,
+# and the consumer's broker tests again, over the TLS listener
+# (KAFKA_TEST_LISTENER, test/integration/_security.js).
+SSL_TESTS = test/integration/ssl.test.js test/integration/consumer.test.js test/integration/kafka_consumer_broker.test.js
+
 # SSL on KAFKA_SSL_PORT + 1 (server authentication only) and mTLS on
 # KAFKA_SSL_PORT + 2 (ssl.client.auth required), PLAINTEXT on KAFKA_SSL_PORT.
 test-integration-ssl: build security-certs
@@ -439,10 +444,15 @@ test-integration-ssl: build security-certs
 	  $(KAFKA_IMAGE) >/dev/null || exit 1; \
 	status=0; \
 	KAFKA_SECURITY_DIR='$(SECURITY_DIR)' KAFKA_SSL_PLAINTEXT_BOOTSTRAP_SERVERS=localhost:$$p \
-	  KAFKA_SSL_BOOTSTRAP_SERVERS=localhost:$$tls KAFKA_MTLS_BOOTSTRAP_SERVERS=localhost:$$mtls \
-	  $(NODE) $(JEST) --ci $(or $(JEST_ARGS),test/integration/ssl.test.js) --selectProjects integration --runInBand || status=$$?; \
+	  KAFKA_SSL_BOOTSTRAP_SERVERS=localhost:$$tls KAFKA_MTLS_BOOTSTRAP_SERVERS=localhost:$$mtls KAFKA_TEST_LISTENER=SSL \
+	  $(NODE) $(JEST) --ci $(or $(JEST_ARGS),$(SSL_TESTS)) --selectProjects integration --runInBand || status=$$?; \
 	docker rm -f $(KAFKA_SSL_CONTAINER) >/dev/null 2>&1 || true; \
 	exit $$status
+
+# The files the SASL broker runs: the producer's and the consumer's SASL tests,
+# and the consumer's broker tests again, over the SASL_SSL listener as admin
+# (KAFKA_TEST_LISTENER, test/integration/_security.js).
+SASL_TESTS = test/integration/sasl.test.js test/integration/consumer.test.js test/integration/kafka_consumer_broker.test.js
 
 # SASL_PLAINTEXT on KAFKA_SASL_PORT + 1 and SASL_SSL on KAFKA_SASL_PORT + 2,
 # both SASL/PLAIN, PLAINTEXT on KAFKA_SASL_PORT, under the StandardAuthorizer:
@@ -465,8 +475,8 @@ test-integration-sasl: build security-certs
 	status=0; \
 	KAFKA_SECURITY_DIR='$(SECURITY_DIR)' KAFKA_SASL_ADMIN_BOOTSTRAP_SERVERS=localhost:$$p \
 	  KAFKA_SASL_PLAINTEXT_BOOTSTRAP_SERVERS=localhost:$$plain KAFKA_SASL_SSL_BOOTSTRAP_SERVERS=localhost:$$tls \
-	  KAFKA_SASL_CONTAINER=$(KAFKA_SASL_CONTAINER) \
-	  $(NODE) $(JEST) --ci $(or $(JEST_ARGS),test/integration/sasl.test.js) --selectProjects integration --runInBand || status=$$?; \
+	  KAFKA_SASL_CONTAINER=$(KAFKA_SASL_CONTAINER) KAFKA_TEST_LISTENER=SASL_SSL \
+	  $(NODE) $(JEST) --ci $(or $(JEST_ARGS),$(SASL_TESTS)) --selectProjects integration --runInBand || status=$$?; \
 	docker rm -f $(KAFKA_SASL_CONTAINER) >/dev/null 2>&1 || true; \
 	exit $$status
 

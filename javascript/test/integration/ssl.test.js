@@ -14,7 +14,7 @@
 
 'use strict';
 
-// The producer over SSL and mTLS: runs only when the SSL broker's variables
+// The producer and the consumer over SSL and mTLS: runs only when the SSL broker's variables
 // are set (`make -C javascript test-integration-ssl` starts the broker and
 // writes the certificates). The broker's certificate is valid for localhost
 // only, so a connection to 127.0.0.1 is a hostname mismatch.
@@ -22,7 +22,7 @@
 const assert = require('node:assert/strict');
 
 const { AuthenticationError, SslAuthenticationError } = require('@confluentinc/kafka-javascript/common/errors');
-const { certPath, pem, produceOneRecord, sendFailingAuthentication } = require('./_security');
+const { certPath, consumeOneRecord, pem, pollFailingAuthentication, produceOneRecord, sendFailingAuthentication } = require('./_security');
 
 const SSL = process.env.KAFKA_SSL_BOOTSTRAP_SERVERS;
 const MTLS = process.env.KAFKA_MTLS_BOOTSTRAP_SERVERS;
@@ -164,6 +164,109 @@ function byAddress(bootstrap) {
       },
       plaintext,
       'ssl-no-hostname',
+    );
+  },
+  120000,
+);
+
+(SKIP ? test.skip : test)(
+  'consumes over SSL with a truststore file: one record with its header, committed and read back',
+  async () => {
+    await consumeOneRecord(
+      { 'bootstrap.servers': ssl, 'security.protocol': 'SSL', 'ssl.truststore.location': certPath('ca.pem') },
+      plaintext,
+      'consumer-ssl-file',
+    );
+  },
+  120000,
+);
+
+(SKIP ? test.skip : test)(
+  'consumes over SSL with inline truststore certificates: one record with its header, committed and read back',
+  async () => {
+    await consumeOneRecord(
+      { 'bootstrap.servers': ssl, 'security.protocol': 'SSL', 'ssl.truststore.type': 'PEM', 'ssl.truststore.certificates': pem('ca.pem') },
+      plaintext,
+      'consumer-ssl-inline',
+    );
+  },
+  120000,
+);
+
+(SKIP ? test.skip : test)(
+  'consumes over mTLS with an inline certificate chain and key: one record with its header, committed and read back',
+  async () => {
+    await consumeOneRecord(
+      {
+        'bootstrap.servers': mtls,
+        'security.protocol': 'SSL',
+        'ssl.truststore.type': 'PEM',
+        'ssl.truststore.certificates': pem('ca.pem'),
+        'ssl.keystore.type': 'PEM',
+        'ssl.keystore.certificate.chain': pem('client.pem'),
+        'ssl.keystore.key': pem('client.key'),
+      },
+      plaintext,
+      'consumer-mtls-inline',
+    );
+  },
+  120000,
+);
+
+// Java's SslTransportLayer#handshakeFailure gives
+// SslAuthenticationException("SSL handshake failed"), which the metadata
+// keeps as a fatal error; NetworkClientDelegate#maybePropagateMetadataError
+// takes it (the consumer's delegate keeps it rather than queue an
+// ErrorEvent), ConsumerNetworkThread#maybeFailOnMetadataError fails the
+// pending AsyncPollEvent with it, and AsyncKafkaConsumer#poll throws it.
+(SKIP ? test.skip : test)(
+  "a certificate from a CA the truststore does not hold fails the consumer's poll() with SslAuthenticationError('SSL handshake failed')",
+  async () => {
+    const failure = await pollFailingAuthentication(
+      { 'bootstrap.servers': ssl, 'security.protocol': 'SSL', 'ssl.truststore.location': certPath('untrusted-ca.pem') },
+      plaintext,
+      'consumer-ssl-untrusted',
+    );
+    assert.ok(failure instanceof SslAuthenticationError, String(failure));
+    assert.equal(failure.constructor, SslAuthenticationError);
+    assert.ok(failure instanceof AuthenticationError);
+    assert.equal(failure.message, 'SSL handshake failed');
+  },
+  120000,
+);
+
+(SKIP ? test.skip : test)(
+  "a host the broker's certificate does not name fails the consumer's poll() with SslAuthenticationError under 'https'",
+  async () => {
+    const failure = await pollFailingAuthentication(
+      {
+        'bootstrap.servers': byAddress(ssl),
+        'security.protocol': 'SSL',
+        'ssl.truststore.location': certPath('ca.pem'),
+        'ssl.endpoint.identification.algorithm': 'https',
+      },
+      plaintext,
+      'consumer-ssl-hostname',
+    );
+    assert.ok(failure instanceof SslAuthenticationError, String(failure));
+    assert.equal(failure.constructor, SslAuthenticationError);
+    assert.equal(failure.message, 'SSL handshake failed');
+  },
+  120000,
+);
+
+(SKIP ? test.skip : test)(
+  "a host the broker's certificate does not name: the consumer reads when ssl.endpoint.identification.algorithm is ''",
+  async () => {
+    await consumeOneRecord(
+      {
+        'bootstrap.servers': byAddress(ssl),
+        'security.protocol': 'SSL',
+        'ssl.truststore.location': certPath('ca.pem'),
+        'ssl.endpoint.identification.algorithm': '',
+      },
+      plaintext,
+      'consumer-ssl-no-hostname',
     );
   },
   120000,

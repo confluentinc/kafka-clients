@@ -44,11 +44,15 @@ const {
 } = require('@confluentinc/kafka-javascript/consumer');
 const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
 const { createTopic, waitForBroker } = require('./_fetch_records');
+const { testBroker } = require('./_security');
 
 /** @typedef {import('@confluentinc/kafka-javascript/consumer').ConsumerRecords<Buffer, Buffer>} Records */
 
-const BOOTSTRAP = /** @type {string} */ (process.env.KAFKA_BOOTSTRAP_SERVERS);
-const SKIP = BOOTSTRAP ? false : 'KAFKA_BOOTSTRAP_SERVERS is not set: no broker to consume from';
+// The broker's PLAINTEXT listener, for the topics; every client's keys come
+// from clientConfigs(), for the listener KAFKA_TEST_LISTENER names
+// (_security.js), so the SSL and SASL targets run this file again over TLS
+// and over SASL_SSL.
+const { plaintext: BOOTSTRAP, skip: SKIP, clientConfigs } = testBroker();
 if (SKIP) console.log(`skipping the consumer integration tests: ${SKIP}`);
 
 // The broker `make test-integration` has just started may not listen yet, and
@@ -71,7 +75,7 @@ function freshTopic(what) {
  * @returns {Promise<bigint[]>} their timestamps
  */
 async function produce(topic) {
-  const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP, acks: 'all' } });
+  const producer = new KafkaProducer({ configs: { ...clientConfigs(), acks: 'all' } });
   try {
     const timestamps = [1700000000000n, 1700000000001n, 1700000000002n];
     const records = [
@@ -168,7 +172,7 @@ function checkRecords(records, topic, timestamps) {
     const timestamps = await produce(topic);
     const consumer = new KafkaConsumer({
       configs: {
-        'bootstrap.servers': BOOTSTRAP,
+        ...clientConfigs(),
         'group.protocol': 'consumer',
         'group.id': `${topic}-group`,
         'auto.offset.reset': 'earliest',
@@ -193,7 +197,7 @@ function checkRecords(records, topic, timestamps) {
     await createTopic(BOOTSTRAP, topic);
     const timestamps = await produce(topic);
     const consumer = new KafkaConsumer({
-      configs: { 'bootstrap.servers': BOOTSTRAP, 'group.protocol': 'consumer', 'auto.offset.reset': 'earliest' },
+      configs: { ...clientConfigs(), 'group.protocol': 'consumer', 'auto.offset.reset': 'earliest' },
     });
     try {
       const tp = new TopicPartition({ topic, partition: 0 });
@@ -229,7 +233,7 @@ function checkRecords(records, topic, timestamps) {
     await produce(topic);
     const group = `${topic}-group`;
     const consumer = new KafkaConsumer({
-      configs: { 'bootstrap.servers': BOOTSTRAP, 'group.protocol': 'consumer', 'group.id': group, 'auto.offset.reset': 'earliest' },
+      configs: { ...clientConfigs(), 'group.protocol': 'consumer', 'group.id': group, 'auto.offset.reset': 'earliest' },
     });
     const tp = new TopicPartition({ topic, partition: 0 });
     try {
@@ -276,7 +280,7 @@ function checkRecords(records, topic, timestamps) {
     await createTopic(BOOTSTRAP, topic);
     const timestamps = await produce(topic);
     const consumer = new KafkaConsumer({
-      configs: { 'bootstrap.servers': BOOTSTRAP, 'group.protocol': 'consumer', 'auto.offset.reset': 'earliest' },
+      configs: { ...clientConfigs(), 'group.protocol': 'consumer', 'auto.offset.reset': 'earliest' },
     });
     const tp = new TopicPartition({ topic, partition: 0 });
     try {
@@ -328,7 +332,7 @@ function checkRecords(records, topic, timestamps) {
     const topic = freshTopic('metadata');
     await createTopic(BOOTSTRAP, topic, { partitions: 2 });
     const consumer = new KafkaConsumer({
-      configs: { 'bootstrap.servers': BOOTSTRAP, 'group.protocol': 'consumer', 'allow.auto.create.topics': false },
+      configs: { ...clientConfigs(), 'group.protocol': 'consumer', 'allow.auto.create.topics': false },
     });
     try {
       const partitions = await consumer.partitionsFor({ topic });
@@ -360,7 +364,7 @@ function checkRecords(records, topic, timestamps) {
     await createTopic(BOOTSTRAP, topic);
     const group = `${topic}-group`;
     const consumer = new KafkaConsumer({
-      configs: { 'bootstrap.servers': BOOTSTRAP, 'group.protocol': 'consumer', 'group.id': group },
+      configs: { ...clientConfigs(), 'group.protocol': 'consumer', 'group.id': group },
     });
     try {
       const before = consumer.groupMetadata();
@@ -402,7 +406,7 @@ async function subscribedWith(what, listener, count = 2, extra = {}) {
   const topic = freshTopic(what);
   await createTopic(BOOTSTRAP, topic);
   if (count > 0) {
-    const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP, acks: 'all' } });
+    const producer = new KafkaProducer({ configs: { ...clientConfigs(), acks: 'all' } });
     try {
       for (let i = 0; i < count; i++)
         await (await producer.send(new ProducerRecord({ topic, partition: 0, key: null, value: Buffer.from(`v${i}`) }))).get();
@@ -412,7 +416,7 @@ async function subscribedWith(what, listener, count = 2, extra = {}) {
   }
   const consumer = new KafkaConsumer({
     configs: {
-      'bootstrap.servers': BOOTSTRAP,
+      ...clientConfigs(),
       'group.protocol': 'consumer',
       'group.id': `${topic}-group`,
       'auto.offset.reset': 'earliest',
@@ -486,6 +490,53 @@ listenerTest(
       assert.equal(committed.get(partition)?.metadata, 'revoked');
     } finally {
       await closeQuietly(consumer);
+    }
+  },
+  120000,
+);
+
+// Ask 17, pinned: after unsubscribe() has run onPartitionsRevoked, the core's
+// close() runs onPartitionsLost for the same partitions. Java calls no
+// listener there: AbstractMembershipManager#leaveGroup clears the assignment
+// snapshot (notifyAssignmentChange(Collections.emptySet())), so
+// AsyncKafkaConsumer#runRebalanceCallbacksOnClose finds nothing to revoke.
+// This test asserts what the core does today, so a core that does as Java
+// does fails it on purpose: the expected calls then end at 'revoked'.
+listenerTest(
+  "close() after unsubscribe() runs onPartitionsLost for the partitions unsubscribe() revoked, where Java's close() runs no listener",
+  async () => {
+    /** @type {Array<[string, string[]]>} */
+    const calls = [];
+    /** @param {string} name */
+    const record =
+      (name) =>
+      /** @param {{ partitions: import('@confluentinc/kafka-javascript/common').TopicPartitionSet }} options */
+      ({ partitions }) => {
+        if (partitions.size() > 0) calls.push([name, [...partitions].map(String)]);
+      };
+    const { consumer, tp } = await subscribedWith('unsubscribe-close', {
+      onPartitionsRevoked: record('revoked'),
+      onPartitionsAssigned: record('assigned'),
+      onPartitionsLost: record('lost'),
+    });
+    let closed = false;
+    try {
+      await pollWhile(consumer, () => consumer.assignment().has(tp));
+      await consumer.unsubscribe();
+      assert.deepEqual(calls, [
+        ['assigned', [String(tp)]],
+        ['revoked', [String(tp)]],
+      ]);
+      await consumer.close();
+      closed = true;
+      // Java's: [['assigned', [tp]], ['revoked', [tp]]], and no more.
+      assert.deepEqual(calls, [
+        ['assigned', [String(tp)]],
+        ['revoked', [String(tp)]],
+        ['lost', [String(tp)]],
+      ]);
+    } finally {
+      if (!closed) await closeQuietly(consumer);
     }
   },
   120000,
@@ -888,7 +939,7 @@ async function assignedConsumer(what) {
   const tp = new TopicPartition({ topic, partition: 0 });
   const consumer = new KafkaConsumer({
     configs: {
-      'bootstrap.servers': BOOTSTRAP,
+      ...clientConfigs(),
       'group.protocol': 'consumer',
       'group.id': `${topic}-group`,
       'enable.auto.commit': false,
@@ -1041,7 +1092,7 @@ const { StringDeserializer, StringSerializer } = require('@confluentinc/kafka-ja
  */
 async function produceStrings(topic, partitions, count) {
   const producer = new KafkaProducer({
-    configs: { 'bootstrap.servers': BOOTSTRAP, acks: 'all' },
+    configs: { ...clientConfigs(), acks: 'all' },
     keySerializer: new StringSerializer(),
     valueSerializer: new StringSerializer(),
   });
@@ -1072,7 +1123,7 @@ async function produceStrings(topic, partitions, count) {
 async function deserializing(topic, partitions, key, value) {
   /** @type {KafkaConsumer<any, any>} */
   const consumer = new KafkaConsumer({
-    configs: { 'bootstrap.servers': BOOTSTRAP, 'group.protocol': 'consumer', 'auto.offset.reset': 'earliest' },
+    configs: { ...clientConfigs(), 'group.protocol': 'consumer', 'auto.offset.reset': 'earliest' },
     keyDeserializer: key,
     valueDeserializer: value,
   });
@@ -1279,7 +1330,7 @@ async function deserializing(topic, partitions, key, value) {
     let closed = 0;
     const consumer = await KafkaConsumer.create({
       configs: {
-        'bootstrap.servers': BOOTSTRAP,
+        ...clientConfigs(),
         'group.protocol': 'consumer',
         'group.id': `${topic}-group`,
         'auto.offset.reset': 'earliest',
