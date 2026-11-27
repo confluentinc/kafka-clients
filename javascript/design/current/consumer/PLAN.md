@@ -10,9 +10,10 @@ approved with its choices 2(a) and 3(a), and its "Result" section has the commit
 **done** (2026-11-27): its phase plan, `P4.md`, was approved with its choice 2(a), and its "Result" section has the
 commits, the review and the gate. P5 is **done** (2026-11-27): its phase plan, `P5.md`, was approved with its choices
 2(a) and 3(a), and its "Result" section has the commits, the review and the gate. The user then chose (a) in its
-"For the user" list: `commitAsync({ offsets, callback })`'s `callback` stays non-null. P6's phase plan, `P6.md`,
-was approved on 2026-11-27 with its choices 2(a), done as the merge `34f8de73b` of PR #312's `c0adc2cf5`, 3(a) and
-4(b), and P6 is in progress.
+"For the user" list: `commitAsync({ offsets, callback })`'s `callback` stays non-null. P6 is **done**
+(2026-11-27): its phase plan, `P6.md`, was approved with its choices 2(a), done as the merge `34f8de73b` of
+PR #312's `c0adc2cf5`, 3(a) and 4(b), and its "Result" section has the commits, the review and the gate. The
+user accepted its deviation 1b and left 1a, the float's signaling NaN, open for their team.
 
 - Branch `dev/javascript-consumer-bindings`, on PR #312's head `f62d5fec9` (`origin/dev/javascript-producer-bindings`),
   an ancestor of the branch, and since 2026-11-27 merged with its newer `c0adc2cf5` (`34f8de73b`, P6.md, choice
@@ -154,9 +155,9 @@ The producer's layout (JS conventions, Layout and modules), one Java class per f
   `consumer_config.ts` (generated), `consumer_rebalance_listener.ts`, `offset_commit_callback.ts`, all exported
   from `src/consumer/index.ts`, which is already the package's `./consumer` export.
 - `src/common/serialization/`: the `Deserializer` interface and the built-in classes (P6).
-- `src/internal/`: `consumer_rebalance_listener_defaults.ts`, `deserializer_defaults.ts` (P6), the generated
-  `consumer_config_keys.ts`, and the code shared with the producer (`config.ts`, `serde.ts`, `lifecycle.ts` and the
-  rest), extended rather than copied.
+- `src/internal/`: `consumer_rebalance_listener_defaults.ts`; `deserializer_defaults.ts`, `deserialize_batch.ts`,
+  `builtin_serde.ts` and `client_construction.ts` (P6); and the code shared with the producer (`config.ts`,
+  `serde.ts`, `lifecycle.ts` and the rest), extended rather than copied.
 - `native/`: `consumer.c` (the client, `poll()` and the records) and, if that reads better, `mock_consumer.c`,
   registered in `addon.c` and `binding.gyp`. They reuse `callback_queue.c`, `error.c`, `error_payload.c` and
   `record.c`. `headers.c` gains the copy out of a consumed record (4.2), taking the reading code of the test-only
