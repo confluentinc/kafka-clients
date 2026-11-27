@@ -1,6 +1,6 @@
 [package]
 name = "xtask"
-version = "1.0.0"
+version = "1.1.0-rc.1"
 edition = "2021"
 # `cargo xtask` (rust/.cargo/config.toml) runs this one; the package has a
 # second binary, `test-selection`.
