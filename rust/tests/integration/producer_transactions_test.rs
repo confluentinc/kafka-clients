@@ -2318,25 +2318,36 @@ async fn fencing_on_transaction_expiration<F: ProducerBackendFactory>(ctx: &mut 
     // check interval), then writes the abort markers; until they reach the
     // partition leader it still takes the old epoch, and the second send
     // succeeds. On CI's container brokers the abort can end after the sleep, so
-    // wait until the coordinator lists the transaction in COMPLETE_ABORT.
+    // wait until the coordinator lists the transaction in COMPLETE_ABORT. On a
+    // timeout the panic gives the state the coordinator listed last, or the
+    // listing's error.
     let admin = txn_test_admin(ctx);
-    test_utils::wait_until_true_with_timeout(
-        || {
-            let listing = admin.list_transactions().all();
-            let txn_id = txn_id.clone();
-            async move {
-                listing.get().await.is_ok_and(|listings| {
-                    listings
-                        .iter()
-                        .filter(|txn| txn.transactional_id() == txn_id)
-                        .any(|txn| txn.state() == TransactionState::CompleteAbort)
-                })
+    test_utils::retry_on_error_with_timeout(Duration::from_millis(test_utils::DEFAULT_MAX_WAIT_MS), || {
+        let listing = admin.list_transactions().all();
+        let txn_id = txn_id.clone();
+        async move {
+            let listings = match listing.get().await {
+                Ok(listings) => listings,
+                Err(error) => return Err(format!("listTransactions failed: {error}")),
+            };
+            let states: Vec<TransactionState> = listings
+                .iter()
+                .filter(|txn| txn.transactional_id() == txn_id)
+                .map(|txn| txn.state())
+                .collect();
+            if states.contains(&TransactionState::CompleteAbort) {
+                Ok(())
+            } else if states.is_empty() {
+                Err(format!("listTransactions does not list the expired transaction {txn_id}"))
+            } else {
+                let states: Vec<String> = states.iter().map(ToString::to_string).collect();
+                Err(format!(
+                    "the expired transaction is in state {}, not CompleteAbort",
+                    states.join(", ")
+                ))
             }
-        },
-        "the expired transaction is not in COMPLETE_ABORT state",
-        test_utils::DEFAULT_MAX_WAIT_MS,
-        test_utils::DEFAULT_PAUSE_MS,
-    )
+        }
+    })
     .await;
     admin.close().await;
 
