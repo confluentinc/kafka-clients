@@ -51,9 +51,11 @@ rule rather than repeat it. "Line N" is line N of `javascript/CLAUDE.md` at `8a2
   `poll()` holds the consumer until it returns: `position()` answers past the whole batch, and `assignment()`,
   `pause()`, `resume()` and a second `poll()` go through *(deviation, accepted by the user on 2026-11-27. Why: the
   deserializers run in JavaScript after the core's poll. Goes when: the core runs the deserializers through the FFI)*.
-  Only the gap between the seeks back is shared with Python, whose seeks back are separate guarded calls; Python
-  refuses an `async def` deserializer and holds its own guard while its deserializers run, so the window while a
-  deserializer's Promise is awaited is this binding's own. `test/integration/consumer.test.js` pins it.
+  Python's sync `KafkaConsumer` runs its deserializers after releasing its guard (`_ConsumerState._run_sync` resolves
+  after `with self._use()`), so another thread's call goes through while they run, as it does between its seeks back,
+  which are separate guarded calls. Its asyncio consumer runs them on its event loop, where no other task runs
+  meanwhile, so its only gaps are between its seeks back. Python refuses an `async def` deserializer, so only the wait
+  for a deserializer's Promise is this binding's own. `test/integration/consumer.test.js` pins it.
 - A failing deserializer ends the batch where Java's `FetchCollector` ends it, as Python's binding does: the records
   before it are returned, and `RecordDeserializationError` is the failure of a poll that has none, with Java's message
   and fields (`CompletedFetch.newRecordDeserializationException`) and the thrown value as its `cause`, `null` and
