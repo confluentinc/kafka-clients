@@ -2946,6 +2946,12 @@ fn print_help() {
                     (dotnet/Directory.Build.props), a third line, left as it is without it;
                     it only moves up too. Its -alpha.N, -beta.N and -rc.N may be followed
                     by .dev.M, a dev build (4.4.0-alpha.0.dev.1)
+                    rust/, python/ and dotnet/CHANGELOG.md: [Unreleased] becomes the
+                    version their package moves to (a dev build too), dated today in PST,
+                    after an agent fills in the missing entries from the commits since
+                    the last release: --agent COMMAND (claude), --model MODEL (opus),
+                    --timeout SECS (1200); --no-agent releases the sections as they are;
+                    the release of a pre-release renames the pre-release's section
   select-tests    Ask an agent which tests the changes from a base branch can affect and write
                   them to ../test-selection/test-selection-<HEAD>.json, keeping the four most
                   recent files there (or to $TEST_SELECTION, relative to the repository root, when
@@ -3039,6 +3045,7 @@ Usage:
   cargo xtask package-check
   cargo xtask api-compat [--baseline TAG]
   cargo xtask bump-version X.Y.Z[-alpha.N|-beta.N|-dev.N|-rc.N] [--python-version PEP440] [--dotnet-version SEMVER]
+                           [--agent COMMAND] [--model MODEL] [--timeout SECS] [--no-agent]
   cargo xtask chaos [FLAGS | --help]
   cargo xtask chaos-matrix --matrix FILE
   cargo xtask chaos-matrix-status [--watch [SECS]]

@@ -4,7 +4,7 @@ All notable changes to the `confluent-kafka` Python package are documented in th
 
 Before GA the public API is not stable, and an interface may change even in a minor release.
 
-## [Unreleased]
+## [4.4.0b2.dev1] - 2026-11-27
 
 ### Security
 
@@ -28,6 +28,21 @@ Before GA the public API is not stable, and an interface may change even in a mi
   arguments in Python first, so some messages differ from the previous release.
   The admin client still checks a value that crosses as its fields or by value
   (`describe_acls(filter=None)`, `renew_delegation_token(hmac=None)`).
+- The producer copies a record once on its way to the socket instead of
+  twice, and no longer zero-fills the buffers it allocates, so it uses less
+  memory and CPU per byte sent: the core's finished batch is a view of its
+  pooled buffer, as Java's is.
+
+### Fixed
+
+- `KafkaConsumer` and `AsyncKafkaConsumer` no longer release their rebalance
+  listener at `subscribe(topics=[])`. That call is Java's `unsubscribe()`,
+  which keeps the listener, so a later `close()` called a released listener:
+  the sync consumer crashed the process and the asyncio one failed with a
+  `LocalCallbackError`. The listener now stays registered, and a new
+  `callback` given with the empty `topics` is ignored, as in Java. A failed
+  `subscribe()` keeps its listener alive too, since the core may still call
+  it (a `MockConsumer`'s `rebalance()` after `assign()`).
 
 ## [4.4.0b1] - 2026-10-30
 

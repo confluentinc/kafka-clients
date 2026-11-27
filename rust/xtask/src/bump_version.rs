@@ -52,15 +52,31 @@
 //!     `Cargo.lock` with them;
 //!   - the Python packages in [`PYPROJECTS`] and the `__version__` of
 //!     [`PYTHON_VERSION_MODULES`];
-//!   - with `--dotnet-version`, the .NET package.
+//!   - with `--dotnet-version`, the .NET package;
+//!   - [`RUST_CHANGELOG`], [`PYTHON_CHANGELOG`] and, with
+//!     `--dotnet-version`, [`DOTNET_CHANGELOG`], when their package's version
+//!     moves, to a dev build too: the `## [Unreleased]` section becomes
+//!     `## [<version>] - <date>`, today's date in PST, after an agent has
+//!     filled in the entries it is missing ([`changelog`]). The agent is
+//!     chosen as for the test selection: `--agent <command>` (default
+//!     `claude`), `--model <model>` (default `opus`) and `--timeout <seconds>`
+//!     (default 1200); `--no-agent` releases the sections as they are. The
+//!     release of a pre-release (`1.1.0` after `1.1.0-rc.1`) makes no new
+//!     section: it renames the pre-release's, the `[Unreleased]` entries
+//!     folded in.
+
+mod changelog;
 
 use std::cmp::Ordering;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use anyhow::Context as _;
+
+use crate::test_selection::{DEFAULT_AGENT, DEFAULT_MODEL};
 
 /// The workspace manifest, relative to the repository root.
 const WORKSPACE_MANIFEST: &str = "rust/Cargo.toml";
@@ -74,15 +90,30 @@ const PYTHON_VERSION_MODULES: [&str; 1] = ["tools/translation_agent/translation_
 /// The MSBuild file whose one `<Version>` is the .NET package's version.
 const DOTNET_PROPS: &str = "dotnet/Directory.Build.props";
 
+/// The Rust crate's changelog, released with the crate's version.
+const RUST_CHANGELOG: &str = "rust/CHANGELOG.md";
+
+/// The Python package's changelog, released with `python/pyproject.toml`'s
+/// version (`PYPROJECTS[0]`).
+const PYTHON_CHANGELOG: &str = "python/CHANGELOG.md";
+
+/// The .NET package's changelog, released with [`DOTNET_PROPS`]' version.
+const DOTNET_CHANGELOG: &str = "dotnet/CHANGELOG.md";
+
 const USAGE: &str =
     "usage: cargo xtask bump-version X.Y.Z[-alpha.N|-beta.N|-dev.N|-rc.N] [--python-version PEP440_VERSION] \
-     [--dotnet-version SEMVER]\n\
+     [--dotnet-version SEMVER] [--agent COMMAND] [--model MODEL] [--timeout SECONDS] [--no-agent]\n\
      The crates get the semver version; the Python packages the PEP 440 version, by default the\n\
      crate's in PEP 440 form. Python versions are their own line and only move up: a version below\n\
      a package's current one is refused, so pass --python-version while the crate's is lower.\n\
      --dotnet-version sets the .NET package's version (dotnet/Directory.Build.props), in the semver\n\
      form, where -alpha.N, -beta.N and -rc.N may be followed by .dev.M (4.4.0-alpha.0.dev.1); without\n\
-     it that version is left as it is. It only moves up too.";
+     it that version is left as it is. It only moves up too.\n\
+     The [Unreleased] section of rust/CHANGELOG.md, python/CHANGELOG.md and dotnet/CHANGELOG.md\n\
+     becomes the section of the version their package moves to, dated today in PST, after the agent\n\
+     (--agent, default claude, with --model, default opus, and --timeout, default 1200 s) has\n\
+     filled in the missing entries; --no-agent releases the sections as they are. The release of a\n\
+     pre-release renames the pre-release's section instead.";
 
 /// A pre-release stage, in semver precedence order (its labels compare as
 /// ASCII text).
@@ -224,13 +255,18 @@ fn number(text: &str) -> Option<u64> {
     text.parse().ok()
 }
 
-/// The arguments: the crate version, then `--python-version` and
-/// `--dotnet-version`, each at most once, in either order.
+/// The arguments: the crate version, then `--python-version`,
+/// `--dotnet-version`, `--agent`, `--model`, `--timeout` and `--no-agent`,
+/// each at most once, in any order.
 #[derive(Debug, PartialEq, Eq)]
 struct Args<'a> {
     version: &'a str,
     python: Option<&'a str>,
     dotnet: Option<&'a str>,
+    agent: Option<&'a str>,
+    model: Option<&'a str>,
+    timeout: Option<&'a str>,
+    no_agent: bool,
 }
 
 fn parse_args(args: &[String]) -> anyhow::Result<Args<'_>> {
@@ -240,11 +276,32 @@ fn parse_args(args: &[String]) -> anyhow::Result<Args<'_>> {
     if version.starts_with("--") {
         anyhow::bail!("{USAGE}");
     }
-    let mut parsed = Args { version, python: None, dotnet: None };
-    while let [flag, value, rest @ ..] = flags {
+    let mut parsed = Args {
+        version,
+        python: None,
+        dotnet: None,
+        agent: None,
+        model: None,
+        timeout: None,
+        no_agent: false,
+    };
+    while let [flag, rest @ ..] = flags {
+        if flag == "--no-agent" {
+            if std::mem::replace(&mut parsed.no_agent, true) {
+                anyhow::bail!("{flag} is given twice; {USAGE}");
+            }
+            flags = rest;
+            continue;
+        }
+        let [value, rest @ ..] = rest else {
+            anyhow::bail!("{USAGE}");
+        };
         let slot = match flag.as_str() {
             "--python-version" => &mut parsed.python,
             "--dotnet-version" => &mut parsed.dotnet,
+            "--agent" => &mut parsed.agent,
+            "--model" => &mut parsed.model,
+            "--timeout" => &mut parsed.timeout,
             _ => anyhow::bail!("{USAGE}"),
         };
         if slot.replace(value).is_some() {
@@ -252,14 +309,26 @@ fn parse_args(args: &[String]) -> anyhow::Result<Args<'_>> {
         }
         flags = rest;
     }
-    if !flags.is_empty() {
-        anyhow::bail!("{USAGE}");
+    if parsed.no_agent && (parsed.agent.is_some() || parsed.model.is_some() || parsed.timeout.is_some()) {
+        anyhow::bail!("--no-agent takes no --agent, --model or --timeout; {USAGE}");
     }
     Ok(parsed)
 }
 
 pub(crate) fn run(args: &[String]) -> anyhow::Result<()> {
-    let Args { version: text, python: python_override, dotnet } = parse_args(args)?;
+    let Args { version: text, python: python_override, dotnet, agent, model, timeout, no_agent } = parse_args(args)?;
+    let timeout = match timeout {
+        Some(secs) => Duration::from_secs(
+            secs.parse()
+                .with_context(|| format!("--timeout: {secs:?} is not a number of seconds"))?,
+        ),
+        None => Duration::from_secs(changelog::DEFAULT_AGENT_TIMEOUT_SECS),
+    };
+    let agent = (!no_agent).then(|| changelog::Agent {
+        command: agent.unwrap_or(DEFAULT_AGENT),
+        model: model.unwrap_or(DEFAULT_MODEL),
+        timeout,
+    });
     let new = PackageVersion::parse(text).with_context(|| format!("`{text}` is not a version; {USAGE}"))?;
     let dotnet = dotnet.map(parse_dotnet_version).transpose()?;
     let python = match python_override {
@@ -287,6 +356,7 @@ pub(crate) fn run(args: &[String]) -> anyhow::Result<()> {
     // Every edit is computed before any file is written, so a manifest this
     // command cannot read leaves the tree untouched.
     let mut edits: Vec<(PathBuf, String)> = Vec::new();
+    let mut python_current = None;
     let members = workspace_members(&workspace).context("rust/Cargo.toml has no [workspace] members")?;
     for member in members {
         let path = root.join("rust").join(member).join("Cargo.toml");
@@ -311,6 +381,7 @@ pub(crate) fn run(args: &[String]) -> anyhow::Result<()> {
         let current = table_value(&text, "project", "version")
             .with_context(|| format!("{pyproject} has no [project] version"))?;
         ensure_not_lowered(pyproject, current, &python, &target)?;
+        python_current.get_or_insert_with(|| current.to_string());
         let edited = set_table_value(&text, "project", "version", &python).expect("read above");
         edits.push((path, edited));
     }
@@ -322,15 +393,25 @@ pub(crate) fn run(args: &[String]) -> anyhow::Result<()> {
         let edited = set_module_version(&text, &python).expect("read above");
         edits.push((path, edited));
     }
+    let mut dotnet_move = None;
     match dotnet {
         Some(dotnet) => {
             let path = root.join(DOTNET_PROPS);
             let props = read(&path)?;
-            ensure_dotnet_not_lowered(props_version(&props)?, dotnet)?;
+            let current = props_version(&props)?;
+            ensure_dotnet_not_lowered(current, dotnet)?;
+            dotnet_move = Some((parse_dotnet_version(current)?, dotnet));
             edits.push((path, set_props_version(&props, &dotnet.to_string())?));
         },
         None => println!("   {DOTNET_PROPS} is not changed: pass --dotnet-version to set the .NET version"),
     }
+
+    let releases = changelog_releases(
+        (current, new),
+        (python_current.as_deref().expect("PYPROJECTS is not empty"), &python, &target),
+        dotnet_move,
+    );
+    edits.extend(changelog::edits(&root, &releases, agent.as_ref())?);
 
     for (path, text) in &edits {
         fs::write(path, text).with_context(|| format!("writing {}", path.display()))?;
@@ -348,6 +429,53 @@ pub(crate) fn run(args: &[String]) -> anyhow::Result<()> {
     }
     println!("✅ Version {new} set in {} files and Cargo.lock", edits.len());
     Ok(())
+}
+
+/// The changelogs this bump releases: the crate's when its version moves, the
+/// Python package's when `python/pyproject.toml`'s does, the .NET package's
+/// when `dotnet` (its current version and the new one) moves, a dev build
+/// included. A move from a pre-release to its release names the pre-release,
+/// whose section the release's replaces.
+fn changelog_releases(
+    (current, new): (PackageVersion, PackageVersion),
+    (python_current, python, target): (&str, &str, &Pep440),
+    dotnet: Option<(DotnetVersion, DotnetVersion)>,
+) -> Vec<changelog::Release> {
+    let mut releases = Vec::new();
+    if new != current {
+        releases.push(changelog::Release {
+            file: RUST_CHANGELOG,
+            package: "the `confluent-kafka` Rust crate: its Rust API, and the C FFI and C headers built from it \
+                      (the C library). Not the Python, .NET or C++ bindings",
+            tag_prefix: "rust/v",
+            version: new.to_string(),
+            pre_release: (current.is_pre_release() && !new.is_pre_release() && current.release() == new.release())
+                .then(|| current.to_string()),
+        });
+    }
+    if python != python_current {
+        releases.push(changelog::Release {
+            file: PYTHON_CHANGELOG,
+            package: "the `confluent-kafka` Python package (`python/`, the `confluent_kafka` module) and what its \
+                      users see of the Rust core it is built on",
+            tag_prefix: "python/v",
+            version: python.to_string(),
+            pre_release: Pep440::parse(python_current)
+                .is_some_and(|current| target.is_release_of(&current))
+                .then(|| python_current.to_string()),
+        });
+    }
+    if let Some((current, new)) = dotnet.filter(|(current, new)| current != new) {
+        releases.push(changelog::Release {
+            file: DOTNET_CHANGELOG,
+            package: "the `Confluent.Kafka` .NET package (`dotnet/`) and what its users see of the Rust core it is \
+                      built on",
+            tag_prefix: "dotnet/v",
+            version: new.to_string(),
+            pre_release: new.is_release_of(current).then(|| current.to_string()),
+        });
+    }
+    releases
 }
 
 /// Refuses to write `python` (parsed: `target`) over `current`, the version
@@ -392,6 +520,17 @@ impl DotnetVersion {
             return None;
         }
         Some(Self { version, dev })
+    }
+}
+
+impl DotnetVersion {
+    /// Whether this is the release `pre`, a pre-release or a dev build of
+    /// one, leads up to (`4.4.0` of `4.4.0-beta.1.dev.1`).
+    fn is_release_of(self, pre: DotnetVersion) -> bool {
+        !self.version.is_pre_release()
+            && self.dev.is_none()
+            && pre.version.is_pre_release()
+            && pre.version.release() == self.version.release()
     }
 }
 
@@ -518,6 +657,17 @@ struct Pep440 {
 }
 
 impl Pep440 {
+    /// Whether this is the final release `pre`, a pre-release or a dev
+    /// release of the same release, leads up to (`4.4.0` of `4.4.0b1`,
+    /// `4.4.0b2.dev1` and `4.4.0.dev1`).
+    fn is_release_of(&self, pre: &Pep440) -> bool {
+        let is_final = |version: &Pep440| version.pre.0 == 2 && version.post.is_none() && version.dev.0 == 1;
+        is_final(self)
+            && !is_final(pre)
+            && pre.post.is_none()
+            && (self.epoch, &self.release) == (pre.epoch, &pre.release)
+    }
+
     fn parse(text: &str) -> Option<Self> {
         let (public, local) = match text.split_once('+') {
             Some((public, local)) => (public, Some(local)),
@@ -954,6 +1104,13 @@ version = \"9.9.9\"
             let current = module_version(&text).expect("module version");
             assert!(Pep440::parse(current).is_some(), "{module}: {current}");
         }
+        for changelog in [RUST_CHANGELOG, PYTHON_CHANGELOG, DOTNET_CHANGELOG] {
+            let text = read(&root.join(changelog)).expect("changelog");
+            assert!(
+                text.lines().any(|line| line.starts_with("## [")),
+                "{changelog} has no [Unreleased] or release section"
+            );
+        }
         let props = read(&root.join(DOTNET_PROPS)).expect("props");
         let current = props_version(&props).expect("one <Version>");
         parse_dotnet_version(current).expect("a semver .NET version");
@@ -978,20 +1135,42 @@ version = \"9.9.9\"
             "--python-version",
             "4.4.0b1",
         ]);
-        assert_eq!(
-            parse_args(&args).unwrap(),
-            Args { version: "0.3.0", python: Some("4.4.0b1"), dotnet: Some("4.4.0-beta.1") }
-        );
+        let only = |python, dotnet| Args {
+            version: "0.3.0",
+            python,
+            dotnet,
+            agent: None,
+            model: None,
+            timeout: None,
+            no_agent: false,
+        };
+        assert_eq!(parse_args(&args).unwrap(), only(Some("4.4.0b1"), Some("4.4.0-beta.1")));
         let args = strings(&["0.3.0", "--python-version", "4.4.0b1"]);
-        assert_eq!(
-            parse_args(&args).unwrap(),
-            Args { version: "0.3.0", python: Some("4.4.0b1"), dotnet: None }
-        );
+        assert_eq!(parse_args(&args).unwrap(), only(Some("4.4.0b1"), None));
         let args = strings(&["0.3.0"]);
+        assert_eq!(parse_args(&args).unwrap(), only(None, None));
+        let args = strings(&[
+            "0.3.0",
+            "--timeout",
+            "60",
+            "--agent",
+            "claude --verbose",
+            "--python-version",
+            "4.4.0b1",
+            "--model",
+            "sonnet",
+        ]);
         assert_eq!(
             parse_args(&args).unwrap(),
-            Args { version: "0.3.0", python: None, dotnet: None }
+            Args {
+                agent: Some("claude --verbose"),
+                model: Some("sonnet"),
+                timeout: Some("60"),
+                ..only(Some("4.4.0b1"), None)
+            }
         );
+        let args = strings(&["0.3.0", "--no-agent", "--dotnet-version", "4.4.0"]);
+        assert_eq!(parse_args(&args).unwrap(), Args { no_agent: true, ..only(None, Some("4.4.0")) });
         for bad in [
             &[][..],
             &["--dotnet-version", "4.4.0"][..],
@@ -999,9 +1178,109 @@ version = \"9.9.9\"
             &["0.3.0", "--net-version", "4.4.0"][..],
             &["0.3.0", "4.4.0"][..],
             &["0.3.0", "--dotnet-version", "4.4.0", "--dotnet-version", "4.4.1"][..],
+            &["0.3.0", "--no-agent", "--no-agent"][..],
+            &["0.3.0", "--no-agent", "--model", "opus"][..],
+            &["0.3.0", "--agent"][..],
         ] {
             assert!(parse_args(&strings(bad)).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn a_changelog_is_released_when_its_package_moves_to_a_version_that_is_not_a_dev_build() {
+        let released = |current: &str, new: &str, python_current: &str, python: &str| {
+            let target = Pep440::parse(python).unwrap();
+            changelog_releases((v(current), v(new)), (python_current, python, &target), None)
+                .into_iter()
+                .map(|release| (release.file, release.version, release.pre_release))
+                .collect::<Vec<_>>()
+        };
+        let s = |text: &str| text.to_string();
+        assert_eq!(
+            released("1.0.0", "1.1.0-rc.1", "4.4.0b1", "4.4.0b2"),
+            [
+                (RUST_CHANGELOG, s("1.1.0-rc.1"), None),
+                (PYTHON_CHANGELOG, s("4.4.0b2"), None)
+            ]
+        );
+        assert_eq!(
+            released("1.0.0", "1.1.0-rc.1", "4.4.0b1", "4.4.0b1"),
+            [(RUST_CHANGELOG, s("1.1.0-rc.1"), None)]
+        );
+        // The release of a pre-release renames the pre-release's section.
+        assert_eq!(
+            released("1.0.0", "1.0.0", "4.4.0b1", "4.4.0"),
+            [(PYTHON_CHANGELOG, s("4.4.0"), Some(s("4.4.0b1")))]
+        );
+        assert_eq!(
+            released("1.1.0-rc.2", "1.1.0", "4.4.0rc1", "4.4.0.post1"),
+            [
+                (RUST_CHANGELOG, s("1.1.0"), Some(s("1.1.0-rc.2"))),
+                (PYTHON_CHANGELOG, s("4.4.0.post1"), None)
+            ]
+        );
+        // A release that is not the pre-release's makes a section of its own.
+        assert_eq!(
+            released("1.1.0-rc.2", "1.2.0", "4.4.0b1", "4.5.0"),
+            [(RUST_CHANGELOG, s("1.2.0"), None), (PYTHON_CHANGELOG, s("4.5.0"), None)]
+        );
+        assert_eq!(
+            released("1.1.0-rc.1", "1.1.0-rc.2", "4.4.0b1", "4.4.0rc1"),
+            [
+                (RUST_CHANGELOG, s("1.1.0-rc.2"), None),
+                (PYTHON_CHANGELOG, s("4.4.0rc1"), None)
+            ]
+        );
+        // A dev build gets a section, and so does the release after it.
+        assert_eq!(
+            released("1.0.0", "1.1.0-dev.1", "4.4.0b1", "4.4.0b2.dev1"),
+            [
+                (RUST_CHANGELOG, s("1.1.0-dev.1"), None),
+                (PYTHON_CHANGELOG, s("4.4.0b2.dev1"), None)
+            ]
+        );
+        assert_eq!(
+            released("1.1.0-dev.1", "1.1.0", "4.4.0b2.dev1", "4.4.0"),
+            [
+                (RUST_CHANGELOG, s("1.1.0"), Some(s("1.1.0-dev.1"))),
+                (PYTHON_CHANGELOG, s("4.4.0"), Some(s("4.4.0b2.dev1")))
+            ]
+        );
+        assert_eq!(
+            released("1.0.0", "1.0.0", "4.4.0b2.dev1", "4.4.0b2"),
+            [(PYTHON_CHANGELOG, s("4.4.0b2"), None)]
+        );
+        assert!(released("1.0.0", "1.0.0", "4.4.0b1", "4.4.0b1").is_empty());
+    }
+
+    #[test]
+    fn the_dotnet_changelog_moves_with_the_dotnet_version() {
+        let released = |current: &str, new: &str| {
+            let target = Pep440::parse("4.4.0b1").unwrap();
+            changelog_releases(
+                (v("1.0.0"), v("1.0.0")),
+                ("4.4.0b1", "4.4.0b1", &target),
+                Some((dotnet(current), dotnet(new))),
+            )
+            .into_iter()
+            .map(|release| (release.file, release.version, release.pre_release))
+            .collect::<Vec<_>>()
+        };
+        let s = |text: &str| text.to_string();
+        assert_eq!(
+            released("4.4.0-alpha.1", "4.4.0-beta.1.dev.1"),
+            [(DOTNET_CHANGELOG, s("4.4.0-beta.1.dev.1"), None)]
+        );
+        assert_eq!(
+            released("4.4.0-beta.1.dev.1", "4.4.0"),
+            [(DOTNET_CHANGELOG, s("4.4.0"), Some(s("4.4.0-beta.1.dev.1")))]
+        );
+        assert_eq!(
+            released("4.4.0-rc.1", "4.4.0"),
+            [(DOTNET_CHANGELOG, s("4.4.0"), Some(s("4.4.0-rc.1")))]
+        );
+        assert_eq!(released("4.4.0-rc.1", "4.4.1"), [(DOTNET_CHANGELOG, s("4.4.1"), None)]);
+        assert!(released("4.4.0", "4.4.0").is_empty());
     }
 
     #[test]
