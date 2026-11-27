@@ -46,8 +46,9 @@ module.exports = {
     project('typing', ['<rootDir>/test/typing/*.test.js']),
     project('verifiable-clients', ['<rootDir>/verifiable_clients/test/*.test.js']),
     project('integration', ['<rootDir>/test/integration/*.test.js']),
-    // A short stress of the producer against a broker (test/stress/), run in
-    // band as the integration tests are: `make test-stress`.
+    // A short stress of the producer and of the consumer against a broker
+    // (test/stress/), run in band as the integration tests are: `make
+    // test-stress`.
     project('stress', ['<rootDir>/test/stress/*.test.js']),
     // The native layer's memory probes (test/memory/_probe.js), and the
     // mutants of the addon that prove each probe fails when broken.

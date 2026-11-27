@@ -313,13 +313,15 @@ test-asan: build
 	cd $(ASAN_DIR) && LD_PRELOAD="$$(gcc -print-file-name=libasan.so)" ASAN_OPTIONS=detect_leaks=0:abort_on_error=1 \
 	  $(NODE) $(JEST) --ci $(JEST_ARGS) --selectProjects unit memory
 
-# A short stress of the producer (test/stress/; JS conventions, Tests, Q68):
-# a million records sent in batches whose sends are awaited together, under
-# buffer pressure, and producers made, used and closed one after another, at
-# most a few minutes. Against KAFKA_BOOTSTRAP_SERVERS when set, otherwise
-# against a scratch broker started and removed as for test-integration;
-# `test` runs it after the broker-backed tests, so the two never hold a
-# broker at once. STRESS_RECORDS and STRESS_PRODUCERS scale it down.
+# A short stress of the producer and of the consumer (test/stress/; JS
+# conventions, Tests, Q68): a million records sent in batches whose sends are
+# awaited together, under buffer pressure, and producers made, used and closed
+# one after another; and a million records polled through StringDeserializers,
+# each read once; at most a few minutes. Against KAFKA_BOOTSTRAP_SERVERS when
+# set, otherwise against a scratch broker started and removed as for
+# test-integration; `test` runs it after the broker-backed tests, so the two
+# never hold a broker at once. STRESS_RECORDS and STRESS_PRODUCERS scale it
+# down.
 test-stress: build
 	@if [ -n "$$KAFKA_BOOTSTRAP_SERVERS" ]; then \
 	  $(JEST_RUN) stress --runInBand; \
