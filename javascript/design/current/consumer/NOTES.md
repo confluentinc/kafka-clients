@@ -9,8 +9,9 @@ rule rather than repeat it. "Line N" is line N of `javascript/CLAUDE.md` at `8a2
 
 - `native/consumer.c` holds one `Consumer` per `KafkaConsumer`: the owned class handle (`kafka_consumer_KafkaConsumer_t`,
   built from `ConsumerConfig_new` and `KafkaConsumer_new` with NULL deserializers), its borrowed
-  `KafkaConsumer__as_Consumer_err` view, through which every call is made, and the producer's callback queue
-  (`callback_queue.c`, `CallbackQueue`). The configuration's `kafka_Map_t` is built by `config_map_build`
+  `KafkaConsumer__as_Consumer_err` view, through which every call is made, the reentrancy handle
+  (`Consumer_handle_err`, destroyed after the class handle), through which the window's calls go (below), and the
+  producer's callback queue (`callback_queue.c`, `CallbackQueue`). The configuration's `kafka_Map_t` is built by `config_map_build`
   (`native/values.c`), which the producer's constructor calls too.
 - Every waiting call goes through its `_cb` twin (JS conventions, Futures and waiting): `poll_cb`,
   `subscribe_with_topics_cb`, `subscribe_with_pattern_cb`, `assign_cb`, `unsubscribe_cb`, `pause_cb`, `resume_cb`,
@@ -92,7 +93,7 @@ rule rather than repeat it. "Line N" is line N of `javascript/CLAUDE.md` at `8a2
   `OffsetAndMetadata` of `seek` (`OffsetAndMetadata_with_leader_epoch_metadata`, `-1` for no leader epoch, line 172),
   the partitions of the seeks and queries, the commit's map of `TopicPartition` to `OffsetAndMetadata` and
   `offsetsForTimes`' map of `TopicPartition` to `int64_t` (`native/values.c`: `offset_and_metadata_from_js`,
-  `offset_map_from_js`, `tp_long_map_from_js`, shared for the mock and `commitAsync(offsets, callback)` to come).
+  `offset_map_from_js`, `tp_long_map_from_js`, shared by the mock and `commitAsync(offsets, callback)`).
 - The answers' maps are read by shared readers: `offset_map_to_js` (`native/error.c`, the poll's next offsets and an
   error's payload too) reads `committed`'s, a NULL value, a partition with no committed offset, as `null`;
   `long_map_to_js` (`native/error.c`, an error's payload too) the offset lookups'; `partitions_to_js` and
@@ -243,7 +244,8 @@ Java's own `IllegalStateError('This consumer has already been closed.')`. A seco
   app's own record, as Java's mock returns the records it was given; the batch makes no external buffer and no header
   source, so it is destroyed once read. The next offsets are read as a `KafkaConsumer`'s are.
 - An error given to `setPollException` or `setOffsetsException` crosses as a `LocalCallbackError` whose opaque is an
-  `InjectedError` holding the value (`native/mock_values.c`), and `native/error.c` hands the very same object back
+  `InjectedError` holding the value (`native/mock_values.c`, the carrier a callback's thrown value crosses through
+  too, below), and `native/error.c` hands the very same object back
   where the core reports it: `poll()` rejects with it once, and `beginningOffsets()` or `endOffsets()` with the
   offsets error once, as Java's mock throws and clears them. Each mock call first lets go of the errors the core holds
   no copy of any more (`mock_of`, `injected_errors_sweep`); the destroy lets go of the rest.
@@ -320,5 +322,94 @@ does as Java's does (PLAN §6, asks 8 to 13).
   `resetShouldRebalance()`, by the user's decision of 2026-11-26. Why: under KIP-848 Java's consumer only logs
   `enforceRebalance` as unsupported, and the two helpers only track it. Goes when: the client supports the classic
   protocol.
-- Java's `subscribe(Pattern…)` forms, as on `KafkaConsumer`; the deprecated `MockConsumer(OffsetResetStrategy)` and
-  `close(Duration)`; and, until the client has rebalance listeners and commit callbacks, the forms taking one.
+- Java's `subscribe(Pattern…)` forms, as on `KafkaConsumer`; and the deprecated `MockConsumer(OffsetResetStrategy)` and
+  `close(Duration)`.
+
+## The listeners, the commit callbacks and the window
+
+- A rebalance listener crosses as a `Listener` (`native/consumer.c`), the `self_` of its
+  `ConsumerRebalanceListener_new_err` registration: it holds the three functions src/ built for its methods
+  (`listenerRuns`, `src/internal/consumer_calls.ts`), each calling the user's method with `{ partitions }`, a
+  `TopicPartitionSet` read from the borrowed, sorted list (`tp_list_to_js`, `native/values.c`, whose loop
+  `tp_list_take_to_js` shares), and the listener as `this`. A missing `onPartitionsRevoked` or
+  `onPartitionsAssigned` goes to the FFI as NULL, whose `LocalNullPointerError` ("on_partitions_revoked must not be
+  null", the C parameter's name) is a `TypeError` (line 57); `onPartitionsLost` is always a function, which runs
+  `ConsumerRebalanceListenerDefaults` with the user's object as `this` when it lacks one, looked up at each call (line
+  56). A null listener goes to the FFI as NULL, which refuses it with Java's "RebalanceListener cannot be null", before
+  its check of the topics; a listener that is no object is a `TypeError`. The registration is copied by the
+  subscribe and destroyed after it.
+- An `OffsetCommitCallback` crosses as a `CommitCallback`, the `self_` of its `OffsetCommitCallback_new_err`
+  registration, holding src/'s function (`commitRun`), which calls the user's function with `{ offsets, exception }`,
+  the offsets read from the borrowed map (`offset_map_to_js`) and the borrowed error built as an error.
+  `commitAsync({ callback: null })` and `commitAsync(null)` are Java's `commitAsync()`, through `commit_async_cb`
+  (P5.md, choice 2(a)); `commitAsync({ offsets, callback: null })` goes to the FFI, which refuses the NULL with
+  `TypeError("callback must not be null")` *(deviation: Java takes a null callback and logs a failed commit. Why: the
+  FFI refuses a NULL callback. Goes when: it takes one, PLAN §6 ask 14)*. On a `KafkaConsumer`, a callback's
+  `offsets` is `null` for a failed commit and for an empty map committed, where the FFI hands over an empty map
+  (choice 3(a)) *(temporary. Why: the FFI passes an empty map where Java's `whenComplete` passes null. Goes when: the
+  FFI passes NULL, ask 15)*; on a mock it is the map committed, as Java's mock passes it.
+- **The run and the report.** The core calls a listener's method or a commit callback inside the drain of the waiting
+  call that delivers it (`listener_invoke`, which the three method pointers hand their run to, and
+  `commit_on_complete`). Each runs its JS function once and reports once, through
+  `Consumer__set_callback_result_err` (`check-completion-order`): at once when src/'s function returned `undefined`,
+  Java's `void`; or, for any other result, which src/ wrapped with `Promise.resolve`, once that Promise settled, a
+  throw being src/'s `Promise.reject` (`Deferred`, `deferred_new`, `deferred_report`). The addon registers both
+  handlers at once, so no rejection is left unhandled, and holds them strongly until the report, so a garbage
+  collection never reports a Promise early. A throw or a rejection, whatever its value, crosses the core as a
+  `LocalCallbackError` carrying it, through the carrier of the mocks' injected errors (`injected_error_carry`,
+  `native/mock_values.c`, which holds the value in a one-element array, since Node-API 9 references objects only),
+  and `native/error.c` hands it back under `carried`, so it comes back as the same value wherever the core reports
+  it (line 122). Each run lets go of the carried values the core holds no copy of any more.
+- **The window** (line 149, PLAN §4.4 and decision 8). From a method's or callback's invocation until its report
+  (`Consumer.reports`), every call the `ConsumerHandle` has goes through the handle (`window_of`), made with the
+  consumer (`Consumer_handle_err`) and destroyed after it: the `_cb` forms of `commitSync`, `commitAsync`, `seek`,
+  `seekToBeginning`, `seekToEnd`, `pause`, `resume`, `position`, `committed`, `partitionsFor`, `listTopics`,
+  `offsetsForTimes`, `beginningOffsets`, `endOffsets` and `currentLag`, each counted with `cbq_call_begin` and
+  completed by the consumer's own completion function, and the sync forms of `assignment()`, `paused()`,
+  `groupMetadata()` and `wakeup()`. `metrics()` goes to the consumer, which answers, and every other call to the
+  consumer, which refuses `poll`, `subscribe`, `assign`, `unsubscribe`, `close` and `subscription()` with
+  `ConcurrentModificationError("KafkaConsumer is not safe for multi-threaded access.")` *(deviation, as in Python:
+  Java's listener may call them. Why: the handle has no form of them, KIP-1306. Goes when: it has)*. Any call made
+  while a report is pending goes to the handle, a timer's included, as JavaScript can't tell which code made it. The
+  core checks a handle call when the call runs, so a call a callback makes without awaiting it may run after the
+  report and get the handle's longer busy message (line 152).
+- **The mock's window** *(deviation, PLAN §6 ask 16)*: the mock's handle isn't gated, as Java's mock has no
+  `acquire()`, but of its async operations only the commits and `currentLag` work; the others fail with the core's
+  `UnsupportedOperationError("ConsumerHandle async operations are not supported on a MockConsumer handle; drive the
+  MockConsumer directly.")`. The calls the handle doesn't have meet the mock's single-owner flag, which
+  `rebalance()`, `losePartitions()` and `commitAsync()` hold while the callback runs, and are refused with
+  `ConcurrentModificationError`, where Java's synchronized mock takes all of them. Why: the FFI's mock handle does
+  not drive the mock. Goes when: it does.
+- **Lifetimes**, as the FFI's subscribe docs give them. The consumer holds the listener the core holds
+  (`Consumer.listener`); a subscribe holds its own until the core answers it (`SubscribeCtx`,
+  `subscribe_on_complete`): a success replaces the consumer's, a listener-less one included, while a failure, and a
+  `KafkaConsumer`'s empty topic list (`unsubscribe()`, which registers none), keep it; `assign` and `unsubscribe` keep
+  it. A `KafkaConsumer` lets go of it once a `close()` the core ran returns (`close_on_complete`); a mock keeps it
+  until the destroy, as its `rebalance()` and `losePartitions()` still call it after `close()`, as Java's mock does. A
+  commit callback is kept on the consumer's list until it reported, or until the destroy (`Consumer.commits`). Each
+  pending report holds the listener and the consumer's handle object, so the finalizer cannot run until it is made.
+  The destroy runs the callbacks still pending and waits for their reports: one it runs reports at once, running no
+  JS, and before it the addon reports, as fulfilled, those still waiting for a Promise, which no JS will settle
+  (`deferred_report_all`, an environment teardown's case); no report is made once the destroy has returned
+  (`Consumer.destroyed`), and a later one is dropped, the addon's memory for the consumer staying until then (a
+  `Deferred` holds a unit of the struct). A callback that never settles has no timeout, and `wakeup()` doesn't end
+  it: the waiting call that ran it waits too (line 150).
+- **The errors** (line 122), put back where Java's `AsyncKafkaConsumer` has them by one conversion
+  (`callbackError`, `src/internal/consumer_calls.ts`), which every consumer call's rejection goes through:
+  `fromNative` (`src/internal/errors.ts`) remembers each error the core built around a carried value with that
+  `LocalCallbackError`'s message (`carriedCause`). The core already has Java's layers, with a `LocalCallbackError` where
+  Java has the value, and its own wrapping where Java's `maybeWrapAsKafkaException` would leave a `KafkaException`
+  alone, since a `LocalCallbackError` sits beside `KafkaException` (`rust/src/common/local_callback_error.rs`). So a
+  layer around a carried value is dropped when the value is a `KafkaError`; a layer built from its cause alone, whose
+  message is the core's text of that cause (`LocalCallbackError: <message>`), is a `KafkaError` built from the value,
+  its message the value's `toString()` (line 121); `close()`'s own layer, "Failed to close kafka consumer", is kept,
+  and the rule applies to its cause. The outcome, pinned by `test/integration/consumer.test.js`:
+  - a listener's error from `poll()` and `unsubscribe()`: a `KafkaError` as itself, anything else as the `cause` of
+    `KafkaError("User rebalance callback throws an error")`;
+  - from `close()`: the `cause` of `KafkaError("Failed to close kafka consumer")`, a `KafkaError` as itself and
+    anything else inside a `KafkaError` built from it;
+  - a commit callback's from `commitSync()` and `commitAsync()`: as itself; from `poll()`: a `KafkaError` as itself,
+    anything else inside a `KafkaError` built from it; from `close()`: as itself, the `cause` of "Failed to close
+    kafka consumer";
+  - the mock's listener's and commit callback's from `rebalance()`, `losePartitions()` and `commitAsync()`: as itself,
+    as Java's mock calls them directly.

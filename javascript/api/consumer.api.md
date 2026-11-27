@@ -86,6 +86,15 @@ export interface Consumer<K = Buffer, V = Buffer> {
     }): Promise<void>;
     close(option: CloseOptions): Promise<void>;
     commitAsync(): Promise<void>;
+    commitAsync(options: {
+        callback: OffsetCommitCallback | null;
+        offsets?: never;
+    }): Promise<void>;
+    commitAsync(callback: OffsetCommitCallback | null): Promise<void>;
+    commitAsync(options: {
+        offsets: TopicPartitionMap<OffsetAndMetadata>;
+        callback: OffsetCommitCallback;
+    }): Promise<void>;
     commitSync(): Promise<void>;
     commitSync(options: {
         timeout: Duration;
@@ -194,6 +203,16 @@ export interface Consumer<K = Buffer, V = Buffer> {
         callback?: never;
     }): Promise<void>;
     subscribe(topics: Iterable<string>): Promise<void>;
+    subscribe(options: {
+        topics: Iterable<string>;
+        callback: ConsumerRebalanceListener;
+        pattern?: never;
+    }): Promise<void>;
+    subscribe(options: {
+        pattern: SubscriptionPattern;
+        callback: ConsumerRebalanceListener;
+        topics?: never;
+    }): Promise<void>;
     subscribe(options: {
         pattern: SubscriptionPattern;
         topics?: never;
@@ -613,6 +632,18 @@ export class KafkaConsumer<K = Buffer, V = Buffer> implements Consumer<K, V> {
     // (undocumented)
     commitAsync(): Promise<void>;
     // (undocumented)
+    commitAsync(options: {
+        callback: OffsetCommitCallback | null;
+        offsets?: never;
+    }): Promise<void>;
+    // (undocumented)
+    commitAsync(callback: OffsetCommitCallback | null): Promise<void>;
+    // (undocumented)
+    commitAsync(options: {
+        offsets: TopicPartitionMap<OffsetAndMetadata>;
+        callback: OffsetCommitCallback;
+    }): Promise<void>;
+    // (undocumented)
     commitSync(): Promise<void>;
     // (undocumented)
     commitSync(options: {
@@ -765,6 +796,18 @@ export class KafkaConsumer<K = Buffer, V = Buffer> implements Consumer<K, V> {
     subscribe(topics: Iterable<string>): Promise<void>;
     // (undocumented)
     subscribe(options: {
+        topics: Iterable<string>;
+        callback: ConsumerRebalanceListener;
+        pattern?: never;
+    }): Promise<void>;
+    // (undocumented)
+    subscribe(options: {
+        pattern: SubscriptionPattern;
+        callback: ConsumerRebalanceListener;
+        topics?: never;
+    }): Promise<void>;
+    // (undocumented)
+    subscribe(options: {
         pattern: SubscriptionPattern;
         topics?: never;
         callback?: never;
@@ -838,6 +881,18 @@ export class MockConsumer<K, V> implements Consumer<K, V> {
     closed(): boolean;
     // (undocumented)
     commitAsync(): Promise<void>;
+    // (undocumented)
+    commitAsync(options: {
+        callback: OffsetCommitCallback | null;
+        offsets?: never;
+    }): Promise<void>;
+    // (undocumented)
+    commitAsync(callback: OffsetCommitCallback | null): Promise<void>;
+    // (undocumented)
+    commitAsync(options: {
+        offsets: TopicPartitionMap<OffsetAndMetadata>;
+        callback: OffsetCommitCallback;
+    }): Promise<void>;
     // (undocumented)
     commitSync(): Promise<void>;
     // (undocumented)
@@ -1011,6 +1066,18 @@ export class MockConsumer<K, V> implements Consumer<K, V> {
     }): Promise<void>;
     // (undocumented)
     subscribe(topics: Iterable<string>): Promise<void>;
+    // (undocumented)
+    subscribe(options: {
+        topics: Iterable<string>;
+        callback: ConsumerRebalanceListener;
+        pattern?: never;
+    }): Promise<void>;
+    // (undocumented)
+    subscribe(options: {
+        pattern: SubscriptionPattern;
+        callback: ConsumerRebalanceListener;
+        topics?: never;
+    }): Promise<void>;
     // (undocumented)
     subscribe(options: {
         pattern: SubscriptionPattern;

@@ -30,6 +30,38 @@
  * `group.protocol: 'consumer'`: the classic
  * protocol is not supported.
  *
+ * A `ConsumerRebalanceListener` given to `subscribe()` and an
+ * `OffsetCommitCallback` given to `commitAsync()` run inside the waiting call
+ * that delivers them (`poll()`, `unsubscribe()`, `commitSync()`, `close()`,
+ * ...), which settles only after they return; each may return a Promise,
+ * which that call awaits. A callback that never settles has no timeout, and
+ * `wakeup()` doesn't end it: the call that ran it waits too. While one runs,
+ * from any code, a timer's included, the calls a listener needs go through
+ * the consumer's callback handle and work: `commitSync()`, `commitAsync()`,
+ * `seek()`, `seekToBeginning()`, `seekToEnd()`, `pause()`, `resume()`,
+ * `position()`, `committed()`, `partitionsFor()`, `listTopics()`,
+ * `offsetsForTimes()`, `beginningOffsets()`, `endOffsets()`, `currentLag()`,
+ * `assignment()`, `paused()`, `groupMetadata()` and `wakeup()`, and
+ * `metrics()` answers; `poll()`, `subscribe()`, `assign()`, `unsubscribe()`,
+ * `close()` and `subscription()` reject or throw with
+ * `ConcurrentModificationError`, where Java's listener may call them. A call a
+ * callback makes without awaiting it may run after the callback returned,
+ * and then gets the consumer's longer busy message.
+ *
+ * What a listener or commit callback throws, or rejects with, comes back as
+ * the very same value, where Java's consumer has it: a listener's from
+ * `poll()` and `unsubscribe()`, a `KafkaError` as itself and anything else as
+ * the `cause` of `KafkaError('User rebalance callback throws an error')`, and
+ * from `close()` inside `KafkaError('Failed to close kafka consumer')`; a
+ * commit callback's from `commitSync()` and `commitAsync()` as itself, from
+ * `poll()` a `KafkaError` as itself and anything else inside a `KafkaError`
+ * built from it, and from `close()` as the `cause` of
+ * `KafkaError('Failed to close kafka consumer')`. A commit callback's
+ * `offsets` is `null` for a failed commit and for an empty map committed, as
+ * Java's is. `commitAsync({ callback: null })` commits without a callback, as
+ * Java's `commitAsync()` does, while `commitAsync({ offsets, callback: null })`
+ * rejects with a `TypeError`, where Java's commits without one.
+ *
  * `MockConsumer` is the core's mock, reached as `KafkaConsumer` is: its
  * waiting methods return Promises, it takes one call at a time, it keeps Node
  * running until `close()`, so a test closes every mock, and it emits no
@@ -69,11 +101,19 @@
  * - `metrics()` answers an empty map after `close()` too, where Java's mock
  *   throws "This consumer has already been closed.";
  * - `addRecord(null)` is a `TypeError` even on a closed mock, where Java's
- *   mock reports the closed mock first.
+ *   mock reports the closed mock first;
+ * - inside a listener or commit callback the mock runs, `commitSync()`,
+ *   `commitAsync()`, `currentLag()`, `assignment()`, `paused()` and
+ *   `groupMetadata()` work, its other waiting `Consumer` methods reject with
+ *   `UnsupportedOperationError`, and `poll()`, `subscribe()`, `assign()`,
+ *   `unsubscribe()`, `subscription()` and the mock's own calls reject or throw
+ *   with `ConcurrentModificationError`, where Java's mock takes them all. A
+ *   listener's or commit callback's error comes back from `rebalance()`,
+ *   `losePartitions()` and `commitAsync()` as itself, and a commit callback
+ *   gets the map committed, as Java's mock passes it. The mock keeps its
+ *   listener after `close()`, as Java's does.
  *
- * Not in this release yet: `commitAsync`'s forms with an
- * `OffsetCommitCallback`, `subscribe`'s forms with a
- * `ConsumerRebalanceListener`, and `KafkaConsumer`'s constructor forms with
+ * Not in this release yet: `KafkaConsumer`'s constructor forms with
  * deserializers, which throw `UnsupportedOperationError`.
  *
  * Left out for want of an FFI entry point: `clientInstanceId`,
