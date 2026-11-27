@@ -104,10 +104,16 @@
  *   mock reports the closed mock first;
  * - inside a listener or commit callback the mock runs, `commitSync()`,
  *   `commitAsync()`, `currentLag()`, `assignment()`, `paused()` and
- *   `groupMetadata()` work, its other waiting `Consumer` methods reject with
- *   `UnsupportedOperationError`, and `poll()`, `subscribe()`, `assign()`,
- *   `unsubscribe()`, `subscription()` and the mock's own calls reject or throw
- *   with `ConcurrentModificationError`, where Java's mock takes them all. A
+ *   `groupMetadata()` work, its other waiting `Consumer` methods but `close()`
+ *   reject with `UnsupportedOperationError`, and `poll()`, `subscribe()`,
+ *   `assign()`, `unsubscribe()`, `close()`, `subscription()`, `addRecord()`,
+ *   `setMaxPollRecords()`, `updatePartitions()`, `rebalance()` and
+ *   `losePartitions()` reject or throw with `ConcurrentModificationError`,
+ *   while `updateBeginningOffsets()`, `updateEndOffsets()`,
+ *   `updateDurationOffsets()`, `setPollException()`, `setOffsetsException()`
+ *   and `scheduleNopPollTask()` are ignored, and `closed()`,
+ *   `lastPollTimeout()`, `metrics()` and `wakeup()` answer, where Java's mock
+ *   takes them all. A
  *   listener's or commit callback's error comes back from `rebalance()`,
  *   `losePartitions()` and `commitAsync()` as itself, and a commit callback
  *   gets the map committed, as Java's mock passes it. The mock keeps its

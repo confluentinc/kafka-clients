@@ -376,17 +376,34 @@ does as Java's does (PLAN §6, asks 8 to 13).
 - **The mock's window** *(deviation, PLAN §6 ask 16)*: the mock's handle isn't gated, as Java's mock has no
   `acquire()`, but of its async operations only the commits and `currentLag` work; the others fail with the core's
   `UnsupportedOperationError("ConsumerHandle async operations are not supported on a MockConsumer handle; drive the
-  MockConsumer directly.")`. The calls the handle doesn't have meet the mock's single-owner flag, which
-  `rebalance()`, `losePartitions()` and `commitAsync()` hold while the callback runs, and are refused with
-  `ConcurrentModificationError`, where Java's synchronized mock takes all of them. Why: the FFI's mock handle does
-  not drive the mock. Goes when: it does.
-- **Lifetimes**, as the FFI's subscribe docs give them. The consumer holds the listener the core holds
-  (`Consumer.listener`); a subscribe holds its own until the core answers it (`SubscribeCtx`,
-  `subscribe_on_complete`): a success replaces the consumer's, a listener-less one included, while a failure, and a
-  `KafkaConsumer`'s empty topic list (`unsubscribe()`, which registers none), keep it; `assign` and `unsubscribe` keep
-  it. A `KafkaConsumer` lets go of it once a `close()` the core ran returns (`close_on_complete`); a mock keeps it
-  until the destroy, as its `rebalance()` and `losePartitions()` still call it after `close()`, as Java's mock does. A
-  commit callback is kept on the consumer's list until it reported, or until the destroy (`Consumer.commits`). Each
+  MockConsumer directly.")`; its sync reads (`assignment()`, `paused()`, `groupMetadata()`) answer. The calls the
+  handle doesn't have meet the mock's single-owner flag, which `rebalance()`, `losePartitions()` and `commitAsync()`
+  hold while the callback runs, where Java's synchronized mock takes all of them: `poll()`, `subscribe()`,
+  `assign()`, `unsubscribe()`, `subscription()` and `close()` are refused with `ConcurrentModificationError`, and so
+  are the mock's own `addRecord()`, `setMaxPollRecords()`, `updatePartitions()`, `rebalance()` and
+  `losePartitions()`; the six setters with no error slot (`updateBeginningOffsets()`, `updateEndOffsets()`,
+  `updateDurationOffsets()`, `setPollException()`, `setOffsetsException()`, `scheduleNopPollTask()`) are logged by the
+  core and ignored, as while any other call is pending (ask 8); `closed()`, `lastPollTimeout()`, `metrics()` and
+  `wakeup()` answer. Why: the FFI's mock handle does not drive the mock. Goes when: it does.
+- **Lifetimes**, as the FFI's subscribe docs give them. The consumer holds the listeners the core may hold
+  (`Consumer.listener`, chained by `Listener.next`); a subscribe holds its own until the core answers it
+  (`SubscribeCtx`, `subscribe_on_complete`): a success replaces them all, a listener-less one included; a failure the
+  core answered keeps the consumer's and adds its own, which the core may hold too (the mock registers it before the
+  check that fails, as Java's `SubscriptionState#subscribe` does, and its `rebalance()` calls it), until a later
+  successful subscribe; a call refused before the core ran (busy, or a NULL the FFI refuses) and a `KafkaConsumer`'s
+  empty topic list (`unsubscribe()`, which registers none) keep the consumer's and let go of their own; `assign` and
+  `unsubscribe` keep them. A `KafkaConsumer` lets go of them once a `close()` the core ran returns
+  (`close_on_complete`); a mock keeps them until the destroy, as its `rebalance()` and `losePartitions()` still call
+  them after `close()`, as Java's mock does. A commit callback's context is held by the core's registration until it
+  reported, or until the destroy, as the FFI's doc of the callback requires, and by its commit's call until its
+  answer (`Consumer.commits`); its function goes once it reported, or once its commit failed, which the core never
+  runs it for (it registers the callback only once the commit is under way), so a refused commit holds no JS.
+- **How the JS functions are held** (`Held`): every listener's and commit callback's function is an element of the
+  handle object's `callbacks` object, read through a weak reference. A strong native reference is a GC root: a
+  callback that reaches its consumer, as one that commits does, would keep a closed consumer, or a mock whose
+  listener calls it, alive for good. Held through the handle object, the functions live while the consumer is open
+  (the queue holds the handle object strongly until the close) or while anything else reaches it, and the GC
+  collects them with it; the destroy, from the handle object's finalizer, runs no JS. Each
   pending report holds the listener and the consumer's handle object, so the finalizer cannot run until it is made.
   The destroy runs the callbacks still pending and waits for their reports: one it runs reports at once, running no
   JS, and before it the addon reports, as fulfilled, those still waiting for a Promise, which no JS will settle
@@ -413,3 +430,11 @@ does as Java's does (PLAN §6, asks 8 to 13).
     kafka consumer";
   - the mock's listener's and commit callback's from `rebalance()`, `losePartitions()` and `commitAsync()`: as itself,
     as Java's mock calls them directly.
+- **A timed-out close's cause** *(deviation)*: when `close()` times out on the last pending async commit, as a
+  `close({ timeout: 0 })` with a commit still pending does, its cause is `common/errors`' `TimeoutError` with the
+  core's text, "Timed out waiting for last pending async commit to complete", where Java's is the `toString()` of a
+  `TimeoutException` with no message, "java.util.concurrent.TimeoutException". Why: the core's message. Goes when:
+  the core gives Java's.
+- **A thrown `null`**: a callback that throws `null`, or rejects with it, fails its call with `null`, as with any
+  other value. `fromNative` gives a carried `null` as a private symbol (`CARRIED_NULL`, `src/internal/errors.ts`),
+  since the completions read `null` as no error, and `callbackError` puts the `null` back where the call rejects.
