@@ -1285,6 +1285,7 @@ test("inside a mock's listener, its own calls: the setters with no error slot ar
         // The others meet the single-owner flag.
         await attempt('addRecord', () => consumer.addRecord(record(0, 0)));
         await attempt('setMaxPollRecords', () => consumer.setMaxPollRecords(1));
+        await attempt('updatePartitions', () => consumer.updatePartitions({ topic: 'test', partitions: [] }));
         await attempt('rebalance', () => consumer.rebalance([TP0]));
         await attempt('losePartitions', () => consumer.losePartitions([TP0]));
         await attempt('close', () => consumer.close());
@@ -1307,6 +1308,7 @@ test("inside a mock's listener, its own calls: the setters with no error slot ar
     scheduleNopPollTask: 'ok',
     addRecord: concurrent,
     setMaxPollRecords: concurrent,
+    updatePartitions: concurrent,
     rebalance: concurrent,
     losePartitions: concurrent,
     close: concurrent,
