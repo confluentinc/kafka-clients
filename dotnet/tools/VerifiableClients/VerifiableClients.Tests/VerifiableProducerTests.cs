@@ -146,7 +146,7 @@ public sealed class VerifiableProducerTests : IDisposable
     public void SendFailureRaisedBySendIsAFailedSend()
     {
         RecordingProducer mock = MockProducer();
-        mock.Mock.SetSendException(new KafkaException("send failed"));
+        mock.Mock.SendException(new KafkaException("send failed"));
         VerifiableProducer producer = Verifiable(mock);
         producer.Send(null, "0");
         Assert.Equal((1L, 0L), (producer.NumSent, producer.NumAcked));

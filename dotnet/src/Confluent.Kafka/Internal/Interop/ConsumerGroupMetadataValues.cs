@@ -14,6 +14,7 @@
 
 using System;
 using System.Runtime.InteropServices;
+using System.Threading;
 using Confluent.Kafka.Common;
 using Confluent.Kafka.Consumer;
 
@@ -40,9 +41,16 @@ internal sealed class ConsumerGroupMetadataValues : SafeHandleZeroIsInvalid
     private const string NullGroupIdMessage = "group.id can't be null";
     private const string NullMemberIdMessage = "member.id can't be null";
 
+    // The blocks not yet freed: a test reads it to check that a block outlives a wait its caller gave up, until the
+    // operation completes, and is freed once.
+    private static int s_live;
+
     private ConsumerGroupMetadataValues()
     {
     }
+
+    /// <summary>The number of value blocks allocated and not yet freed.</summary>
+    internal static int Live => Volatile.Read(ref s_live);
 
     /// <summary>
     /// Reads the four values of <paramref name="metadata"/> on the calling thread and copies them to native memory, a
@@ -80,6 +88,7 @@ internal sealed class ConsumerGroupMetadataValues : SafeHandleZeroIsInvalid
         Marshal.WriteIntPtr(block, s_groupInstanceIdOffset, IntPtr.Zero);
         Marshal.WriteInt32(block, s_generationIdOffset, generationId);
         values.SetHandle(block);
+        Interlocked.Increment(ref s_live);
         try
         {
             Marshal.WriteIntPtr(block, 0, Copy(groupId));
@@ -114,6 +123,7 @@ internal sealed class ConsumerGroupMetadataValues : SafeHandleZeroIsInvalid
         Free(Marshal.ReadIntPtr(handle, s_memberIdOffset));
         Free(Marshal.ReadIntPtr(handle, s_groupInstanceIdOffset));
         Marshal.FreeHGlobal(handle);
+        Interlocked.Decrement(ref s_live);
         return true;
     }
 

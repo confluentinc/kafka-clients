@@ -359,15 +359,16 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     public int HistoryCount();                  // .NET-only: history() needs typed records, the ABI's hold bytes
     public void Clear();
     // Java's transaction controls (§4 Producer transactions); MockProducer has the same members
-    public void SetInitTransactionException(Exception? exception);          // Java's field is a RuntimeException; null clears
-    public void SetBeginTransactionException(Exception? exception);
-    public void SetSendOffsetsToTransactionException(Exception? exception);
-    public void SetCommitTransactionException(Exception? exception);
-    public void SetAbortTransactionException(Exception? exception);
-    public void SetSendException(Exception? exception);                      // Java's public fields sendException, …: a setter each (allowlisted)
-    public void SetFlushException(Exception? exception);                     // also fails CommitTransaction / AbortTransaction
-    public void SetPartitionsForException(Exception? exception);
-    public void SetCloseException(Exception? exception);                     // Close throws it and leaves the producer open
+    // Java's public fields initTransactionException, …: a setter each, named after the field (§3 Java names, rule 5)
+    public void InitTransactionException(Exception? initTransactionException);   // Java's field is a RuntimeException; null clears
+    public void BeginTransactionException(Exception? beginTransactionException);
+    public void SendOffsetsToTransactionException(Exception? sendOffsetsToTransactionException);
+    public void CommitTransactionException(Exception? commitTransactionException);
+    public void AbortTransactionException(Exception? abortTransactionException);
+    public void SendException(Exception? sendException);
+    public void FlushException(Exception? flushException);                 // also fails CommitTransaction / AbortTransaction
+    public void PartitionsForException(Exception? partitionsForException);
+    public void CloseException(Exception? closeException);                 // Close throws it and leaves the producer open
     public void FenceProducer();
     public bool Closed();                   // Java closed(), read from the binding's state
     public bool TransactionInitialized();   // Java transactionInitialized(), and likewise below
@@ -1041,8 +1042,8 @@ each goes when the reason it gives goes:
   such a value.
 - **After close.** The producer's `Flush`, `PartitionsFor` and `Metrics`, the consumer's
   `Metrics`, and `MockProducer`'s and `AsyncMockProducer`'s `PartitionsFor`, `Metrics`,
-  `CompleteNext`, `ErrorNext`, `Clear`, `HistoryCount`, `SetSendException`, `SetFlushException`,
-  `SetPartitionsForException`, the five `Set*TransactionException` setters
+  `CompleteNext`, `ErrorNext`, `Clear`, `HistoryCount`, `SendException`, `FlushException`,
+  `PartitionsForException`, the five `*TransactionException` setters
   and the transaction state readers (`TransactionInitialized` to `UncommittedOffsets`), and
   `MockConsumer`'s and `AsyncMockConsumer`'s `Rebalance`, `LosePartitions`, `SetMaxPollRecords`,
   `SetPollException`, `SetOffsetsException`, `UpdateBeginningOffsets`, `UpdateEndOffsets`,
@@ -1118,7 +1119,11 @@ out of date). The rule:
 3. A getter and a setter of one name are overloads.
 4. A Java static method keeps its name and stays a static method, a static factory (a static method that
    builds an object of its type) included: never a constructor, `Parse` or a property.
-5. Fields and constants keep Java's spelling (ledger 285).
+5. Fields and constants keep Java's spelling (ledger 285). A public field Java does not declare `final`, which a
+   Java caller assigns (`MockProducer.sendException`), is a setter method named after the field, as Java names a
+   setter after its field (`timeoutMs(Integer)`): one parameter, of the field's name
+   (`SendException(Exception? sendException)`), and no `Set<Field>` method. `java-api.txt` marks each `final`
+   field, so CKRDA0013 tells the two apart.
 6. Parameters keep Java's names, the interface's declaration first. In an exception's constructor a
    `Throwable`, of any class (`InterruptException`'s `InterruptedException`), is `innerException`, and a
    `String` Java names `s` or `msg` is `message`. A Java `long` and the `TimeUnit` that qualifies it are one
@@ -1507,7 +1512,7 @@ decision 10). The parts, each decided against the Java source:
   producer's callback queue, which the completion thread runs. Goes when: the core runs the callback
   of a record it refuses inside the send call)*. A serializer's `ApiException` on `KafkaProducer` /
   `AsyncKafkaProducer` fires it once, where **Thread** (above) says. On the mocks a send exception
-  set with `SetSendException`, an `ApiException` included, fires nothing: it is thrown from `Send`,
+  set with `SendException`, an `ApiException` included, fires nothing: it is thrown from `Send`,
   or ends the async `Send`'s first stage, before any callback is registered, as Java's
   `MockProducer.send` throws it. Any other refusal before the append fires nothing: the sync `Send`
   throws, and the async `Send`'s first stage faults. When the send reports an error, the callback
@@ -1687,8 +1692,9 @@ The mocks carry Java's `MockProducer` transaction controls (§3 sketch), over th
   methods, as every Java getter is (ledger 365); the last two copy a native container out, so
   every call returns a fresh copy.
 - Java's public fields `sendException`, `flushException`, `partitionsForException` and
-  `closeException` are setters `Set<Field>(Exception?)`, as Python's `set_<field>`; CKRDA0013
-  allowlists them, with the five transaction setters.
+  `closeException`, like the five transaction ones, are setters named after the field
+  (`SendException(Exception? sendException)`), with no `Set` prefix (§3 Java names, rule 5)
+  *(Python's are `set_<field>`)*; CKRDA0013 checks them.
 - `UncommittedRecords()` and `History()` are left out: the ABI's records hold the serialized
   bytes, and the binding cannot turn them back into typed `TKey` / `TValue` records (§3, clipped to
   today's ABI). `HistoryCount()` stands in, so the ports of Java's history tests check

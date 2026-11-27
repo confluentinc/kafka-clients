@@ -59,7 +59,7 @@ const HEADER: &str = "\
 #   type      <class>  <class|abstract class|interface|enum|record>  <supertypes, comma-separated, or ->
 #   ctor      <class>  <Name(Type name, ...)>
 #   method    <class>  <static|instance|default>  <name(Type name, ...)>   (default: an interface's default method)
-#   field     <class>  <static|instance>  <NAME>
+#   field     <class>  <static|instance|static final|instance final>  <NAME>
 #   constant  <class>  <NAME>   (an enum constant)
 ";
 
@@ -256,7 +256,13 @@ pub(crate) fn render(
                 } else {
                     "instance"
                 };
-                lines.push(format!("field\t{marker}\t{scope}\t{name}"));
+                // A field Java does not declare `final` can be assigned from outside its class.
+                let finality = if class.final_fields.contains(name) {
+                    " final"
+                } else {
+                    ""
+                };
+                lines.push(format!("field\t{marker}\t{scope}{finality}\t{name}"));
             }
         }
         lines.sort();
@@ -363,7 +369,7 @@ mod tests {
             [
                 "type\torg.apache.kafka.common.Node\tclass\t-",
                 "ctor\torg.apache.kafka.common.Node\tNode(int id, String host, int port)",
-                "field\torg.apache.kafka.common.Node\tstatic\tNO_ID",
+                "field\torg.apache.kafka.common.Node\tstatic final\tNO_ID",
                 "method\torg.apache.kafka.common.Node\tinstance\tid()",
                 "method\torg.apache.kafka.common.Node\tstatic\tnoNode()",
             ]
@@ -480,7 +486,7 @@ mod tests {
     }
 
     #[test]
-    fn marks_a_fields_scope() {
+    fn marks_a_fields_scope_and_finality() {
         let protocol = r#"
             package x;
             public enum SecurityProtocol {
@@ -492,13 +498,38 @@ mod tests {
             }
         "#;
         let configs = "package x; public interface Configs { String KEY = \"key\"; }";
+        let mock = r#"
+            package x;
+            public class MockProducer {
+                public RuntimeException sendException = null;
+                public static int sent;
+                public final void flush() { }
+                public boolean closed;
+            }
+        "#;
+        // A final class, or a final method with no body, makes none of the fields after it final.
+        let holder = r#"
+            package x;
+            public final class Holder {
+                public int first;
+                public final native int count();
+                public int afterNative;
+                public static final class Inner {
+                    public int innerFirst;
+                }
+            }
+        "#;
         let index = index(&[
             (&["common", "security", "auth"], protocol, false),
             (&["common"], configs, false),
+            (&["clients", "producer"], mock, false),
+            (&["clients", "producer"], holder, false),
         ]);
         let lines = body(
             &index,
             &public(&[
+                "org.apache.kafka.clients.producer.Holder",
+                "org.apache.kafka.clients.producer.MockProducer",
                 "org.apache.kafka.common.Configs",
                 "org.apache.kafka.common.security.auth.SecurityProtocol",
             ]),
@@ -506,10 +537,16 @@ mod tests {
         assert_eq!(
             lines.iter().filter(|l| l.starts_with("field")).collect::<Vec<_>>(),
             [
-                "field\torg.apache.kafka.common.Configs\tstatic\tKEY",
-                "field\torg.apache.kafka.common.security.auth.SecurityProtocol\tinstance\tid",
-                "field\torg.apache.kafka.common.security.auth.SecurityProtocol\tinstance\tname",
-                "field\torg.apache.kafka.common.security.auth.SecurityProtocol\tstatic\tVALUES",
+                "field\torg.apache.kafka.clients.producer.Holder\tinstance\tafterNative",
+                "field\torg.apache.kafka.clients.producer.Holder\tinstance\tfirst",
+                "field\torg.apache.kafka.clients.producer.Holder$Inner\tinstance\tinnerFirst",
+                "field\torg.apache.kafka.clients.producer.MockProducer\tinstance\tclosed",
+                "field\torg.apache.kafka.clients.producer.MockProducer\tinstance\tsendException",
+                "field\torg.apache.kafka.clients.producer.MockProducer\tstatic\tsent",
+                "field\torg.apache.kafka.common.Configs\tstatic final\tKEY",
+                "field\torg.apache.kafka.common.security.auth.SecurityProtocol\tinstance final\tid",
+                "field\torg.apache.kafka.common.security.auth.SecurityProtocol\tinstance final\tname",
+                "field\torg.apache.kafka.common.security.auth.SecurityProtocol\tstatic final\tVALUES",
             ]
         );
     }
