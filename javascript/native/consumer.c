@@ -1096,6 +1096,17 @@ static void strings_free(char** strings, uint32_t count) {
     free(strings);
 }
 
+// Whether `error` (NULL for none) refused a call before the core ran it:
+// another call holds the consumer, or the FFI refused a NULL it requires. Such
+// a call changed nothing, so it closed nothing and registered no listener.
+static int refused_before_core(napi_env env, Consumer* c, const kafka_common_Error_t* error) {
+    if (error == NULL) return 0;
+    kafka_common_Error_t* ffi_err = NULL;
+    int code = 0;
+    error_warn(env, !c->queue.finalizing, FFI_SET(code, (int)kafka_common_Error__enum_err(error, &ffi_err)));
+    return code == kafka_common_Error_LOCAL_CONCURRENT_MODIFICATION || code == kafka_common_Error_LOCAL_NULL_POINTER;
+}
+
 // The subscribe completion: a success the core registered replaces the
 // consumer's listener with the subscribe's (none for a subscribe without
 // one); a KafkaConsumer's empty topic list (unsubscribe()) and a call refused
@@ -1107,13 +1118,7 @@ static void subscribe_on_complete(kafka_common_Error_t* error, void* opaque) {
     SubscribeCtx* ctx = (SubscribeCtx*)opaque;
     Consumer* c = ctx->c;
     napi_env env = c->env;
-    int refused = 0;
-    if (error != NULL) {
-        kafka_common_Error_t* ffi_err = NULL;
-        int code = 0;
-        error_warn(env, !c->queue.finalizing, FFI_SET(code, (int)kafka_common_Error__enum_err(error, &ffi_err)));
-        refused = code == kafka_common_Error_LOCAL_CONCURRENT_MODIFICATION || code == kafka_common_Error_LOCAL_NULL_POINTER;
-    }
+    int refused = refused_before_core(env, c, error);
     if (error == NULL && ctx->registers) {
         listener_release(env, c->listener);
         c->listener = ctx->listener;
@@ -2342,13 +2347,7 @@ static void close_on_complete(kafka_common_Error_t* error, void* opaque) {
     CloseCtx* ctx = (CloseCtx*)opaque;
     Consumer* c = ctx->c;
     napi_env env = c->env;
-    kafka_common_Error_t* ffi_err = NULL;
-    int refused = 0;
-    if (error != NULL) {
-        int code = 0;
-        error_warn(env, !c->queue.finalizing, FFI_SET(code, (int)kafka_common_Error__enum_err(error, &ffi_err)));
-        refused = code == kafka_common_Error_LOCAL_CONCURRENT_MODIFICATION || code == kafka_common_Error_LOCAL_NULL_POINTER;
-    }
+    int refused = refused_before_core(env, c, error);
     int closed_now = refused || c->queue.finalizing ? 0 : cbq_closed(env, &c->queue);
     // A KafkaConsumer lets go of its listener once its close returns; a mock
     // keeps it until the destroy, as its rebalance() still calls it.
