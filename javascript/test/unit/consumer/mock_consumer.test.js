@@ -1171,7 +1171,7 @@ test("a listener's forms on the mock, and its Promise, which rebalance() and los
 });
 
 test("a listener's error comes back from rebalance() and losePartitions() as itself, as Java's mock calls the listener directly", async () => {
-  for (const value of [new KafkaError('the listener failed'), new TypeError('boom'), 'a string']) {
+  for (const value of [new KafkaError('the listener failed'), new TypeError('boom'), 'a string', null, undefined]) {
     const consumer = newMock();
     await consumer.subscribe({
       topics: ['test'],
@@ -1253,6 +1253,80 @@ test("inside a mock's listener, the handle's commits, currentLag and sync reads 
   });
 });
 
+test("inside a mock's listener, its own calls: the setters with no error slot are ignored, the others refused, and the reads answer", async () => {
+  const consumer = newMock();
+  /** @type {Record<string, unknown>} */
+  const out = {};
+  await consumer.subscribe({
+    topics: ['test'],
+    callback: {
+      onPartitionsRevoked() {},
+      async onPartitionsAssigned({ partitions }) {
+        if (partitions.size() === 0) return;
+        /**
+         * @param {string} name
+         * @param {() => unknown} call
+         */
+        const attempt = async (name, call) => {
+          try {
+            const value = await call();
+            out[name] = value === undefined ? 'ok' : value;
+          } catch (error) {
+            out[name] = error instanceof Error ? `${error.constructor.name}: ${error.message}` : error;
+          }
+        };
+        // The setters with no error slot: the core logs and ignores them.
+        await attempt('updateBeginningOffsets', () => consumer.updateBeginningOffsets(offsets([[TP0, 0n]])));
+        await attempt('updateEndOffsets', () => consumer.updateEndOffsets(offsets([[TP0, 5n]])));
+        await attempt('updateDurationOffsets', () => consumer.updateDurationOffsets(offsets([[TP0, 0n]])));
+        await attempt('setPollException', () => consumer.setPollException(new KafkaError('poll')));
+        await attempt('setOffsetsException', () => consumer.setOffsetsException(new KafkaError('offsets')));
+        await attempt('scheduleNopPollTask', () => consumer.scheduleNopPollTask());
+        // The others meet the single-owner flag.
+        await attempt('addRecord', () => consumer.addRecord(record(0, 0)));
+        await attempt('setMaxPollRecords', () => consumer.setMaxPollRecords(1));
+        await attempt('rebalance', () => consumer.rebalance([TP0]));
+        await attempt('losePartitions', () => consumer.losePartitions([TP0]));
+        await attempt('close', () => consumer.close());
+        // The reads through the handle answer.
+        await attempt('closed', () => consumer.closed());
+        await attempt('lastPollTimeout', () => consumer.lastPollTimeout());
+        await attempt('metrics', () => typeof consumer.metrics().size());
+        await attempt('wakeup', () => consumer.wakeup());
+      },
+    },
+  });
+  await consumer.rebalance([TP0]);
+  const concurrent = `ConcurrentModificationError: ${CONCURRENT}`;
+  assert.deepEqual(out, {
+    updateBeginningOffsets: 'ok',
+    updateEndOffsets: 'ok',
+    updateDurationOffsets: 'ok',
+    setPollException: 'ok',
+    setOffsetsException: 'ok',
+    scheduleNopPollTask: 'ok',
+    addRecord: concurrent,
+    setMaxPollRecords: concurrent,
+    rebalance: concurrent,
+    losePartitions: concurrent,
+    close: concurrent,
+    closed: false,
+    lastPollTimeout: null,
+    metrics: 'number',
+    wakeup: 'ok',
+  });
+  // The ignored setters left nothing behind.
+  await assert.rejects(consumer.endOffsets([TP0]), { message: 'The partition test-0 does not have an end offset.' });
+  await assert.rejects(consumer.beginningOffsets([TP0]), { message: 'The partition test-0 does not have a beginning offset.' });
+  // The wakeup() made inside the listener wakes the next poll.
+  await assert.rejects(consumer.poll(0), { name: 'WakeupError', message: 'Mock consumer was woken up' });
+  await assert.rejects(consumer.poll(0), {
+    constructor: IllegalStateError,
+    message: "MockConsumer didn't have beginning offset specified, but tried to seek to beginning",
+  });
+  assert.equal(consumer.closed(), false);
+});
+
 test("a mock keeps its listener after close(): rebalance() still calls it, as Java's mock does", async () => {
   const consumer = newMock();
   /** @type {string[]} */
@@ -1298,7 +1372,7 @@ test("a mock's commit callback gets the map committed, an empty one included, an
     constructor: TypeError,
     message: 'callback must not be null',
   });
-  for (const value of [new KafkaError('the callback failed'), new TypeError('boom')]) {
+  for (const value of [new KafkaError('the callback failed'), new TypeError('boom'), null, undefined]) {
     await assert.rejects(
       consumer.commitAsync({
         offsets: new TopicPartitionMap([[TP0, new OffsetAndMetadata(4)]]),
