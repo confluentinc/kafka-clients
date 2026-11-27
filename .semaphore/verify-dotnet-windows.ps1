@@ -132,9 +132,16 @@ if ($Platform -eq 'x86') {
     foreach ($build in $builds) {
         Write-Output "== Native AOT check, the library's $($build.Name) build, $Platform"
         $aotOut = Join-Path $ToolsDir "aot-smoke-$Platform-$($build.Name)"
-        Remove-Item -Recurse -Force $aotOut -ErrorAction SilentlyContinue
-        Invoke-Native $dotnet (@('publish', (Join-Path $repo 'dotnet\tools\AotSmoke\AotSmoke.csproj'), '-c', 'Release', '-f', 'net10.0',
-            '--use-current-runtime', "-p:CargoTargetTriple=$triple", '-p:CargoProfileDir=debug', '-o', $aotOut) + $build.Properties)
+        $publishArgs = @('publish', (Join-Path $repo 'dotnet\tools\AotSmoke\AotSmoke.csproj'), '-c', 'Release', '-f', 'net10.0',
+            '--use-current-runtime', "-p:CargoTargetTriple=$triple", '-p:CargoProfileDir=debug', '-o', $aotOut) + $build.Properties
+        # The publish replaces the AotSmoke.exe it has just written to the output folder with the
+        # native one, and a scanner reading the first can hold it (MSB3061, MSB3021), so the publish
+        # is retried, each attempt first removing what an earlier one left there, where it can. A
+        # real build error also runs three times before the job fails.
+        Invoke-Retry {
+            Remove-Item -Recurse -Force $aotOut -ErrorAction SilentlyContinue
+            Invoke-Native $dotnet $publishArgs
+        }
         Invoke-Native (Join-Path $aotOut 'AotSmoke.exe') @()
     }
     Write-Output "The Native AOT check passed on the library's net10.0 and netstandard2.0 builds ($Platform)"
