@@ -111,8 +111,9 @@ $cdylibFeatures = $Matches[1]
 # The cargo profile directory of the library.
 $profileDir = if ($RustProfile -eq 'release') { 'release-cdylib' } else { 'debug' }
 # Windows can still hold a file rustup has just extracted (os error 32, as when a scanner reads
-# it), and rustup then rolls the install back; the install is retried.
-Invoke-Retry { Invoke-Native rustup @('toolchain', 'install', $channel, '--profile', 'minimal', '--component', 'clippy', '--component', 'rustfmt', '--target', $triple) }
+# it), and rustup then rolls the install back. Each attempt extracts the files again, which the
+# scanner can read again, so the install gets six attempts.
+Invoke-Retry -Attempts 6 { Invoke-Native rustup @('toolchain', 'install', $channel, '--profile', 'minimal', '--component', 'clippy', '--component', 'rustfmt', '--target', $triple) }
 
 Write-Output "== Native library ($triple)"
 # A RUSTFLAGS variable would replace the static C runtime flags of rust/.cargo/config.toml.
