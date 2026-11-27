@@ -22,11 +22,9 @@
 //!     Python error class, in the folder of its Java package, plus
 //!     `src/internal/error_registry.ts` and `native/error_payload.c`;
 //!   - the config classes' constants ([`crate::config_consts::js`]);
-//!   - the producer's configuration keys ([`crate::config_types::js`]): the
+//!   - the clients' configuration types ([`crate::config_types::js`]): the
 //!     `ProducerConfigs` type, `src/producer/producer_configs.ts`, and the
-//!     key list `src/internal/producer_config_keys.ts`, and the consumer's:
-//!     the `ConsumerConfigs` type, `src/consumer/consumer_configs.ts`, and the
-//!     key list `src/internal/consumer_config_keys.ts`.
+//!     consumer's `ConsumerConfigs` type, `src/consumer/consumer_configs.ts`.
 //!
 //! Every generated file carries [`GENERATED_MARKER`]. A folder holding only
 //! generated modules gets a generated `index.ts`; a folder that also holds

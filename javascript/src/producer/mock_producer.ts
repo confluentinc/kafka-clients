@@ -236,10 +236,10 @@ export class MockProducer<K, V> implements Producer<K, V> {
    * @param options - the autoComplete setting, the partitioner and the
    *   serializers
    * @throws `IllegalArgumentError` when the given parameters are not `()` or
-   *   `{autoComplete, partitioner, keySerializer, valueSerializer}`, or a
-   *   serializer is a function that makes one ("did you forget '()'?")
+   *   `{autoComplete, partitioner, keySerializer, valueSerializer}`
    * @throws `TypeError` when `autoComplete` is not a boolean, or a serializer
-   *   is neither null nor an object with a `serialize` method
+   *   is a function ("did you forget `new`?") or neither null nor an object
+   *   with a `serialize` method
    *
    * @remarks The cluster is always empty, so the partitioner is never called.
    * A serializer runs on every send, with fresh empty headers.

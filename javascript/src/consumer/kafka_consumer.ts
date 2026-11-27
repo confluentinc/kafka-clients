@@ -89,7 +89,10 @@ let awaited: Prepared | null = null;
  * @remarks Every waiting method returns a Promise, and the consumer takes one
  * call at a time, as Java's does: a call made while another is pending
  * rejects with `ConcurrentModificationError` ("KafkaConsumer is not safe for
- * multi-threaded access."), `wakeup()` and `metrics()` excepted. A consumer
+ * multi-threaded access."), `wakeup()` and `metrics()` excepted, and so is a
+ * call made while `poll()` awaits a deserializer's Promise or seeks back,
+ * which goes through *(deviation: Java's `poll()` holds the consumer until it
+ * returns. Why: the deserializers run after the core's poll)*. A consumer
  * keeps Node running from its creation until `close()` closes it, and no
  * garbage collection closes one: close every consumer (`close()`, or `await
  * using`). *(deviation: Java's client threads are daemon threads, so a
