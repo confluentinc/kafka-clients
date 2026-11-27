@@ -59,7 +59,8 @@ public sealed class PublicProducerControlOperationsTests
             await Task.Delay(Settle);
             Assert.False(send.IsCompleted, "the send did not wait for metadata");
 
-            TestTimeout.Run(producer.Flush, Deadline);
+            // A thread of its own, not a pool thread, which a busy runner can start after the send's metadata wait ended.
+            Assert.Same(BlockingCall.Returned, BlockingCall.RunWait(producer.Flush));
             Assert.False(send.IsCompleted, "Flush waited for the send in progress");
 
             KafkaFuture<RecordMetadata> future = await TestTimeout.Run(() => send, Deadline);
