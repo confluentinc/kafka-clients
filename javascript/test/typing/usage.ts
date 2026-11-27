@@ -1358,3 +1358,211 @@ async function mockConsumerUsage(): Promise<void> {
   await mock.close();
 }
 void mockConsumerUsage;
+
+// Every overload signature of the consumer's public API compiles at least
+// once: the forms the sections above do not write.
+const formsTp = new TopicPartition({ topic: 't', partition: 0 });
+// ConsumerRecord: Java's three constructors, each with the null-key, the
+// null-value and the null-both signatures that bind never.
+expectTypeOf(new ConsumerRecord({ topic: 't', partition: 0, offset: 0, key: null, value: null })).toEqualTypeOf<
+  ConsumerRecord<never, never>
+>();
+const nineFields = {
+  topic: 't',
+  partition: 0,
+  offset: 0n,
+  timestamp: 0n,
+  timestampType: TimestampType.CREATE_TIME,
+  serializedKeySize: -1,
+  serializedValueSize: -1,
+  headers: new Headers(),
+  leaderEpoch: 3,
+} as const;
+expectTypeOf(new ConsumerRecord({ ...nineFields, key: 'k', value: 1 })).toEqualTypeOf<ConsumerRecord<string, number>>();
+expectTypeOf(new ConsumerRecord({ ...nineFields, key: null, value: 1 })).toEqualTypeOf<ConsumerRecord<never, number>>();
+expectTypeOf(new ConsumerRecord({ ...nineFields, key: 'k', value: null })).toEqualTypeOf<ConsumerRecord<string, never>>();
+expectTypeOf(new ConsumerRecord({ ...nineFields, key: null, value: null })).toEqualTypeOf<ConsumerRecord<never, never>>();
+expectTypeOf(new ConsumerRecord({ ...nineFields, key: null, value: 1, deliveryCount: null })).toEqualTypeOf<
+  ConsumerRecord<never, number>
+>();
+expectTypeOf(new ConsumerRecord({ ...nineFields, key: 'k', value: null, deliveryCount: 2 })).toEqualTypeOf<ConsumerRecord<string, never>>();
+expectTypeOf(new ConsumerRecord({ ...nineFields, key: null, value: null, deliveryCount: 2 })).toEqualTypeOf<ConsumerRecord<never, never>>();
+// @ts-expect-error the nine-field form takes the leader epoch: Java has no form without it
+new ConsumerRecord({ ...nineFields, leaderEpoch: undefined, key: 'k', value: 1 });
+expectTypeOf(ConsumerRecord.NO_TIMESTAMP).toEqualTypeOf<bigint>();
+expectTypeOf(ConsumerRecord.NULL_SIZE).toEqualTypeOf<number>();
+expectTypeOf(shortRecord.toString()).toEqualTypeOf<string>();
+expectTypeOf(shortRecord.toJSON().offset).toEqualTypeOf<string>();
+// ConsumerRecords: records() by partition and by topic, bare and by name.
+expectTypeOf(records.records(formsTp)).toEqualTypeOf<Array<ConsumerRecord<string, number>>>();
+expectTypeOf(records.records({ topic: 't' })).toEqualTypeOf<Array<ConsumerRecord<string, number>>>();
+expectTypeOf(records.count()).toEqualTypeOf<number>();
+expectTypeOf(records.isEmpty()).toEqualTypeOf<boolean>();
+expectTypeOf(ConsumerRecords.EMPTY).toEqualTypeOf<ConsumerRecords<never, never>>();
+// @ts-expect-error records() takes one form at a time
+records.records({ topic: 't', partition: formsTp });
+// @ts-expect-error count() only reads
+records.count(1);
+// OffsetAndMetadata and OffsetAndTimestamp: every constructor and equals form.
+const withEpoch = new OffsetAndMetadata({ offset: 5n, leaderEpoch: 1, metadata: 'm' });
+const withMetadata = new OffsetAndMetadata({ offset: 5, metadata: null });
+expectTypeOf(withEpoch.leaderEpoch).toEqualTypeOf<number | null>();
+expectTypeOf(withMetadata.equals({ o: withEpoch })).toEqualTypeOf<boolean>();
+expectTypeOf(withMetadata.equals(withEpoch)).toEqualTypeOf<boolean>();
+expectTypeOf(withMetadata.hashCode()).toEqualTypeOf<number>();
+// @ts-expect-error a leader epoch needs the metadata: Java's three-parameter form
+new OffsetAndMetadata({ offset: 5n, leaderEpoch: 1 });
+const found = new OffsetAndTimestamp({ offset: 1n, timestamp: 2n, leaderEpoch: null });
+expectTypeOf(found.offset()).toEqualTypeOf<bigint>();
+expectTypeOf(found.timestamp()).toEqualTypeOf<bigint>();
+expectTypeOf(found.equals(found)).toEqualTypeOf<boolean>();
+expectTypeOf(found.equals({ o: null })).toEqualTypeOf<boolean>();
+// SubscriptionPattern, both constructors and equals forms.
+const bare = new SubscriptionPattern('t.*');
+expectTypeOf(bare.equals(new SubscriptionPattern({ pattern: 't.*' }))).toEqualTypeOf<boolean>();
+expectTypeOf(bare.equals({ obj: bare })).toEqualTypeOf<boolean>();
+// @ts-expect-error a RegExp is no pattern: SubscriptionPattern takes RE2/J text
+new SubscriptionPattern(/t.*/);
+// CloseOptions: the static factories and the with* setters, bare and by name.
+expectTypeOf(CloseOptions.timeout(1000)).toEqualTypeOf<CloseOptions>();
+expectTypeOf(CloseOptions.timeout(null)).toEqualTypeOf<CloseOptions>();
+expectTypeOf(CloseOptions.groupMembershipOperation(CloseOptions.GroupMembershipOperation.REMAIN_IN_GROUP)).toEqualTypeOf<CloseOptions>();
+expectTypeOf(
+  CloseOptions.groupMembershipOperation({ operation: CloseOptions.GroupMembershipOperation.LEAVE_GROUP }),
+).toEqualTypeOf<CloseOptions>();
+expectTypeOf(new CloseOptions().withTimeout(5000).withTimeout({ timeout: null })).toEqualTypeOf<CloseOptions>();
+expectTypeOf(new CloseOptions().withGroupMembershipOperation(CloseOptions.GroupMembershipOperation.DEFAULT)).toEqualTypeOf<CloseOptions>();
+expectTypeOf(CloseOptions.GroupMembershipOperation.values()).toEqualTypeOf<CloseOptions.GroupMembershipOperation[]>();
+expectTypeOf(CloseOptions.GroupMembershipOperation.valueOf('DEFAULT')).toEqualTypeOf<CloseOptions.GroupMembershipOperation>();
+expectTypeOf(CloseOptions.GroupMembershipOperation.valueOf({ name: 'DEFAULT' })).toEqualTypeOf<CloseOptions.GroupMembershipOperation>();
+expectTypeOf(CloseOptions.GroupMembershipOperation.DEFAULT.ordinal()).toEqualTypeOf<number>();
+// @ts-expect-error the getter only reads; the setter is withTimeout
+closeOptions.timeout(5000);
+// GroupProtocol, the enum: each static form.
+expectTypeOf(GroupProtocol.of('classic')).toEqualTypeOf<GroupProtocol>();
+expectTypeOf(GroupProtocol.valueOf('CONSUMER')).toEqualTypeOf<GroupProtocol>();
+expectTypeOf(GroupProtocol.valueOf({ name: 'CLASSIC' })).toEqualTypeOf<GroupProtocol>();
+expectTypeOf(GroupProtocol.values()).toEqualTypeOf<GroupProtocol[]>();
+expectTypeOf(GroupProtocol.CONSUMER.name()).toEqualTypeOf<string>();
+expectTypeOf(GroupProtocol.CONSUMER.toJSON()).toEqualTypeOf<string>();
+// ConsumerGroupMetadata's readers, from a consumer.
+function groupMetadataReaders(metadata: ConsumerGroupMetadata): void {
+  expectTypeOf(metadata.groupId()).toEqualTypeOf<string>();
+  expectTypeOf(metadata.generationId()).toEqualTypeOf<number>();
+  expectTypeOf(metadata.memberId()).toEqualTypeOf<string>();
+  expectTypeOf(metadata.groupInstanceId()).toEqualTypeOf<string | null>();
+  expectTypeOf(metadata.equals(metadata)).toEqualTypeOf<boolean>();
+  expectTypeOf(metadata.equals({ o: null })).toEqualTypeOf<boolean>();
+  expectTypeOf(metadata.hashCode()).toEqualTypeOf<number>();
+}
+void groupMetadataReaders;
+
+// Every form of the Consumer interface, through which a KafkaConsumer and a
+// MockConsumer are both passed: each class's own signatures must satisfy
+// every overload the interface declares.
+async function everyConsumerForm(consumer: Consumer<string, number>): Promise<void> {
+  const tp = formsTp;
+  const offsets = new TopicPartitionMap<OffsetAndMetadata>([[tp, new OffsetAndMetadata(1)]]);
+  const times = new TopicPartitionMap<bigint | number>([[tp, 0]]);
+  const listener: ConsumerRebalanceListener = { onPartitionsRevoked() {}, onPartitionsAssigned() {} };
+  const pattern = new SubscriptionPattern('t.*');
+  await consumer.subscribe({ topics: ['t'] });
+  await consumer.subscribe(new Set(['t']));
+  await consumer.subscribe({ topics: ['t'], callback: listener });
+  await consumer.subscribe({ pattern, callback: listener });
+  await consumer.subscribe({ pattern });
+  await consumer.subscribe(pattern);
+  await consumer.assign({ partitions: [tp] });
+  await consumer.assign([tp]);
+  expectTypeOf(await consumer.poll({ timeout: 0 })).toEqualTypeOf<ConsumerRecords<string, number>>();
+  expectTypeOf(await consumer.poll(0)).toEqualTypeOf<ConsumerRecords<string, number>>();
+  await consumer.commitSync();
+  await consumer.commitSync({ timeout: 1 });
+  await consumer.commitSync(1);
+  await consumer.commitSync({ offsets });
+  await consumer.commitSync(offsets);
+  await consumer.commitSync({ offsets, timeout: 1 });
+  await consumer.commitAsync();
+  await consumer.commitAsync({ callback: null });
+  await consumer.commitAsync(() => undefined);
+  await consumer.commitAsync({ offsets, callback: () => undefined });
+  await consumer.seek({ partition: tp, offset: 0 });
+  await consumer.seek({ partition: tp, offsetAndMetadata: new OffsetAndMetadata(0) });
+  await consumer.seekToBeginning({ partitions: [tp] });
+  await consumer.seekToBeginning([tp]);
+  await consumer.seekToEnd({ partitions: [tp] });
+  await consumer.seekToEnd([tp]);
+  expectTypeOf(await consumer.position({ partition: tp })).toEqualTypeOf<bigint>();
+  expectTypeOf(await consumer.position(tp)).toEqualTypeOf<bigint>();
+  expectTypeOf(await consumer.position({ partition: tp, timeout: 1 })).toEqualTypeOf<bigint>();
+  await consumer.committed({ partitions: [tp] });
+  expectTypeOf(await consumer.committed([tp])).toEqualTypeOf<TopicPartitionMap<OffsetAndMetadata | null>>();
+  await consumer.committed({ partitions: [tp], timeout: 1 });
+  expectTypeOf(consumer.metrics()).toEqualTypeOf<MetricNameMap<Metric>>();
+  await consumer.partitionsFor({ topic: 't' });
+  await consumer.partitionsFor('t');
+  await consumer.partitionsFor({ topic: 't', timeout: 1 });
+  await consumer.listTopics();
+  await consumer.listTopics({ timeout: 1 });
+  await consumer.listTopics(1);
+  expectTypeOf(consumer.paused()).toEqualTypeOf<TopicPartitionSet>();
+  await consumer.pause({ partitions: [tp] });
+  await consumer.pause([tp]);
+  await consumer.resume({ partitions: [tp] });
+  await consumer.resume([tp]);
+  await consumer.offsetsForTimes({ timestampsToSearch: times });
+  await consumer.offsetsForTimes(times);
+  await consumer.offsetsForTimes({ timestampsToSearch: times, timeout: 1 });
+  await consumer.beginningOffsets({ partitions: [tp] });
+  await consumer.beginningOffsets([tp]);
+  await consumer.beginningOffsets({ partitions: [tp], timeout: 1 });
+  await consumer.endOffsets({ partitions: [tp] });
+  await consumer.endOffsets([tp]);
+  await consumer.endOffsets({ partitions: [tp], timeout: 1 });
+  expectTypeOf(await consumer.currentLag({ topicPartition: tp })).toEqualTypeOf<bigint | null>();
+  expectTypeOf(await consumer.currentLag(tp)).toEqualTypeOf<bigint | null>();
+  expectTypeOf(consumer.groupMetadata()).toEqualTypeOf<ConsumerGroupMetadata>();
+  expectTypeOf(consumer.assignment()).toEqualTypeOf<TopicPartitionSet>();
+  expectTypeOf(consumer.subscription()).toEqualTypeOf<Set<string>>();
+  consumer.wakeup();
+  await consumer.unsubscribe();
+  await consumer.close();
+  await consumer.close({ option: new CloseOptions() });
+  await consumer.close(new CloseOptions());
+  await consumer[Symbol.asyncDispose]();
+  // @ts-expect-error a Map keyed by TopicPartition is no TopicPartitionMap
+  await consumer.commitSync(new Map([[tp, new OffsetAndMetadata(1)]]));
+  // @ts-expect-error a string is no iterable of partitions
+  await consumer.pause('t');
+  // @ts-expect-error close() takes a CloseOptions, not a timeout
+  await consumer.close(1000);
+}
+void everyConsumerForm;
+
+// The forms of KafkaConsumer and MockConsumer the interface does not have,
+// and the two classes passed through it.
+async function everyClassForm(): Promise<void> {
+  const configs: ConsumerConfigs = { 'bootstrap.servers': 'localhost:9092', 'group.protocol': 'consumer' };
+  const created = await KafkaConsumer.create({
+    configs,
+    keyDeserializer: new StringDeserializer(),
+    valueDeserializer: new IntegerDeserializer(),
+  });
+  expectTypeOf(created).toEqualTypeOf<KafkaConsumer<string, number>>();
+  await everyConsumerForm(created);
+  const mock = new MockConsumer<string, number>({ offsetResetStrategy: 'earliest' });
+  await everyConsumerForm(mock);
+  await mock.rebalance({ newAssignment: [formsTp] });
+  await mock.losePartitions([formsTp]);
+  mock.setMaxPollRecords({ maxPollRecords: 5 });
+  mock.setPollException({ exception: null });
+  mock.setOffsetsException(null);
+  mock.updateBeginningOffsets({ newOffsets: new TopicPartitionMap([[formsTp, 0]]) });
+  mock.updateEndOffsets(new TopicPartitionMap([[formsTp, 5n]]));
+  mock.updateDurationOffsets({ newOffsets: new TopicPartitionMap<bigint | number>() });
+  // @ts-expect-error the mock takes no deserializers: Java's typed mock has none
+  void new MockConsumer<string, number>({ offsetResetStrategy: 'earliest', keyDeserializer: new StringDeserializer() });
+  // @ts-expect-error a mock has no create(): it takes no serde config keys
+  void MockConsumer.create;
+}
+void everyClassForm;
