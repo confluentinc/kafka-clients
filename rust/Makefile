@@ -402,9 +402,27 @@ audit:
 # value into the shell. make still expands $(...) in a value given on its
 # command line, so a caller passing values it did not write (the Semaphore
 # Task) checks them and passes them in the environment instead.
+#
+# The [Unreleased] section of rust/CHANGELOG.md, python/CHANGELOG.md and,
+# with DOTNET_VERSION, dotnet/CHANGELOG.md becomes the section of the version
+# the crate, the Python package or the .NET package moves to (a dev build
+# too), dated today in PST. First an agent fills in the
+# entries the section is missing, from the commits since the package's last
+# release tag. As for the test selection (see the root Makefile), AGENT is any
+# command taking Claude Code's options, by default a local Claude Code, run
+# with AGENT_MODEL and only the read-only tools; it answers with the section,
+# which must keep every line it had, and nothing is written when it fails.
+# BUMP_VERSION_FLAGS takes `--timeout <seconds>` (1200 by default), or
+# `--no-agent` to release the sections as they are. The release of a
+# pre-release (1.1.0 after 1.1.0-rc.1) makes no new section: it renames the
+# pre-release's, with the [Unreleased] entries folded in.
+AGENT ?= claude
+AGENT_MODEL ?= opus
+BUMP_VERSION_FLAGS ?=
+
 bump-version:
-	@test -n "$$VERSION" || { echo "usage: make bump-version VERSION=X.Y.Z[-alpha.N|-beta.N|-dev.N|-rc.N] [PYTHON_VERSION=PEP440] [DOTNET_VERSION=SEMVER]" >&2; exit 2; }
-	cargo xtask bump-version "$$VERSION" $${PYTHON_VERSION:+--python-version "$$PYTHON_VERSION"} $${DOTNET_VERSION:+--dotnet-version "$$DOTNET_VERSION"}
+	@test -n "$$VERSION" || { echo "usage: make bump-version VERSION=X.Y.Z[-alpha.N|-beta.N|-dev.N|-rc.N] [PYTHON_VERSION=PEP440] [DOTNET_VERSION=SEMVER] [AGENT=COMMAND] [AGENT_MODEL=MODEL] [BUMP_VERSION_FLAGS='--timeout SECONDS'|--no-agent]" >&2; exit 2; }
+	cargo xtask bump-version "$$VERSION" $${PYTHON_VERSION:+--python-version "$$PYTHON_VERSION"} $${DOTNET_VERSION:+--dotnet-version "$$DOTNET_VERSION"} $(if $(filter --no-agent,$(BUMP_VERSION_FLAGS)),,--agent "$(AGENT)" --model "$(AGENT_MODEL)") $(BUMP_VERSION_FLAGS)
 
 # Opt-in editor/AI-assistant tooling setup: installs the rust-analyzer
 # component for the toolchain pinned in rust-toolchain.toml, and, if the

@@ -135,12 +135,15 @@ verify-commit-checks: submodules
 	$(MAKE) -C c test
 
 # `make bump-version VERSION=0.3.0-rc.1 [PYTHON_VERSION=...] [DOTNET_VERSION=...]`
-# bumps the versions of the Rust crate, the Python wheels and the .NET package:
-# see rust/Makefile. VERSION, PYTHON_VERSION and DOTNET_VERSION reach the
+# bumps the versions of the Rust crate, the Python wheels and the .NET package,
+# and releases the [Unreleased] section of the Rust, Python and .NET changelogs, after
+# an agent (AGENT, AGENT_MODEL, as for the test selection below) has filled in
+# their missing entries; `BUMP_VERSION_FLAGS=--no-agent` releases them as they
+# are: see rust/Makefile. VERSION, PYTHON_VERSION and DOTNET_VERSION reach the
 # sub-make through its environment (make passes command-line variables down);
 # this recipe never pastes them in.
 bump-version:
-	$(MAKE) -C rust bump-version
+	$(MAKE) -C rust bump-version AGENT="$(AGENT)" AGENT_MODEL="$(AGENT_MODEL)"
 
 # ── Test selection ───────────────────────────────────────────────────────
 #

@@ -2,7 +2,15 @@
 
 All notable changes to the `confluent-kafka` crate are documented in this file.
 
-## [Unreleased]
+## [1.1.0-rc.1] - 2026-11-27
+
+### Producer
+
+- With the default `full` buffer allocation strategy, the producer copies a
+  record once on its way to the socket instead of twice: the finished batch is
+  a view of the pooled buffer, as Java's `builtRecords` is, and the pool no
+  longer zero-fills a buffer it allocates. With 512 KB values, resident memory
+  fell from 62 to 43 MiB and CPU per MiB by about a quarter.
 
 ### Common
 
@@ -28,6 +36,15 @@ All notable changes to the `confluent-kafka` crate are documented in this file.
   `webpki-roots` it enables `rustls`, so `default-features = false` with
   `platform-verifier` builds TLS without the bundle. The C library, the Python
   wheel and the .NET package are built that way.
+- With `platform-verifier` on Windows, the operating system's verifier also
+  checks online (OCSP or CRL) whether the broker certificate was revoked,
+  which Java does not do by default: a revoked certificate is refused, and on
+  a network without internet access the TLS handshake can wait up to 10
+  seconds for the check, which then does not fail it.
+- New `LocalNullPointerError`, Java's `NullPointerException`: the variant
+  `Error::LocalNullPointer`, its constructor `Error::local_null_pointer` and
+  the predicate `is_local_null_pointer_error`. Rust has no null, so only the C
+  library reports it.
 
 ### C FFI
 
@@ -44,6 +61,25 @@ All notable changes to the `confluent-kafka` crate are documented in this file.
 - **Breaking:** the made-up failure values (`fallback`) a function without an
   error channel returned on a caught panic are gone: such a panic aborts.
   `_destroy(NULL)` stays a no-op.
+- The C library built for Windows (`x86_64-pc-windows-msvc` and
+  `i686-pc-windows-msvc`) links the C runtime statically, so an application
+  that loads it needs no Visual C++ Redistributable. Every buffer the library
+  allocates is freed by the library's own `_destroy` functions.
+- The C library ships as the `release-cdylib` build (`make -C rust
+  build-cdylib`): the features `ffi`, every codec, TLS and
+  `platform-verifier`, without `webpki-roots`. On macOS a static link of it
+  needs `-framework Security -framework CoreFoundation`, which the platform
+  certificate verifier calls; the shared library links them itself.
+- The documented lifetime of a rebalance listener's `self_` is corrected: the
+  listener stays registered after `kafka_consumer_Consumer_unsubscribe`,
+  after an assign, after a failed `subscribe_*` and, on a `KafkaConsumer`,
+  after a `subscribe_*` with an empty topic list (Java's `unsubscribe()`,
+  which keeps the earlier listener and does not register the new one). Keep
+  `self_` alive until a later successful `subscribe_*` replaces it, the
+  consumer is destroyed, or a `KafkaConsumer`'s `close` returns. A
+  `MockConsumer` keeps it after `close`, since its `rebalance` and
+  `lose_partitions` still call it. The docs used to say `unsubscribe` released
+  it.
 
 ## [1.0.0] - 2026-10-30
 
