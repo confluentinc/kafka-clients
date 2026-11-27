@@ -35,7 +35,11 @@
  * with `ignore`, an additive change)*. A failing deserializer makes `poll()`
  * return the records before it, and reject with `RecordDeserializationError`
  * when there are none; the consumer seeks back, so the next poll fails on the
- * record again until it is sought past *(deviation, as in Python)*.
+ * record again until it is sought past *(deviation, as in Python)*. While
+ * `poll()` awaits a deserializer's Promise, or seeks back, the core has
+ * answered its poll, so other calls go through meanwhile, and `position()`
+ * answers past the batch *(deviation: Java's `poll()` holds the consumer
+ * until it returns. Why: the deserializers run after the core's poll)*.
  *
  * Without deserializers, `KafkaConsumer` returns keys and values as Buffers,
  * which a deserializer gets too. A key or value from

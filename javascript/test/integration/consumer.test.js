@@ -1318,3 +1318,54 @@ async function deserializing(topic, partitions, key, value) {
   },
   120000,
 );
+
+(SKIP ? test.skip : test)(
+  "the recorded deviation: while poll() awaits a deserializer's Promise, the core has answered, and other calls go through",
+  async () => {
+    const topic = freshTopic('deser-window');
+    await createTopic(BOOTSTRAP, topic);
+    await produceStrings(topic, 1, 3);
+    /** @type {() => void} */
+    let release = () => {};
+    const held = new Promise((resolve) => {
+      release = () => resolve(undefined);
+    });
+    /** @type {() => void} */
+    let entered = () => {};
+    const reached = new Promise((resolve) => {
+      entered = () => resolve(undefined);
+    });
+    const consumer = await deserializing(topic, 1, null, {
+      deserialize: async ({ data }) => {
+        entered();
+        await held;
+        return data.toString();
+      },
+    });
+    try {
+      const tp = new TopicPartition({ topic, partition: 0 });
+      /** @type {unknown[]} */
+      let records = [];
+      const deadline = Date.now() + 30000;
+      // Polls until the deserializer holds a batch.
+      let pending = consumer.poll(500);
+      while (!(await Promise.race([reached.then(() => true), pending.then(() => false)])) && Date.now() < deadline) {
+        records = [...records, ...(await pending)];
+        pending = consumer.poll(500);
+      }
+      // Java's poll() would hold the consumer here; the core has answered its
+      // poll, so it takes these: the position is already past the batch.
+      assert.equal(await consumer.position(tp), 3n);
+      assert.deepEqual([...consumer.assignment()].map(String), [`${topic}-0`]);
+      await consumer.pause([tp]);
+      await consumer.resume([tp]);
+      release();
+      records = [...records, ...(await pending)];
+      assert.equal(records.length, 3);
+    } finally {
+      release();
+      await consumer.close();
+    }
+  },
+  120000,
+);

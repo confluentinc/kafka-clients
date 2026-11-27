@@ -49,6 +49,14 @@ export interface SerdeRole {
   readonly example: string;
   /** Java's default `close()`, run for a serde without one. */
   readonly defaultClose: (serde: Serde) => void;
+  /**
+   * Whether Java's constructor takes the key's serde before it builds the
+   * value's, so that a failure of the value's closes the key's, given or
+   * made: `KafkaProducer` assigns its key serializer first, while
+   * `AsyncKafkaConsumer` stores both deserializers only once both are built
+   * (`Deserializers`), so a given one stays open.
+   */
+  readonly keyTakenFirst: boolean;
 }
 
 /** The producer's serializers. */
@@ -61,6 +69,7 @@ export const SERIALIZER: SerdeRole = Object.freeze({
   args: Object.freeze(['keySerializer', 'valueSerializer'] as const),
   example: 'StringSerializer',
   defaultClose: (serde: Serde) => SerializerDefaults.prototype.close.call(serde as Serializer<unknown>),
+  keyTakenFirst: true,
 });
 
 /** The consumer's deserializers. */
@@ -73,6 +82,7 @@ export const DESERIALIZER: SerdeRole = Object.freeze({
   args: Object.freeze(['keyDeserializer', 'valueDeserializer'] as const),
   example: 'StringDeserializer',
   defaultClose: (serde: Serde) => DeserializerDefaults.prototype.close.call(serde as Deserializer<unknown>),
+  keyTakenFirst: false,
 });
 
 /** The pair of serdes a client holds, the key's then the value's, null where none is. */
@@ -346,8 +356,9 @@ export function configuredSerde(role: SerdeRole, configs: Readonly<Record<string
  * before the next is called, as `create()` takes them: a function may return
  * the serde or a Promise of it. A key whose serde is given is not read, as the
  * constructor ignores it. On a failure the serdes already taken are closed, as
- * the constructor closes them: the key's, made or given, when the value's
- * function fails, and only one made when the value's config key is refused.
+ * the constructor closes them: the key's serde made when the value's function
+ * fails, and, for the producer, a given one too (`keyTakenFirst`), unless the
+ * value's config key is refused.
  *
  * @param role - the client's role
  * @param configs - the client's configuration, as the functions get it
@@ -379,10 +390,12 @@ export async function awaitedSerdes(
       }
       made[index] = maker.check(out);
     } catch (error) {
-      // The key's serde is taken once the value's turn comes: a construction
-      // failure closes it, given or made (Java's constructor catch); a
-      // ConfigError only the one made, nobody else's.
-      if (index === 1) closeSerde(role, error instanceof ConfigError ? made[0] : (given[0] ?? made[0]), role.args[0]);
+      // The value's failure: the key's serde made is closed, nobody else's;
+      // the producer, whose Java constructor has taken the key's serde by
+      // then (`keyTakenFirst`), closes a given one too on a construction
+      // failure, but not on a ConfigError.
+      const closesGiven = role.keyTakenFirst && !(error instanceof ConfigError);
+      if (index === 1) closeSerde(role, closesGiven ? (given[0] ?? made[0]) : made[0], role.args[0]);
       throw error;
     }
   }

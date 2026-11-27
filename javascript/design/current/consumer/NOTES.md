@@ -48,8 +48,12 @@ rule rather than repeat it. "Line N" is line N of `javascript/CLAUDE.md` at `8a2
   record (line 127), and a `then` that cannot be read is the deserializer's failure. A consumer without deserializers
   builds the batch as before, with no pass over its records. While a deserializer's Promise, or a seek back, is awaited,
   the core's poll has already answered, so the core takes another call of the consumer's meanwhile, where Java's
-  `poll()` holds the consumer until it returns *(deviation, as in Python. Why: the deserializers run in JavaScript
-  after the core's poll. Goes when: the core runs the deserializers through the FFI)*.
+  `poll()` holds the consumer until it returns: `position()` answers past the whole batch, and `assignment()`,
+  `pause()`, `resume()` and a second `poll()` go through *(deviation, accepted by the user on 2026-11-27. Why: the
+  deserializers run in JavaScript after the core's poll. Goes when: the core runs the deserializers through the FFI)*.
+  Only the gap between the seeks back is shared with Python, whose seeks back are separate guarded calls; Python
+  refuses an `async def` deserializer and holds its own guard while its deserializers run, so the window while a
+  deserializer's Promise is awaited is this binding's own. `test/integration/consumer.test.js` pins it.
 - A failing deserializer ends the batch where Java's `FetchCollector` ends it, as Python's binding does: the records
   before it are returned, and `RecordDeserializationError` is the failure of a poll that has none, with Java's message
   and fields (`CompletedFetch.newRecordDeserializationException`) and the thrown value as its `cause`, `null` and

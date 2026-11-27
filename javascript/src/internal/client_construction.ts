@@ -84,7 +84,7 @@ function serdeConfigs(config: ConfigHandle, configs: Readonly<Record<string, unk
  * are called with the configuration and its generated `client.id`, the key's
  * first, and the client is built from the parsed configuration. A serde given
  * wins, and its config key is ignored. On a failure Java's constructor closes
- * the serdes it has taken in the catch around its body, whose failure it
+ * the serdes it has taken (`keyTakenFirst`) in the catch around its body, whose failure it
  * relabels "Failed to construct kafka producer" (or `consumer`): a
  * `ConfigError`, thrown before that catch, leaves the serdes given open, as
  * in Java, while those the functions made are the client's own, which nobody
@@ -118,8 +118,9 @@ export function construct<H>(
   }
   let keyMade: Serde | null = prepared?.serdes[0] ?? null;
   let valueMade: Serde | null = prepared?.serdes[1] ?? null;
-  // How many serdes construction has taken, key first: Java's constructor
-  // assigns the key's, then the value's, and its catch closes only those.
+  // How many serdes construction has taken, key first: Java's producer
+  // assigns the key's, then the value's, and its catch closes only those;
+  // Java's consumer stores both once both are built (`keyTakenFirst`).
   let taken = prepared === null ? 0 : 2;
   try {
     if (prepared === null) {
@@ -132,9 +133,12 @@ export function construct<H>(
     const handle = build(config);
     return { handle, key: given[0] ?? keyMade, value: given[1] ?? valueMade };
   } catch (error) {
-    const construction = isConstructionFailure(role, error);
-    if (taken >= 1) closeSerde(role, construction ? (given[0] ?? keyMade) : keyMade, role.args[0]);
-    if (taken >= 2) closeSerde(role, construction ? (given[1] ?? valueMade) : valueMade, role.args[1]);
+    // A construction failure closes the serdes given too, once the client
+    // has taken them: the producer's key serializer as soon as it is
+    // assigned, the consumer's deserializers only once both are built.
+    const closesGiven = isConstructionFailure(role, error) && (role.keyTakenFirst || taken >= 2);
+    if (taken >= 1) closeSerde(role, closesGiven ? (given[0] ?? keyMade) : keyMade, role.args[0]);
+    if (taken >= 2) closeSerde(role, closesGiven ? (given[1] ?? valueMade) : valueMade, role.args[1]);
     throw error;
   } finally {
     native.configFree(config);

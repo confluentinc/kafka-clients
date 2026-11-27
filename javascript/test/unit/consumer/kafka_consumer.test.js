@@ -772,7 +772,7 @@ test('a serde config key that is no synchronous deserializer function throws Con
   }
 });
 
-test('a deserializer config function that throws fails the build with KafkaError "Failed to construct kafka consumer", the thrown value its cause, and closes the deserializers already made', () => {
+test('a deserializer config function that throws fails the build with KafkaError "Failed to construct kafka consumer", the thrown value its cause, and closes the deserializers already made, never one given', async () => {
   for (const thrown of [new Error('boom'), null, undefined, 'text']) {
     let closed = 0;
     const made = () => ({ deserialize: () => null, close: () => void closed++ });
@@ -796,8 +796,11 @@ test('a deserializer config function that throws fails the build with KafkaError
     );
     assert.equal(closed, 1, String(thrown));
   }
-  // A deserializer given is closed too, as Java's catch closes what it has taken.
+  // A deserializer given stays open, the constructor's and create()'s alike:
+  // Java's consumer stores its deserializers only once both are built
+  // (Deserializers), so its catch closes none it was given.
   let closed = 0;
+  const given = { deserialize: () => null, close: () => void closed++ };
   assert.throws(
     () =>
       new KafkaConsumer({
@@ -806,12 +809,24 @@ test('a deserializer config function that throws fails the build with KafkaError
             throw new Error('boom');
           },
         }),
-        keyDeserializer: { deserialize: () => null, close: () => void closed++ },
+        keyDeserializer: given,
         valueDeserializer: null,
       }),
     { constructor: KafkaError, message: 'Failed to construct kafka consumer' },
   );
-  assert.equal(closed, 1);
+  await assert.rejects(
+    KafkaConsumer.create({
+      configs: configs(GROUP_ID, {
+        'value.deserializer': async () => {
+          throw new Error('boom');
+        },
+      }),
+      keyDeserializer: given,
+      valueDeserializer: null,
+    }),
+    { constructor: KafkaError, message: 'Failed to construct kafka consumer' },
+  );
+  assert.equal(closed, 0);
 });
 
 test('a consumer the core fails to build closes the deserializers the config functions made, and frees its parsed configuration', () => {

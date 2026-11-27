@@ -3916,3 +3916,37 @@ test('a serde config function that throws or rejects with null or undefined: tha
     );
   }
 });
+
+test("a serializer's failure of null or undefined is passed on as it is, by KafkaProducer and MockProducer, sync or async, key or value", async () => {
+  const { MockProducer } = require('@confluentinc/kafka-javascript/producer');
+  for (const thrown of [null, undefined]) {
+    for (const async of [false, true]) {
+      for (const isKey of [true, false]) {
+        const failing = {
+          serialize: () => {
+            if (async) return Promise.reject(thrown);
+            throw thrown;
+          },
+        };
+        const bytes = { serialize: () => Buffer.from('b') };
+        const serializers = isKey ? { keySerializer: failing, valueSerializer: bytes } : { keySerializer: bytes, valueSerializer: failing };
+        const what = `${String(thrown)} ${async ? 'rejected' : 'thrown'} by the ${isKey ? 'key' : 'value'} serializer`;
+        for (const producer of [
+          new KafkaProducer({ configs: UNREACHABLE, ...serializers }),
+          new MockProducer({ autoComplete: true, partitioner: null, ...serializers }),
+        ]) {
+          let called = 0;
+          await assert.rejects(
+            producer.send({ record: new ProducerRecord({ topic: 't', key: 'k', value: 'v' }), callback: () => void called++ }),
+            (/** @type {unknown} */ e) => {
+              assert.equal(e, thrown, what);
+              return true;
+            },
+          );
+          assert.equal(called, 0, what);
+          await producer.close();
+        }
+      }
+    }
+  }
+});
