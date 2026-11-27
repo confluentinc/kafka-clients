@@ -10,10 +10,13 @@ approved with its choices 2(a) and 3(a), and its "Result" section has the commit
 **done** (2026-11-27): its phase plan, `P4.md`, was approved with its choice 2(a), and its "Result" section has the
 commits, the review and the gate. P5 is **done** (2026-11-27): its phase plan, `P5.md`, was approved with its choices
 2(a) and 3(a), and its "Result" section has the commits, the review and the gate. The user then chose (a) in its
-"For the user" list: `commitAsync({ offsets, callback })`'s `callback` stays non-null. P6's phase plan is next.
+"For the user" list: `commitAsync({ offsets, callback })`'s `callback` stays non-null. P6's phase plan, `P6.md`,
+was approved on 2026-11-27 with its choices 2(a), done as the merge `34f8de73b` of PR #312's `c0adc2cf5`, 3(a) and
+4(b), and P6 is in progress.
 
 - Branch `dev/javascript-consumer-bindings`, on PR #312's head `f62d5fec9` (`origin/dev/javascript-producer-bindings`),
-  an ancestor of the branch. The user moved the branch there on 2026-11-25 (from `208abeb64`); P1's commits came
+  an ancestor of the branch, and since 2026-11-27 merged with its newer `c0adc2cf5` (`34f8de73b`, P6.md, choice
+  2(a)). The user moved the branch there on 2026-11-25 (from `208abeb64`); P1's commits came
   through unchanged, under new hashes.
 - Rules: the base holds `origin/kraina-js-claude-rules` up to `31910fe32`. The rules branch is at `aa551943e`, three
   commits ahead (lines 97, 101, 106, 131 and 160 of its file); the consumer follows them where they apply (P2.md,
@@ -250,9 +253,10 @@ The producer's layout (JS conventions, Layout and modules), one Java class per f
 - The built-in deserializers follow decision 1.
 - The config keys `key.deserializer` and `value.deserializer` take `({ configs, isKey }) => deserializer`. A
   constructor argument wins. The constructor takes only synchronous functions, and `create()` also takes ones that
-  return a Promise (lines 131, 156). The core never sees the client's own serde keys, nor the keys a config
-  function reads that the core doesn't know (producer DECISIONS 16). The rules branch's line 131 now has the keys a
-  config function reads reach the core; P6's plan follows it (P2.md §5).
+  return a Promise (lines 131, 156). The core never sees the client's own serde keys. Every other key reaches it,
+  the ones a config function reads included, and it lists the ones it doesn't use, as the rules branch's line 132
+  says (P2.md §5; P6.md, choice 4(b); ask 18). A config function gets the configs with the `client.id` the parsed
+  config generated, after the core has checked the config, as Java's serdes are configured (P6.md, choice 3(a)).
 - In those keys, a class name, a serde object and a class each throw `ConfigError` with line 131's hint, which
   names the class, as in "did you mean `() => new StringDeserializer()`?". A function that returns a Promise
   throws `ConfigError` in the constructor, with a message that points to `create()` (line 131). P6 tests each of
@@ -491,7 +495,7 @@ FFI has them:
 2. `registerMetricForSubscription` and `unregisterMetricFromSubscription`, and the mock's `addedMetrics()`.
 3. The mock's `schedulePollTask(Runnable)`, `setClientInstanceId`, `disableTelemetry` and `injectTimeoutException`.
 
-Fourteen FFI and core behaviours the binding lives with for now:
+Fifteen FFI and core behaviours the binding lives with for now:
 
 4. A negative `CloseOptions` timeout is read as zero (`duration_ms()` in `rust/src/ffi/consumer/close_options.rs`),
    where Java throws "The timeout cannot be negative." It's already a listed deviation (line 81). Ask: Java's check
@@ -576,6 +580,14 @@ Fourteen FFI and core behaviours the binding lives with for now:
     `AsyncKafkaConsumer#runRebalanceCallbacksOnClose` finds nothing to revoke and calls no listener. The binding
     passes it through; no test pins it yet (P7's broker tests can). Ask: clear the assignment snapshot when the member
     leaves, as Java does.
+18. Found while planning P6: the copy a client makes of its config handle (`copy_for_client` in
+    `rust/src/producer/producer_config.rs` and `rust/src/consumer/consumer_config.rs`, which
+    `kafka_producer_KafkaProducer_new` and `kafka_consumer_KafkaConsumer_new` build the client from) parses the
+    originals again with an empty record of the keys used, and each client logs its unused keys from that copy. So
+    neither client's unused-keys line can leave out a key that only a serde config function read, where Java's
+    `originals()` marks it used, and an `ignore()` on the handle (`kafka_producer_ProducerConfig_ignore`,
+    `kafka_consumer_ConsumerConfig_ignore`) can't help (P6.md, choice 4(b)). Ask: keep the handle's `used` set in
+    the copy. Once it does, the binding marks the keys with `ignore`, an additive change.
 
 ## 7. Execution: Actor and Critic
 
