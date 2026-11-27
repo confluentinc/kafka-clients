@@ -8,8 +8,8 @@ to P2. P2 is **done** (2026-11-26): its phase plan, `P2.md`, was approved with i
 "Result" section has the commits, the review and the gate. P3 is **done** (2026-11-26): its phase plan, `P3.md`, was
 approved with its choices 2(a) and 3(a), and its "Result" section has the commits, the review and the gate. P4 is
 **done** (2026-11-27): its phase plan, `P4.md`, was approved with its choice 2(a), and its "Result" section has the
-commits, the review and the gate. P5's phase plan, `P5.md`, was approved on 2026-11-27 with its choices 2(a) and
-3(a), and P5 is in progress.
+commits, the review and the gate. P5 is **done** (2026-11-27): its phase plan, `P5.md`, was approved with its choices
+2(a) and 3(a), and its "Result" section has the commits, the review and the gate. P6's phase plan is next.
 
 - Branch `dev/javascript-consumer-bindings`, on PR #312's head `f62d5fec9` (`origin/dev/javascript-producer-bindings`),
   an ancestor of the branch. The user moved the branch there on 2026-11-25 (from `208abeb64`); P1's commits came
@@ -490,7 +490,7 @@ FFI has them:
 2. `registerMetricForSubscription` and `unregisterMetricFromSubscription`, and the mock's `addedMetrics()`.
 3. The mock's `schedulePollTask(Runnable)`, `setClientInstanceId`, `disableTelemetry` and `injectTimeoutException`.
 
-Thirteen FFI behaviours the binding lives with for now:
+Fourteen FFI and core behaviours the binding lives with for now:
 
 4. A negative `CloseOptions` timeout is read as zero (`duration_ms()` in `rust/src/ffi/consumer/close_options.rs`),
    where Java throws "The timeout cannot be negative." It's already a listed deviation (line 81). Ask: Java's check
@@ -560,12 +560,19 @@ Thirteen FFI behaviours the binding lives with for now:
 16. Found while planning P5: while the mock runs a listener or commit callback (`rebalance_cb`,
     `lose_partitions_cb`, `commit_async_*_cb`), it holds its single-owner flag
     (`kafka_consumer_MockConsumer_rebalance_cb` in `rust/src/ffi/consumer/mock_consumer.rs`), so a call the
-    `ConsumerHandle` has no form of gets `ConcurrentModificationError`. The mock's handle runs only the commits, `currentLag` and the synchronous reads: its
-    other async operations fail with `UnsupportedOperationError` ("ConsumerHandle async operations are not supported
-    on a MockConsumer handle; drive the MockConsumer directly."; `ConsumerHandle::async_state` in
+    `ConsumerHandle` has no form of gets `ConcurrentModificationError`, and six of the mock's setters are ignored, as
+    ask 8 says. The mock's handle runs only the commits, `currentLag` and the synchronous reads: its other async
+    operations fail with `UnsupportedOperationError` ("ConsumerHandle async operations are not supported on a
+    MockConsumer handle; drive the MockConsumer directly."; `ConsumerHandle::async_state` in
     `rust/src/consumer/internals/async_kafka_consumer.rs`). Java's synchronized mock is reentrant and takes them all.
     Ask: let the mock's handle reach the mock for every operation, and the mock's own calls pass while its callback
     runs.
+17. Found in P5's review, by a broker probe: after `unsubscribe()` has run `onPartitionsRevoked`, the core's
+    `close()` runs `onPartitionsLost` for the same partitions. Java's `AbstractMembershipManager#leaveGroup` clears
+    the assignment snapshot (`notifyAssignmentChange(Collections.emptySet())`), so
+    `AsyncKafkaConsumer#runRebalanceCallbacksOnClose` finds nothing to revoke and calls no listener. The binding
+    passes it through; no test pins it yet (P7's broker tests can). Ask: clear the assignment snapshot when the member
+    leaves, as Java does.
 
 ## 7. Execution: Actor and Critic
 
