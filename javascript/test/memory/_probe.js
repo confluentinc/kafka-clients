@@ -90,6 +90,8 @@ function leaks() {
     batches: c.batchesMade - c.batchesDestroyed,
     consumerBuffers: c.buffersMade - c.buffersFreed,
     headerSources: c.sourcesMade - c.sourcesFreed,
+    listeners: c.listenersMade - c.listenersFreed,
+    consumerDeferrals: c.deferralsMade - c.deferralsFreed,
   };
 }
 `;
@@ -115,6 +117,8 @@ const NO_LEAKS = {
   batches: 0,
   consumerBuffers: 0,
   headerSources: 0,
+  listeners: 0,
+  consumerDeferrals: 0,
 };
 
 /**

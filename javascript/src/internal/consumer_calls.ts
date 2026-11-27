@@ -22,8 +22,10 @@
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- src/internal/native.ts is an `export =` module, which TypeScript imports this way (the addon is loaded there alone, javascript/CLAUDE.md "Files and layout")
 import native = require('./native');
 import { JavaForms } from './args';
+import { ConsumerRebalanceListenerDefaults } from './consumer_rebalance_listener_defaults';
 import { debug } from './debug';
 import { durationToMillis, isDurationOrNull } from './duration';
+import { carriedCause } from './errors';
 import { liveMetrics } from './live_metrics';
 import { partitionInfoOf } from './metadata';
 import {
@@ -34,6 +36,8 @@ import {
   topicPartitionLongMap,
   topicPartitionOffsetMap,
 } from './payload';
+import { create } from './throwable';
+import { KafkaError } from '../common/kafka_error';
 import type { Metric } from '../common/metric';
 import type { MetricNameMap } from '../common/metric_name_map';
 import type { PartitionInfo } from '../common/partition_info';
@@ -47,6 +51,7 @@ import { ConsumerRecord } from '../consumer/consumer_record';
 import { ConsumerRecords } from '../consumer/consumer_records';
 import { OffsetAndMetadata } from '../consumer/offset_and_metadata';
 import { OffsetAndTimestamp } from '../consumer/offset_and_timestamp';
+import type { ConsumerRebalanceListener } from '../consumer/consumer_rebalance_listener';
 import { SubscriptionPattern } from '../consumer/subscription_pattern';
 
 /** The native consumer handle (`internal/native.ts`). */
@@ -75,9 +80,10 @@ export function isIterable(value: unknown): boolean {
 }
 
 // Java's forms of each method, in Java declaration order (src/internal/args.ts).
-// Java's subscribe(Pattern...) forms are left out, and so are, until the
-// client has rebalance listeners and commit callbacks, the forms taking one.
-const SUBSCRIBE_FORMS = new JavaForms('subscribe', [['topics'], ['pattern']], {
+// Java's subscribe(Pattern...) forms are left out.
+const SUBSCRIBE_FORMS = new JavaForms('subscribe', [['topics'], ['topics', 'callback'], ['pattern', 'callback'], ['pattern']], {
+  // The earliest-declared form's parameter first (Python's Signatures).
+  order: ['topics', 'pattern', 'callback'],
   bareTypes: {
     topics: (value) => isIterable(value) && !(value instanceof SubscriptionPattern),
     pattern: (value) => value instanceof SubscriptionPattern,
@@ -142,6 +148,119 @@ const NO_GROUP_ID = 'To use the group management or offset commit APIs, you must
 // What the addon builds each record of a poll with.
 const RECORD_FACTORY: typeof ConsumerRecord.internalCreate = (...fields) => ConsumerRecord.internalCreate(...fields);
 
+/** A rebalance listener's method as the addon calls it (`internal/native.ts`). */
+type ListenerRun = (pairs: Array<[string, number]>) => Promise<unknown> | undefined;
+
+/**
+ * What the addon reports for a listener method or commit callback that
+ * `run` calls: `undefined` once it returned `undefined`, Java's `void`;
+ * otherwise a Promise of its result (`Promise.resolve`), which the report
+ * waits for, or, for a throw, a Promise rejecting with what it threw. The
+ * addon handles the Promise at once, so no rejection is left unhandled.
+ *
+ * @param run - calls the user's method
+ * @returns undefined, or the Promise the report waits for
+ */
+function callbackResult(run: () => unknown): Promise<unknown> | undefined {
+  let result: unknown;
+  try {
+    result = run();
+  } catch (error) {
+    // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- the callback's own thrown value, carried back to the app as it is
+    return Promise.reject(error);
+  }
+  return result === undefined ? undefined : Promise.resolve(result);
+}
+
+/**
+ * The functions the addon calls for a listener's three methods, Java's
+ * `onPartitionsRevoked`, `onPartitionsAssigned` and `onPartitionsLost`, each
+ * with `{ partitions }`, a `TopicPartitionSet`, and the listener as `this`:
+ * null for a missing required method, which the FFI refuses; a missing
+ * `onPartitionsLost` runs Java's default (`ConsumerRebalanceListenerDefaults`),
+ * which the binding checks for at each call (javascript/CLAUDE.md, JavaScript
+ * Binding Conventions, Class family).
+ *
+ * @param listener - the listener given
+ * @returns the three functions, or null for a null listener, which the FFI refuses
+ */
+function listenerRuns(listener: unknown): [ListenerRun | null, ListenerRun | null, ListenerRun] | null {
+  if (listener === null) return null;
+  if (typeof listener !== 'object') throw new TypeError('callback must be a ConsumerRebalanceListener');
+  const l = listener as ConsumerRebalanceListener;
+  const revoked: ListenerRun | null =
+    typeof l.onPartitionsRevoked === 'function'
+      ? (pairs) => callbackResult(() => l.onPartitionsRevoked({ partitions: partitionSet(pairs) }))
+      : null;
+  const assigned: ListenerRun | null =
+    typeof l.onPartitionsAssigned === 'function'
+      ? (pairs) => callbackResult(() => l.onPartitionsAssigned({ partitions: partitionSet(pairs) }))
+      : null;
+  const lost: ListenerRun = (pairs) =>
+    callbackResult(() => {
+      const partitions = partitionSet(pairs);
+      return typeof l.onPartitionsLost === 'function'
+        ? l.onPartitionsLost({ partitions })
+        : ConsumerRebalanceListenerDefaults.prototype.onPartitionsLost.call(l, { partitions });
+    });
+  return [revoked, assigned, lost];
+}
+
+/**
+ * Java's `toString()` of a value a callback threw or rejected with: its
+ * `String()`, or `''` when that throws.
+ *
+ * @param value - the value
+ * @returns its text
+ */
+function valueText(value: unknown): string {
+  try {
+    return String(value);
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * A layer the core built around a value a callback threw or rejected with,
+ * as Java's `ConsumerUtils.maybeWrapAsKafkaException` builds it: the value
+ * itself when it is a `KafkaError`, which Java leaves alone and the core
+ * wraps only because a `LocalCallbackError` is no `KafkaException`; a
+ * `KafkaError` whose message is the value's `toString()` for a layer the core
+ * built from its cause alone; otherwise the layer, the value its `cause`.
+ *
+ * @param error - an error the core reported
+ * @returns the error Java's consumer throws
+ */
+function unwrapLayer(error: unknown): unknown {
+  const carried = carriedCause(error);
+  if (carried === undefined) return error;
+  const value = (error as Error).cause;
+  if (value instanceof KafkaError) return value;
+  if ((error as Error).message === `LocalCallbackError: ${carried}`) return create(KafkaError, valueText(value), value);
+  return error;
+}
+
+/**
+ * The error a consumer call rejects with, a listener's or commit callback's
+ * put back where Java has it (javascript/CLAUDE.md, JavaScript Binding
+ * Conventions, Errors): the value it threw or rejected with comes back as
+ * itself, inside the layer Java's call wraps it in. `close()` keeps its own
+ * layer, "Failed to close kafka consumer", Java's `new KafkaException(msg,
+ * e)`, and the rule is applied to its cause.
+ *
+ * @param error - the error the core reported
+ * @param atClose - whether `close()` reported it
+ * @returns the error to reject with
+ */
+function callbackError(error: unknown, atClose: boolean): unknown {
+  if (!atClose) return unwrapLayer(error);
+  if (!(error instanceof Error) || carriedCause(error) !== undefined) return error;
+  const cause = unwrapLayer(error.cause);
+  if (cause !== error.cause) Object.defineProperty(error, 'cause', { value: cause, writable: true, enumerable: false, configurable: true });
+  return error;
+}
+
 /**
  * A Promise settled by a native completion that answers with an error or
  * nothing.
@@ -152,7 +271,7 @@ const RECORD_FACTORY: typeof ConsumerRecord.internalCreate = (...fields) => Cons
 export function completion(start: (done: (error: unknown) => void) => void): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with the error the core reported, a client Error src/internal/errors.ts built (typed unknown at the native boundary)
-    start((error) => (error !== null ? reject(error) : resolve()));
+    start((error) => (error !== null ? reject(callbackError(error, false)) : resolve()));
   });
 }
 
@@ -240,7 +359,7 @@ function timeoutOf(forms: JavaForms, options: unknown, timed: boolean): number |
 function answer<T>(start: (done: (error: unknown, value: T | null) => void) => void): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with the error the core reported, a client Error src/internal/errors.ts built (typed unknown at the native boundary)
-    start((error, value) => (error !== null ? reject(error) : resolve(value as T)));
+    start((error, value) => (error !== null ? reject(callbackError(error, false)) : resolve(value as T)));
   });
 }
 
@@ -295,17 +414,22 @@ export function subscribe(handle: ConsumerHandle, options: unknown, count: numbe
     if (given instanceof RegExp) {
       throw new TypeError("pattern must be a SubscriptionPattern, not a RegExp: new SubscriptionPattern({ pattern: '...' })");
     }
-    if (SUBSCRIBE_FORMS.match(options, count) === 0) {
+    const form = SUBSCRIBE_FORMS.match(options, count);
+    const withListener = form === 1 || form === 2;
+    // A null listener goes to the FFI as NULL, which refuses it with Java's
+    // message, before its check of the topics or the pattern.
+    const runs = withListener ? listenerRuns(SUBSCRIBE_FORMS.value(options, 'callback')) : null;
+    if (form <= 1) {
       const topics = stringSet.take(SUBSCRIBE_FORMS.value(options, 'topics'), 'topics') as Set<string | null> | null;
       // A null topic is a blank one, which the core refuses with Java's
       // message for both; on a mock it goes to the FFI as NULL.
       const list = topics === null ? null : [...topics].map((topic) => (blankNull ? (topic ?? '') : topic));
-      return completion((done) => native.consumerSubscribeTopics(handle, list, done));
+      return completion((done) => native.consumerSubscribeTopics(handle, list, withListener, runs, done));
     }
     const pattern = SUBSCRIBE_FORMS.value(options, 'pattern');
     if (pattern !== null && !(pattern instanceof SubscriptionPattern)) throw new TypeError('pattern must be a SubscriptionPattern');
     return completion((done) =>
-      native.consumerSubscribePattern(handle, pattern !== null, pattern === null ? null : pattern.pattern(), done),
+      native.consumerSubscribePattern(handle, pattern !== null, pattern === null ? null : pattern.pattern(), withListener, runs, done),
     );
   });
 }
@@ -360,7 +484,7 @@ export function poll<K, V>(handle: ConsumerHandle, options: unknown, count: numb
     return new Promise<ConsumerRecords<K, V>>((resolve, reject) => {
       native.consumerPoll(handle, timeoutMs, RECORD_FACTORY, (error, partitions, nextOffsets) => {
         // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with the error the core reported, a client Error src/internal/errors.ts built (typed unknown at the native boundary)
-        if (error !== null || partitions === null || nextOffsets === null) return reject(error);
+        if (error !== null || partitions === null || nextOffsets === null) return reject(callbackError(error, false));
         const records = new TopicPartitionMap<ConsumerRecord<K, V>[]>();
         for (const [topic, partition, list] of partitions) {
           records.set(new TopicPartition({ topic, partition }), list as ConsumerRecord<K, V>[]);
@@ -780,7 +904,7 @@ export function close(handle: ConsumerHandle, options: unknown, count: number, c
       native.consumerClose(handle, withOptions, timeoutMs, operation, (error, closedNow) => {
         if (closedNow) debug('%s closed', client);
         // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with the error the core reported, a client Error src/internal/errors.ts built (typed unknown at the native boundary)
-        if (error !== null) reject(error);
+        if (error !== null) reject(callbackError(error, true));
         else resolve();
       });
     });

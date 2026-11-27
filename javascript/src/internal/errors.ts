@@ -60,6 +60,33 @@ interface NativeError {
   /** The payload the FFI's view of the class gives, by Java field name (native/error_payload.c). */
   payload?: Readonly<Record<string, unknown>>;
   cause?: unknown;
+  /** The JS value a LocalCallbackError carries, when it carries one. */
+  carried?: unknown;
+}
+
+/** The errors the core built around a carried value: the LocalCallbackError's message, by error. */
+const carriedCauses = new WeakMap<object, string>();
+
+/**
+ * Whether a native error's fields are a carried JS value's.
+ *
+ * @param fields - the native error's fields
+ * @returns whether they carry one
+ */
+function isCarried(fields: unknown): fields is NativeError {
+  return typeof fields === 'object' && fields !== null && Object.hasOwn(fields, 'carried');
+}
+
+/**
+ * The message of the LocalCallbackError an error the core reported holds as
+ * its cause, when that cause carried a JS value (which is now the error's
+ * `cause`); `undefined` for any other error.
+ *
+ * @param error - an error the core reported
+ * @returns the LocalCallbackError's message, or undefined
+ */
+export function carriedCause(error: unknown): string | undefined {
+  return typeof error === 'object' && error !== null ? carriedCauses.get(error) : undefined;
 }
 
 let classes: ErrorClass[] | null = null;
@@ -140,6 +167,7 @@ export function errorFfiId(error: unknown): number | undefined {
  */
 export function fromNative(fields: unknown): unknown {
   if (fields instanceof Error || fields === null || typeof fields !== 'object') return fields;
+  if (isCarried(fields)) return fields.carried;
   const reported = fields as NativeError;
   const cause = reported.cause === undefined || reported.cause === null ? undefined : fromNative(reported.cause);
   if (reported.code === LOCAL_NULL_POINTER) {
@@ -148,7 +176,9 @@ export function fromNative(fields: unknown): unknown {
   }
   let cls = classForFfiId(reported.code);
   if (reported.code === UNKNOWN_SERVER_ERROR && reported.apiError !== true) cls = KafkaError;
-  return create(cls, reported.message ?? '', cause, reported.code, reported.payload);
+  const error = create(cls, reported.message ?? '', cause, reported.code, reported.payload);
+  if (isCarried(reported.cause)) carriedCauses.set(error, reported.cause.message ?? '');
+  return error;
 }
 
 /**

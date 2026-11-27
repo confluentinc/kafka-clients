@@ -1099,8 +1099,20 @@ async function consumerUsage(): Promise<void> {
   await consumer.subscribe(new SubscriptionPattern({ pattern: 't.*' }));
   // @ts-expect-error a RegExp is no pattern
   await consumer.subscribe({ pattern: /t.*/ });
-  // @ts-expect-error the listener forms come with the listeners
+  // The listener forms, a listener without onPartitionsLost included.
   await consumer.subscribe({ topics: ['t'], callback: listener });
+  await consumer.subscribe({ pattern: new SubscriptionPattern({ pattern: 't.*' }), callback: listener });
+  await consumer.subscribe({ topics: ['t'], callback: { onPartitionsRevoked: () => undefined, onPartitionsAssigned: () => undefined } });
+  await consumer.subscribe({
+    topics: ['t'],
+    callback: { onPartitionsRevoked: () => undefined, onPartitionsAssigned: () => undefined, onPartitionsLost: async () => undefined },
+  });
+  // @ts-expect-error a null listener: Java's is non-null
+  await consumer.subscribe({ topics: ['t'], callback: null });
+  // @ts-expect-error a null listener: Java's is non-null
+  await consumer.subscribe({ pattern: new SubscriptionPattern({ pattern: 't.*' }), callback: null });
+  // @ts-expect-error a listener is no bare second argument
+  await consumer.subscribe(['t'], listener);
   // @ts-expect-error topics and pattern are two forms
   await consumer.subscribe({ topics: ['t'], pattern: new SubscriptionPattern({ pattern: 't.*' }) });
   const tp = new TopicPartition({ topic: 't', partition: 0 });

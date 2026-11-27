@@ -46,6 +46,18 @@
 // waits and lets the handle object be collected (cbq_closed). The handle
 // object's finalizer destroys only a closed consumer, outside any drain,
 // running no JS.
+//
+// The listeners, the commit callbacks and the window: a rebalance listener's
+// methods (Listener) and an OffsetCommitCallback run on the JS thread, inside
+// the drain of the waiting call that delivers them, and each reports once,
+// through __set_callback_result, at once or, for a Promise, once it settled
+// (Deferred). While a report is pending (`reports`), every call the
+// ConsumerHandle has goes through it, the handle the core admits while it runs
+// a callback, and every other call goes to the consumer, whose single-owner
+// flag refuses it. The handle is made with the consumer and destroyed after
+// it. A pending report holds the handle object, so the finalizer cannot run
+// before it is made; one the destroy itself runs is made at once, running no
+// JS, and none is made once the destroy has returned (`destroyed`).
 
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -54,17 +66,60 @@
 #include "util.h"
 
 typedef struct Batch Batch;
+typedef struct Listener Listener;
+typedef struct Deferred Deferred;
 
 typedef struct {
     napi_env env;                              // the environment that created it (JS thread)
     kafka_consumer_KafkaConsumer_t* kc;        // owned class handle of a KafkaConsumer, NULL once destroyed
     kafka_consumer_MockConsumer_t* mock;       // owned class handle of a MockConsumer, NULL once destroyed
     kafka_consumer_Consumer_t* view;           // borrowed __as_Consumer view of kc or mock
+    kafka_consumer_ConsumerHandle_t* handle;   // owned reentrancy handle, destroyed after the class handle
     MockRecord* kept;                          // the records added to a mock, held until the destroy
-    InjectedError* injected;                   // the errors JS gave a mock, held while the core holds a copy
+    InjectedError* injected;                   // the JS values the core carries, held while it holds a copy
+    Listener* listener;                        // the listener the core holds, NULL for none
+    Deferred* deferred;                        // the reports waiting for a callback's Promise
+    int reports;                               // the listener and commit callback reports not made yet
+    int destroyed;                             // the class handle's destroy returned: no report from now on
     CallbackQueue queue;                       // notify hook, tsfn, drain, liveness
-    int owners;                                // the handle object and the tsfn
+    int owners;                                // the handle object, the tsfn and each Deferred
 } Consumer;
+
+// A rebalance listener's context, the `self_` of its FFI registration: the
+// functions src/ built for its three methods (src/internal/consumer_calls.ts,
+// listenerRuns), null for a missing required one, which the FFI refused.
+// Held by its subscribe until the core answered it, then by the consumer
+// while the core holds it (Consumer.listener), and by each report pending.
+struct Listener {
+    Consumer* c;
+    napi_ref runs[3];                          // onPartitionsRevoked's, onPartitionsAssigned's, onPartitionsLost's
+    int refs;
+};
+
+// A report waiting for the Promise a callback returned: its two handlers, each
+// owning it until finalized, held strongly until the report, and the handle
+// object, held until the report.
+struct Deferred {
+    Consumer* c;
+    int64_t callback_id;                       // stays in C: the core may number past 2^53
+    Listener* listener;                        // the listener whose method it is, held until the report
+    napi_ref handlers[2];                      // on fulfilled, on rejected
+    napi_ref hold;                             // the consumer's handle object
+    int functions;                             // the handlers not yet finalized
+    int reported;
+    Deferred* prev;
+    Deferred* next;
+};
+
+// The context of a subscribe: its `done`, and the listener it gives the core,
+// kept as the consumer's once the core answers that the subscribe registered
+// it.
+typedef struct {
+    Consumer* c;
+    napi_ref done;
+    Listener* listener;                        // NULL for a subscribe without one
+    int registers;                             // a success replaces the consumer's listener
+} SubscribeCtx;
 
 // A record's headers until its Headers copied them out: what the batch's
 // HeaderSource externals point at.
@@ -118,6 +173,10 @@ static atomic_long stat_buffers_freed;
 static atomic_long stat_sources_made;
 static atomic_long stat_sources_freed;
 static atomic_long stat_copies;
+static atomic_long stat_listeners_made;
+static atomic_long stat_listeners_freed;
+static atomic_long stat_deferrals_made;
+static atomic_long stat_deferrals_freed;
 
 static void consumer_release(Consumer* c) {
     if (--c->owners != 0) return;
@@ -162,6 +221,281 @@ static kafka_consumer_MockConsumer_t* mock_of(napi_env env, Consumer* c) {
     }
     injected_errors_sweep(env, &c->injected);
     return c->mock;
+}
+
+// ---- the listeners' and commit callbacks' reports ---------------------------
+
+static void listener_release(napi_env env, Listener* l) {
+    if (l == NULL || --l->refs != 0) return;
+    for (int i = 0; i < 3; i++) delete_ref(env, &l->runs[i]);
+    free(l);
+    atomic_fetch_add(&stat_listeners_freed, 1);
+}
+
+// The reentrancy handle a call goes through while a listener's or commit
+// callback's report is pending (the window), or NULL: then the call goes to
+// the consumer.
+static const kafka_consumer_ConsumerHandle_t* window_of(const Consumer* c) {
+    return c->reports > 0 ? c->handle : NULL;
+}
+
+// The owned error a callback's failure the binding could not carry is
+// reported with (`text` what failed).
+static kafka_common_Error_t* callback_failure(const char* text) {
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_common_Error_t* report = NULL;
+    kafka_common_Error_t* panic = FFI_SET(report, kafka_common_Error_local_callback_err(text, NULL, NULL, &ffi_err));
+    if (report == NULL) return panic;
+    error_discard(panic);
+    error_stat_made(report);
+    return report;
+}
+
+// The owned error a callback's thrown or rejected `value` is reported with: a
+// LocalCallbackError carrying it (native/mock_values.c), so the value comes
+// back as the same object wherever the core reports it.
+static kafka_common_Error_t* callback_value_error(napi_env env, Consumer* c, napi_value value) {
+    kafka_common_Error_t* report = NULL;
+    if (injected_error_carry(env, &c->injected, value, &report) == 0) return report;
+    js_warn_thrown(env);
+    return callback_failure("the callback's error could not be kept");
+}
+
+static void deferred_unlink(Deferred* d) {
+    Consumer* c = d->c;
+    if (d->prev != NULL) d->prev->next = d->next;
+    else c->deferred = d->next;
+    if (d->next != NULL) d->next->prev = d->prev;
+    d->prev = NULL;
+    d->next = NULL;
+}
+
+// The one report of a callback whose Promise settled: `rejected` with the
+// value `reason`, or fulfilled. A no-op once reported. No report once the
+// destroy has returned (line 150 of javascript/CLAUDE.md): it is dropped.
+// `js` is false in a finalizer, where no JS runs: the report is then a
+// fulfilled one, and the handlers' references are the runtime's to drop.
+static void deferred_report(napi_env env, Deferred* d, int rejected, napi_value reason, int js) {
+    if (d->reported) return;
+    d->reported = 1;
+    deferred_unlink(d);
+    Consumer* c = d->c;
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_common_Error_t* report = js && rejected && !c->destroyed ? callback_value_error(env, c, reason) : NULL;
+    if (!c->destroyed) {
+        error_stat_given(report);
+        error_warn(env, js, FFI_ERR(kafka_consumer_Consumer__set_callback_result_err(c->view, d->callback_id, NULL, report, &ffi_err)));
+    } else {
+        error_discard(report);
+    }
+    c->reports--;
+    if (js) {
+        delete_ref(env, &d->handlers[0]);
+        delete_ref(env, &d->handlers[1]);
+        delete_ref(env, &d->hold);
+    }
+    listener_release(env, d->listener);
+    d->listener = NULL;
+}
+
+// Reports every callback still waiting for its Promise as fulfilled, before
+// the destroy, which waits for their reports: no JS will settle them once the
+// handle object is finalized.
+static void deferred_report_all(napi_env env, Consumer* c) {
+    while (c->deferred != NULL) deferred_report(env, c->deferred, 0, NULL, 0);
+}
+
+static napi_value js_callback_fulfilled(napi_env env, napi_callback_info info) {
+    void* data = NULL;
+    if (napi_get_cb_info(env, info, NULL, NULL, NULL, &data) == napi_ok && data != NULL)
+        deferred_report(env, (Deferred*)data, 0, NULL, 1);
+    return NULL;
+}
+
+static napi_value js_callback_rejected(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value argv[1] = {NULL};
+    void* data = NULL;
+    if (napi_get_cb_info(env, info, &argc, argv, NULL, &data) != napi_ok || data == NULL) return NULL;
+    if (argv[0] == NULL && napi_get_undefined(env, &argv[0]) != napi_ok) return NULL;
+    deferred_report(env, (Deferred*)data, 1, argv[0], 1);
+    return NULL;
+}
+
+// A handler's finalizer. It is held strongly until the report, so it runs
+// before one only at an environment teardown, when no JS will settle the
+// Promise: the report is then made as fulfilled, so the call waiting for it
+// ends. The last one frees the context and its unit of the consumer struct.
+static void deferred_finalize(napi_env env, void* data, void* hint) {
+    Deferred* d = (Deferred*)data;
+    // The reference to this very handler is the runtime's to drop.
+    d->handlers[(intptr_t)hint] = NULL;
+    deferred_report(env, d, 0, NULL, 0);
+    if (--d->functions != 0) return;
+    Consumer* c = d->c;
+    free(d);
+    atomic_fetch_add(&stat_deferrals_freed, 1);
+    consumer_release(c);
+}
+
+// Defers the report of the callback whose JS side returned `promise`, a
+// Promise src/ made (Promise.resolve, or Promise.reject for a throw), until it
+// settles: `promise.then(onFulfilled, onRejected)`, at once, so no rejection
+// is left unhandled. Returns -1, nothing deferred, when a Node-API call failed
+// before a handler was registered; the report is then made at once.
+static int deferred_new(napi_env env, Consumer* c, napi_value promise, int64_t callback_id, Listener* l) {
+    Deferred* d = (Deferred*)calloc(1, sizeof(Deferred));
+    napi_value then, fns[2], obj, ignored;
+    if (d == NULL || napi_get_named_property(env, promise, "then", &then) != napi_ok
+        || napi_create_function(env, "onFulfilled", NAPI_AUTO_LENGTH, js_callback_fulfilled, d, &fns[0]) != napi_ok
+        || napi_create_function(env, "onRejected", NAPI_AUTO_LENGTH, js_callback_rejected, d, &fns[1]) != napi_ok
+        || napi_get_reference_value(env, c->queue.self_ref, &obj) != napi_ok || obj == NULL
+        || napi_create_reference(env, obj, 1, &d->hold) != napi_ok
+        || napi_create_reference(env, fns[0], 1, &d->handlers[0]) != napi_ok
+        || napi_create_reference(env, fns[1], 1, &d->handlers[1]) != napi_ok) {
+        if (d != NULL) {
+            delete_ref(env, &d->hold);
+            delete_ref(env, &d->handlers[0]);
+            delete_ref(env, &d->handlers[1]);
+            free(d);
+        }
+        js_warn_thrown(env);
+        return -1;
+    }
+    d->c = c;
+    d->callback_id = callback_id;
+    d->listener = l;
+    if (l != NULL) l->refs++;
+    d->next = c->deferred;
+    if (c->deferred != NULL) c->deferred->prev = d;
+    c->deferred = d;
+    c->owners++;
+    atomic_fetch_add(&stat_deferrals_made, 1);
+    for (intptr_t i = 0; i < 2; i++) {
+        if (napi_add_finalizer(env, fns[i], d, deferred_finalize, (void*)i, NULL) == napi_ok) {
+            d->functions++;
+        } else {
+            // This handler frees nothing: its reference goes.
+            delete_ref(env, &d->handlers[i]);
+            js_warn_thrown(env);
+        }
+    }
+    if (d->functions == 0 || napi_call_function(env, promise, then, 2, fns, &ignored) != napi_ok) {
+        // Never called back: reported now as a failure.
+        js_warn_thrown(env);
+        napi_value reason = NULL;
+        napi_get_undefined(env, &reason);
+        deferred_report(env, d, 1, reason, 1);
+    }
+    if (d->functions == 0) {
+        free(d);
+        atomic_fetch_add(&stat_deferrals_freed, 1);
+        c->owners--;
+    }
+    return 0;
+}
+
+// What a listener method's or commit callback's JS side answered, `result`
+// from call_ref (NULL when src/ failed, `thrown` its text): 1 when its report
+// waits for the Promise it returned (deferred_new), else 0, `*report` the
+// error to report, NULL for none.
+static int callback_answer(napi_env env, Consumer* c, napi_value result, char* thrown, int64_t callback_id, Listener* l,
+                           kafka_common_Error_t** report) {
+    *report = NULL;
+    if (result == NULL) {
+        *report = callback_failure(thrown != NULL ? thrown : "the callback could not be run");
+        free(thrown);
+        return 0;
+    }
+    free(thrown);
+    bool is_promise = false;
+    if (napi_is_promise(env, result, &is_promise) != napi_ok || !is_promise) return 0;
+    if (deferred_new(env, c, result, callback_id, l) == 0) return 1;
+    *report = callback_failure("the callback's Promise could not be awaited");
+    return 0;
+}
+
+// The run the listener's three methods hand their invocation to: it runs the
+// method's JS side once, with the partitions as [topic, partition] pairs read
+// from the borrowed, sorted list, then reports once, at once or once the
+// Promise it returned settled. A run the destroy makes runs no JS and reports
+// at once.
+static void listener_invoke(Listener* l, int method, const kafka_List_t* partitions, int64_t callback_id) {
+    Consumer* c = l->c;
+    napi_env env = c->env;
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_common_Error_t* report = NULL;
+    // The window opens: a call made until the report goes through the handle.
+    c->reports++;
+    if (!c->queue.finalizing) {
+        injected_errors_sweep(env, &c->injected);
+        char* thrown = NULL;
+        napi_value pairs = tp_list_to_js(env, partitions);
+        napi_value result = pairs != NULL ? call_ref(env, l->runs[method], 1, &pairs, &thrown) : NULL;
+        if (pairs == NULL) js_warn_thrown(env);
+        if (callback_answer(env, c, result, thrown, callback_id, l, &report) == 1) return;
+    }
+    if (!c->destroyed) {
+        error_stat_given(report);
+        error_warn(env, !c->queue.finalizing,
+                   FFI_ERR(kafka_consumer_Consumer__set_callback_result_err(c->view, callback_id, NULL, report, &ffi_err)));
+    } else {
+        error_discard(report);
+    }
+    c->reports--;
+}
+
+static void listener_on_revoked(void* self_, const kafka_List_t* partitions, int64_t callback_id) {
+    listener_invoke((Listener*)self_, 0, partitions, callback_id);
+}
+
+static void listener_on_assigned(void* self_, const kafka_List_t* partitions, int64_t callback_id) {
+    listener_invoke((Listener*)self_, 1, partitions, callback_id);
+}
+
+static void listener_on_lost(void* self_, const kafka_List_t* partitions, int64_t callback_id) {
+    listener_invoke((Listener*)self_, 2, partitions, callback_id);
+}
+
+// The listener `runs` (src/'s three functions, the first two null for a
+// missing required method) as a context and its FFI registration, *handle,
+// which the subscribe copies: a missing required method goes as NULL, which
+// the FFI refuses with its LocalNullPointerError, thrown as a TypeError.
+// NULL with a JS exception pending on failure.
+static Listener* listener_new(napi_env env, Consumer* c, napi_value runs, kafka_consumer_ConsumerRebalanceListener_t** handle) {
+    *handle = NULL;
+    Listener* l = (Listener*)calloc(1, sizeof(Listener));
+    if (l == NULL) {
+        napi_throw_error(env, NULL, "out of memory");
+        return NULL;
+    }
+    l->c = c;
+    l->refs = 1;
+    atomic_fetch_add(&stat_listeners_made, 1);
+    for (uint32_t i = 0; i < 3; i++) {
+        napi_value fn;
+        if (napi_get_element(env, runs, i, &fn) != napi_ok || (is_function(env, fn) && napi_create_reference(env, fn, 1, &l->runs[i]) != napi_ok)) {
+            listener_release(env, l);
+            js_throw_last_napi_error(env, "reading the listener");
+            return NULL;
+        }
+    }
+    kafka_common_Error_t* ffi_err = NULL;
+    kafka_common_Error_t* err = FFI_SET(*handle, kafka_consumer_ConsumerRebalanceListener_new_err(
+                                                     l, l->runs[0] != NULL ? listener_on_revoked : NULL,
+                                                     l->runs[1] != NULL ? listener_on_assigned : NULL, listener_on_lost, &ffi_err));
+    if (err != NULL) {
+        listener_release(env, l);
+        error_throw_owned(env, err);
+        return NULL;
+    }
+    return l;
+}
+
+// Destroys the FFI registration of a listener once the subscribe copied it.
+static void listener_handle_free(napi_env env, kafka_consumer_ConsumerRebalanceListener_t* handle) {
+    kafka_common_Error_t* ffi_err = NULL;
+    if (handle != NULL) error_warn(env, 1, FFI_ERR(kafka_consumer_ConsumerRebalanceListener_destroy_err(handle, &ffi_err)));
 }
 
 // ---- the batch --------------------------------------------------------------
@@ -581,14 +915,82 @@ static void strings_free(char** strings, uint32_t count) {
     free(strings);
 }
 
-// consumerSubscribeTopics(handle, topics, done): Java's
-// subscribe(Collection) through subscribe_with_topics_cb; `topics` an array
-// of strings, or null.
+// The subscribe completion: a success the core registered replaces the
+// consumer's listener with the subscribe's (none for a subscribe without
+// one); a failure, and a KafkaConsumer's empty topic list (unsubscribe()),
+// keep the consumer's and let go of the subscribe's, as the FFI's subscribe
+// docs give their lifetimes.
+static void subscribe_on_complete(kafka_common_Error_t* error, void* opaque) {
+    error_stat_owned(error);
+    SubscribeCtx* ctx = (SubscribeCtx*)opaque;
+    Consumer* c = ctx->c;
+    napi_env env = c->env;
+    if (error == NULL && ctx->registers) {
+        listener_release(env, c->listener);
+        c->listener = ctx->listener;
+        ctx->listener = NULL;
+    }
+    listener_release(env, ctx->listener);
+    if (!c->queue.finalizing) {
+        napi_value arg = error_take_to_js(env, error);
+        error = NULL;
+        if (arg == NULL) arg = js_take_failure(env, "converting a subscribe's answer");
+        if (arg != NULL) call_ref(env, ctx->done, 1, &arg, NULL);
+        else js_warn_thrown(env);
+    }
+    error_discard(error);
+    delete_ref(env, &ctx->done);
+    free(ctx);
+    cbq_call_end(env, &c->queue);
+}
+
+// What both subscribes read: (handle, ..., withListener, runs, done), `runs`
+// at argv[runs_at], as a subscribe context, its listener (none without
+// `withListener`) and the listener's FFI registration, NULL for a null
+// listener, which the FFI refuses. NULL with a JS exception pending.
+static SubscribeCtx* subscribe_ctx_new(napi_env env, Consumer* c, napi_value* argv, size_t runs_at,
+                                       kafka_consumer_ConsumerRebalanceListener_t** handle) {
+    bool with_listener = false;
+    *handle = NULL;
+    NAPI_CHECK(env, napi_get_value_bool(env, argv[runs_at - 1], &with_listener), NULL);
+    napi_valuetype type;
+    NAPI_CHECK(env, napi_typeof(env, argv[runs_at], &type), NULL);
+    Listener* l = NULL;
+    if (with_listener && type != napi_null && (l = listener_new(env, c, argv[runs_at], handle)) == NULL) return NULL;
+    SubscribeCtx* ctx = (SubscribeCtx*)calloc(1, sizeof(SubscribeCtx));
+    if (ctx == NULL || napi_create_reference(env, argv[runs_at + 1], 1, &ctx->done) != napi_ok) {
+        free(ctx);
+        listener_release(env, l);
+        listener_handle_free(env, *handle);
+        *handle = NULL;
+        js_throw_last_napi_error(env, "napi_create_reference");
+        return NULL;
+    }
+    ctx->c = c;
+    ctx->listener = l;
+    ctx->registers = 1;
+    return ctx;
+}
+
+// consumerSubscribeTopics(handle, topics, withListener, runs, done): Java's
+// subscribe(Collection) through subscribe_with_topics_cb, or with
+// `withListener` subscribe(Collection, ConsumerRebalanceListener) through
+// subscribe_with_topics_listener_cb; `topics` an array of strings, or null;
+// `runs` the listener's three methods (listener_new), or null for a null
+// listener.
 napi_value js_consumer_subscribe_topics(napi_env env, napi_callback_info info) {
-    napi_value argv[3];
-    int is_null = 0;
-    Consumer* c = list_call_args(env, info, "subscribeTopics(handle, topics, done)", argv, &is_null);
+    size_t argc = 5;
+    napi_value argv[5];
+    NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
+    if (argc != 5 || !is_function(env, argv[4])) {
+        napi_throw_type_error(env, NULL, "subscribeTopics(handle, topics, withListener, runs, done)");
+        return NULL;
+    }
+    Consumer* c = unwrap_consumer(env, argv[0]);
     if (c == NULL) return NULL;
+    napi_valuetype type;
+    NAPI_CHECK(env, napi_typeof(env, argv[1], &type), NULL);
+    int is_null = type == napi_null;
     char** strings = NULL;
     uint32_t count = 0;
     kafka_List_t* topics = is_null ? NULL : string_list_from_js(env, argv[1], &strings, &count);
@@ -596,28 +998,45 @@ napi_value js_consumer_subscribe_topics(napi_env env, napi_callback_info info) {
         strings_free(strings, count);
         return NULL;
     }
-    CallCtx* ctx = call_ctx_new(env, c, argv[2]);
+    kafka_consumer_ConsumerRebalanceListener_t* listener = NULL;
+    SubscribeCtx* ctx = subscribe_ctx_new(env, c, argv, 3, &listener);
     if (ctx != NULL) {
-        cbq_call_begin(env, &c->queue);
-        kafka_consumer_Consumer_subscribe_with_topics_cb(c->view, topics, void_on_complete, ctx);
+        // A KafkaConsumer's empty topic list is unsubscribe(): it registers no listener.
+        ctx->registers = !(c->kc != NULL && topics != NULL && count == 0);
+        bool with_listener = false;
+        napi_get_value_bool(env, argv[2], &with_listener);
+        if (!with_listener) {
+            cbq_call_begin(env, &c->queue);
+            kafka_consumer_Consumer_subscribe_with_topics_cb(c->view, topics, subscribe_on_complete, ctx);
+        } else {
+            cbq_call_begin(env, &c->queue);
+            kafka_consumer_Consumer_subscribe_with_topics_listener_cb(c->view, topics, listener, subscribe_on_complete, ctx);
+        }
     }
-    // The list borrows the strings, which the call copied.
+    // The call copied the listener's registration, and the list borrows the
+    // strings, which it copied too.
+    listener_handle_free(env, listener);
     list_free(env, topics, NULL);
     strings_free(strings, count);
     return NULL;
 }
 
-// consumerSubscribePattern(handle, given, pattern, done): Java's
-// subscribe(SubscriptionPattern) through subscribe_with_pattern_cb: `given`
-// false for a null SubscriptionPattern, which crosses as NULL, else `pattern`
-// its string, a null one crossing as NULL to SubscriptionPattern_new.
+// consumerSubscribePattern(handle, given, pattern, withListener, runs, done):
+// Java's subscribe(SubscriptionPattern) through subscribe_with_pattern_cb, or
+// with `withListener` subscribe(SubscriptionPattern,
+// ConsumerRebalanceListener) through subscribe_with_pattern_listener_cb:
+// `given` false for a null SubscriptionPattern, which crosses as NULL, else
+// `pattern` its string, a null one crossing as NULL to
+// SubscriptionPattern_new; `runs` as for consumerSubscribeTopics.
 napi_value js_consumer_subscribe_pattern(napi_env env, napi_callback_info info) {
-    size_t argc = 4;
-    napi_value argv[4];
+    size_t argc = 6;
+    napi_value argv[6];
     NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
     bool given = false;
-    if (argc != 4 || napi_get_value_bool(env, argv[1], &given) != napi_ok || !is_function(env, argv[3])) {
-        napi_throw_type_error(env, NULL, "subscribePattern(handle, given, pattern, done)");
+    bool with_listener = false;
+    if (argc != 6 || napi_get_value_bool(env, argv[1], &given) != napi_ok || napi_get_value_bool(env, argv[3], &with_listener) != napi_ok
+        || !is_function(env, argv[5])) {
+        napi_throw_type_error(env, NULL, "subscribePattern(handle, given, pattern, withListener, runs, done)");
         return NULL;
     }
     Consumer* c = unwrap_consumer(env, argv[0]);
@@ -636,12 +1055,17 @@ napi_value js_consumer_subscribe_pattern(napi_env env, napi_callback_info info) 
             return NULL;
         }
     }
-    CallCtx* ctx = call_ctx_new(env, c, argv[3]);
-    if (ctx != NULL) {
+    kafka_consumer_ConsumerRebalanceListener_t* listener = NULL;
+    SubscribeCtx* ctx = subscribe_ctx_new(env, c, argv, 4, &listener);
+    if (ctx != NULL && !with_listener) {
         cbq_call_begin(env, &c->queue);
-        kafka_consumer_Consumer_subscribe_with_pattern_cb(c->view, pattern, void_on_complete, ctx);
+        kafka_consumer_Consumer_subscribe_with_pattern_cb(c->view, pattern, subscribe_on_complete, ctx);
+    } else if (ctx != NULL) {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_Consumer_subscribe_with_pattern_listener_cb(c->view, pattern, listener, subscribe_on_complete, ctx);
     }
-    // The call copied the pattern.
+    // The call copied the pattern and the listener's registration.
+    listener_handle_free(env, listener);
     if (pattern != NULL) error_warn(env, 1, FFI_ERR(kafka_consumer_SubscriptionPattern_destroy_err(pattern, &ffi_err)));
     return NULL;
 }
@@ -669,7 +1093,21 @@ static napi_value tp_call(napi_env env, napi_callback_info info, TpCall which, c
     kafka_List_t* partitions = is_null ? NULL : tp_list_from_js(env, argv[1]);
     if (!is_null && partitions == NULL) return NULL;
     CallCtx* ctx = call_ctx_new(env, c, argv[2]);
-    if (ctx != NULL) {
+    // assign and the mock's own calls are not the handle's: they go to the consumer.
+    const kafka_consumer_ConsumerHandle_t* h = window_of(c);
+    if (ctx != NULL && h != NULL && which == TP_PAUSE) {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_ConsumerHandle_pause_cb(h, partitions, void_on_complete, ctx);
+    } else if (ctx != NULL && h != NULL && which == TP_RESUME) {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_ConsumerHandle_resume_cb(h, partitions, void_on_complete, ctx);
+    } else if (ctx != NULL && h != NULL && which == TP_SEEK_TO_BEGINNING) {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_ConsumerHandle_seek_to_beginning_cb(h, partitions, void_on_complete, ctx);
+    } else if (ctx != NULL && h != NULL && which == TP_SEEK_TO_END) {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_ConsumerHandle_seek_to_end_cb(h, partitions, void_on_complete, ctx);
+    } else if (ctx != NULL) {
         if (which == TP_ASSIGN) {
             cbq_call_begin(env, &c->queue);
             kafka_consumer_Consumer_assign_cb(c->view, partitions, void_on_complete, ctx);
@@ -773,7 +1211,9 @@ napi_value js_consumer_assignment(napi_env env, napi_callback_info info) {
     if (c == NULL) return NULL;
     kafka_common_Error_t* ffi_err = NULL;
     kafka_List_t* list = NULL;
-    kafka_common_Error_t* err = FFI_SET(list, kafka_consumer_Consumer_assignment(c->view, &ffi_err));
+    const kafka_consumer_ConsumerHandle_t* h = window_of(c);
+    kafka_common_Error_t* err = h != NULL ? FFI_SET(list, kafka_consumer_ConsumerHandle_assignment_err(h, &ffi_err))
+                                          : FFI_SET(list, kafka_consumer_Consumer_assignment(c->view, &ffi_err));
     if (err != NULL) {
         error_throw_owned(env, err);
         return NULL;
@@ -787,7 +1227,9 @@ napi_value js_consumer_paused(napi_env env, napi_callback_info info) {
     if (c == NULL) return NULL;
     kafka_common_Error_t* ffi_err = NULL;
     kafka_List_t* list = NULL;
-    kafka_common_Error_t* err = FFI_SET(list, kafka_consumer_Consumer_paused(c->view, &ffi_err));
+    const kafka_consumer_ConsumerHandle_t* h = window_of(c);
+    kafka_common_Error_t* err = h != NULL ? FFI_SET(list, kafka_consumer_ConsumerHandle_paused_err(h, &ffi_err))
+                                          : FFI_SET(list, kafka_consumer_Consumer_paused(c->view, &ffi_err));
     if (err != NULL) {
         error_throw_owned(env, err);
         return NULL;
@@ -835,7 +1277,9 @@ napi_value js_consumer_wakeup(napi_env env, napi_callback_info info) {
     Consumer* c = handle_arg(env, info, "wakeup(handle)");
     if (c == NULL) return NULL;
     kafka_common_Error_t* ffi_err = NULL;
-    kafka_common_Error_t* err = FFI_ERR(kafka_consumer_Consumer_wakeup_err(c->view, &ffi_err));
+    const kafka_consumer_ConsumerHandle_t* h = window_of(c);
+    kafka_common_Error_t* err = h != NULL ? FFI_ERR(kafka_consumer_ConsumerHandle_wakeup_err(h, &ffi_err))
+                                          : FFI_ERR(kafka_consumer_Consumer_wakeup_err(c->view, &ffi_err));
     if (err != NULL) error_throw_owned(env, err);
     return NULL;
 }
@@ -893,7 +1337,22 @@ napi_value js_consumer_commit_sync(napi_env env, napi_callback_info info) {
     kafka_Map_t* offsets = NULL;
     if (with_offsets && type != napi_null && (offsets = offset_map_from_js(env, argv[2])) == NULL) return NULL;
     CallCtx* ctx = call_ctx_new(env, c, argv[4]);
-    if (ctx != NULL) {
+    const kafka_consumer_ConsumerHandle_t* h = window_of(c);
+    if (ctx != NULL && h != NULL) {
+        if (!with_offsets && !timed) {
+            cbq_call_begin(env, &c->queue);
+            kafka_consumer_ConsumerHandle_commit_sync_cb(h, void_on_complete, ctx);
+        } else if (!with_offsets) {
+            cbq_call_begin(env, &c->queue);
+            kafka_consumer_ConsumerHandle_commit_sync_with_timeout_cb(h, timeout, void_on_complete, ctx);
+        } else if (!timed) {
+            cbq_call_begin(env, &c->queue);
+            kafka_consumer_ConsumerHandle_commit_sync_with_offsets_cb(h, offsets, void_on_complete, ctx);
+        } else {
+            cbq_call_begin(env, &c->queue);
+            kafka_consumer_ConsumerHandle_commit_sync_with_offsets_timeout_cb(h, offsets, timeout, void_on_complete, ctx);
+        }
+    } else if (ctx != NULL) {
         if (!with_offsets && !timed) {
             cbq_call_begin(env, &c->queue);
             kafka_consumer_Consumer_commit_sync_cb(c->view, void_on_complete, ctx);
@@ -927,8 +1386,14 @@ napi_value js_consumer_commit_async(napi_env env, napi_callback_info info) {
     if (c == NULL) return NULL;
     CallCtx* ctx = call_ctx_new(env, c, argv[1]);
     if (ctx == NULL) return NULL;
-    cbq_call_begin(env, &c->queue);
-    kafka_consumer_Consumer_commit_async_cb(c->view, void_on_complete, ctx);
+    const kafka_consumer_ConsumerHandle_t* h = window_of(c);
+    if (h != NULL) {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_ConsumerHandle_commit_async_cb(h, void_on_complete, ctx);
+    } else {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_Consumer_commit_async_cb(c->view, void_on_complete, ctx);
+    }
     return NULL;
 }
 
@@ -997,7 +1462,14 @@ napi_value js_consumer_committed(napi_env env, napi_callback_info info) {
     kafka_List_t* partitions = type == napi_null ? NULL : tp_list_from_js(env, argv[1]);
     if (type != napi_null && partitions == NULL) return NULL;
     CallCtx* ctx = call_ctx_new(env, c, argv[3]);
-    if (ctx != NULL && !timed) {
+    const kafka_consumer_ConsumerHandle_t* h = window_of(c);
+    if (ctx != NULL && h != NULL && !timed) {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_ConsumerHandle_committed_cb(h, partitions, committed_on_complete, ctx);
+    } else if (ctx != NULL && h != NULL) {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_ConsumerHandle_committed_with_timeout_cb(h, partitions, timeout, committed_on_complete, ctx);
+    } else if (ctx != NULL && !timed) {
         cbq_call_begin(env, &c->queue);
         kafka_consumer_Consumer_committed_cb(c->view, partitions, committed_on_complete, ctx);
     } else if (ctx != NULL) {
@@ -1015,7 +1487,9 @@ napi_value js_consumer_group_metadata(napi_env env, napi_callback_info info) {
     if (c == NULL) return NULL;
     kafka_common_Error_t* ffi_err = NULL;
     kafka_consumer_ConsumerGroupMetadata_t* m = NULL;
-    kafka_common_Error_t* err = FFI_SET(m, kafka_consumer_Consumer_group_metadata(c->view, &ffi_err));
+    const kafka_consumer_ConsumerHandle_t* h = window_of(c);
+    kafka_common_Error_t* err = h != NULL ? FFI_SET(m, kafka_consumer_ConsumerHandle_group_metadata_err(h, &ffi_err))
+                                          : FFI_SET(m, kafka_consumer_Consumer_group_metadata(c->view, &ffi_err));
     if (err != NULL) {
         error_throw_owned(env, err);
         return NULL;
@@ -1098,7 +1572,14 @@ napi_value js_consumer_seek(napi_env env, napi_callback_info info) {
         return NULL;
     }
     CallCtx* ctx = call_ctx_new(env, c, argv[4]);
-    if (ctx != NULL && !with_metadata) {
+    const kafka_consumer_ConsumerHandle_t* h = window_of(c);
+    if (ctx != NULL && h != NULL && !with_metadata) {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_ConsumerHandle_seek_with_offset_cb(h, tp, offset, void_on_complete, ctx);
+    } else if (ctx != NULL && h != NULL) {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_ConsumerHandle_seek_with_offset_and_metadata_cb(h, tp, om, void_on_complete, ctx);
+    } else if (ctx != NULL && !with_metadata) {
         cbq_call_begin(env, &c->queue);
         kafka_consumer_Consumer_seek_with_offset_cb(c->view, tp, offset, void_on_complete, ctx);
     } else if (ctx != NULL) {
@@ -1151,7 +1632,14 @@ napi_value js_consumer_position(napi_env env, napi_callback_info info) {
     kafka_common_TopicPartition_t* tp = NULL;
     if (partition_arg(env, argv[1], &tp) != 0) return NULL;
     CallCtx* ctx = call_ctx_new(env, c, argv[3]);
-    if (ctx != NULL && !timed) {
+    const kafka_consumer_ConsumerHandle_t* h = window_of(c);
+    if (ctx != NULL && h != NULL && !timed) {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_ConsumerHandle_position_cb(h, tp, position_on_complete, ctx);
+    } else if (ctx != NULL && h != NULL) {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_ConsumerHandle_position_with_timeout_cb(h, tp, timeout, position_on_complete, ctx);
+    } else if (ctx != NULL && !timed) {
         cbq_call_begin(env, &c->queue);
         kafka_consumer_Consumer_position_cb(c->view, tp, position_on_complete, ctx);
     } else if (ctx != NULL) {
@@ -1200,7 +1688,11 @@ napi_value js_consumer_current_lag(napi_env env, napi_callback_info info) {
     kafka_common_TopicPartition_t* tp = NULL;
     if (partition_arg(env, argv[1], &tp) != 0) return NULL;
     CallCtx* ctx = call_ctx_new(env, c, argv[2]);
-    if (ctx != NULL) {
+    const kafka_consumer_ConsumerHandle_t* h = window_of(c);
+    if (ctx != NULL && h != NULL) {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_ConsumerHandle_current_lag_cb(h, tp, current_lag_on_complete, ctx);
+    } else if (ctx != NULL) {
         cbq_call_begin(env, &c->queue);
         kafka_consumer_Consumer_current_lag_cb(c->view, tp, current_lag_on_complete, ctx);
     }
@@ -1257,7 +1749,14 @@ napi_value js_consumer_partitions_for(napi_env env, napi_callback_info info) {
     char* topic = type == napi_null ? NULL : js_string_dup(env, argv[1], "topic must be a string");
     if (type != napi_null && topic == NULL) return NULL;
     CallCtx* ctx = call_ctx_new(env, c, argv[3]);
-    if (ctx != NULL && !timed) {
+    const kafka_consumer_ConsumerHandle_t* h = window_of(c);
+    if (ctx != NULL && h != NULL && !timed) {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_ConsumerHandle_partitions_for_cb(h, topic, partitions_for_on_complete, ctx);
+    } else if (ctx != NULL && h != NULL) {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_ConsumerHandle_partitions_for_with_timeout_cb(h, topic, timeout, partitions_for_on_complete, ctx);
+    } else if (ctx != NULL && !timed) {
         cbq_call_begin(env, &c->queue);
         kafka_consumer_Consumer_partitions_for_cb(c->view, topic, partitions_for_on_complete, ctx);
     } else if (ctx != NULL) {
@@ -1330,7 +1829,14 @@ napi_value js_consumer_list_topics(napi_env env, napi_callback_info info) {
     if (timeout_arg(env, argv[1], "listTopics timeoutMs", &timed, &timeout) != 0) return NULL;
     CallCtx* ctx = call_ctx_new(env, c, argv[2]);
     if (ctx == NULL) return NULL;
-    if (!timed) {
+    const kafka_consumer_ConsumerHandle_t* h = window_of(c);
+    if (h != NULL && !timed) {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_ConsumerHandle_list_topics_cb(h, list_topics_on_complete, ctx);
+    } else if (h != NULL) {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_ConsumerHandle_list_topics_with_timeout_cb(h, timeout, list_topics_on_complete, ctx);
+    } else if (!timed) {
         cbq_call_begin(env, &c->queue);
         kafka_consumer_Consumer_list_topics_cb(c->view, list_topics_on_complete, ctx);
     } else {
@@ -1434,7 +1940,14 @@ napi_value js_consumer_offsets_for_times(napi_env env, napi_callback_info info) 
     kafka_Map_t* timestamps = type == napi_null ? NULL : tp_long_map_from_js(env, argv[1]);
     if (type != napi_null && timestamps == NULL) return NULL;
     CallCtx* ctx = call_ctx_new(env, c, argv[3]);
-    if (ctx != NULL && !timed) {
+    const kafka_consumer_ConsumerHandle_t* h = window_of(c);
+    if (ctx != NULL && h != NULL && !timed) {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_ConsumerHandle_offsets_for_times_cb(h, timestamps, offsets_for_times_on_complete, ctx);
+    } else if (ctx != NULL && h != NULL) {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_ConsumerHandle_offsets_for_times_with_timeout_cb(h, timestamps, timeout, offsets_for_times_on_complete, ctx);
+    } else if (ctx != NULL && !timed) {
         cbq_call_begin(env, &c->queue);
         kafka_consumer_Consumer_offsets_for_times_cb(c->view, timestamps, offsets_for_times_on_complete, ctx);
     } else if (ctx != NULL) {
@@ -1468,7 +1981,20 @@ static napi_value offsets_call(napi_env env, napi_callback_info info, int end, c
     kafka_List_t* partitions = type == napi_null ? NULL : tp_list_from_js(env, argv[1]);
     if (type != napi_null && partitions == NULL) return NULL;
     CallCtx* ctx = call_ctx_new(env, c, argv[3]);
-    if (ctx != NULL && !end && !timed) {
+    const kafka_consumer_ConsumerHandle_t* h = window_of(c);
+    if (ctx != NULL && h != NULL && !end && !timed) {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_ConsumerHandle_beginning_offsets_cb(h, partitions, offsets_on_complete, ctx);
+    } else if (ctx != NULL && h != NULL && !end) {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_ConsumerHandle_beginning_offsets_with_timeout_cb(h, partitions, timeout, offsets_on_complete, ctx);
+    } else if (ctx != NULL && h != NULL && !timed) {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_ConsumerHandle_end_offsets_cb(h, partitions, offsets_on_complete, ctx);
+    } else if (ctx != NULL && h != NULL) {
+        cbq_call_begin(env, &c->queue);
+        kafka_consumer_ConsumerHandle_end_offsets_with_timeout_cb(h, partitions, timeout, offsets_on_complete, ctx);
+    } else if (ctx != NULL && !end && !timed) {
         cbq_call_begin(env, &c->queue);
         kafka_consumer_Consumer_beginning_offsets_cb(c->view, partitions, offsets_on_complete, ctx);
     } else if (ctx != NULL && !end) {
@@ -1548,6 +2074,12 @@ static void close_on_complete(kafka_common_Error_t* error, void* opaque) {
         refused = code == kafka_common_Error_LOCAL_CONCURRENT_MODIFICATION || code == kafka_common_Error_LOCAL_NULL_POINTER;
     }
     int closed_now = refused || c->queue.finalizing ? 0 : cbq_closed(env, &c->queue);
+    // A KafkaConsumer lets go of its listener once its close returns; a mock
+    // keeps it until the destroy, as its rebalance() still calls it.
+    if (!refused && c->kc != NULL) {
+        listener_release(env, c->listener);
+        c->listener = NULL;
+    }
     if (!c->queue.finalizing) {
         napi_value argv[2];
         argv[0] = error_take_to_js(env, error);
@@ -1661,14 +2193,23 @@ static void noop_notify(void* opaque) {
 static void consumer_destroy(napi_env env, Consumer* c) {
     kafka_common_Error_t* ffi_err = NULL;
     c->queue.stopped = 1;
+    // The destroy waits for the reports of the callbacks it runs: those still
+    // waiting for a Promise are made now, as no JS will settle them.
+    deferred_report_all(env, c);
     if (c->kc != NULL) error_warn(env, !c->queue.finalizing, FFI_ERR(kafka_consumer_KafkaConsumer_destroy_err(c->kc, &ffi_err)));
     else error_warn(env, !c->queue.finalizing, FFI_ERR(kafka_consumer_MockConsumer_destroy_err(c->mock, &ffi_err)));
+    c->destroyed = 1;
     c->kc = NULL;
     c->mock = NULL;
     c->view = NULL;
-    // The core holds no record or error of a mock's any more.
+    // The handle outlives the class handle, as its docs allow.
+    if (c->handle != NULL) error_warn(env, !c->queue.finalizing, FFI_ERR(kafka_consumer_ConsumerHandle_destroy_err(c->handle, &ffi_err)));
+    c->handle = NULL;
+    // The core holds no record, error or listener of the consumer's any more.
     mock_records_free(env, &c->kept);
     injected_errors_release(env, &c->injected);
+    listener_release(env, c->listener);
+    c->listener = NULL;
     cbq_release(env, &c->queue);
 }
 
@@ -1700,12 +2241,15 @@ static void consumer_finalize(napi_env env, void* data, void* hint) {
 
 // ---- construction -----------------------------------------------------------
 
-// Destroys class handle `kc` or `mock` (one is NULL), on a construction's
-// failure paths, before a handle object, and so a finalizer, exists.
-static void class_destroy(napi_env env, kafka_consumer_KafkaConsumer_t* kc, kafka_consumer_MockConsumer_t* mock) {
+// Destroys class handle `kc` or `mock` (one is NULL), and then its
+// reentrancy handle, on a construction's failure paths, before a handle
+// object, and so a finalizer, exists.
+static void class_destroy(napi_env env, kafka_consumer_KafkaConsumer_t* kc, kafka_consumer_MockConsumer_t* mock,
+                          kafka_consumer_ConsumerHandle_t* handle) {
     kafka_common_Error_t* ffi_err = NULL;
     if (kc != NULL) error_warn(env, 1, FFI_ERR(kafka_consumer_KafkaConsumer_destroy_err(kc, &ffi_err)));
     if (mock != NULL) error_warn(env, 1, FFI_ERR(kafka_consumer_MockConsumer_destroy_err(mock, &ffi_err)));
+    if (handle != NULL) error_warn(env, 1, FFI_ERR(kafka_consumer_ConsumerHandle_destroy_err(handle, &ffi_err)));
 }
 
 // The native handle over class handle `kc` or `mock` (one is NULL), which it
@@ -1716,7 +2260,7 @@ static napi_value consumer_handle_new(napi_env env, kafka_consumer_KafkaConsumer
     kafka_common_Error_t* ffi_err = NULL;
     Consumer* c = (Consumer*)calloc(1, sizeof(Consumer));
     if (c == NULL) {
-        class_destroy(env, kc, mock);
+        class_destroy(env, kc, mock, NULL);
         napi_throw_error(env, NULL, "out of memory");
         return NULL;
     }
@@ -1726,9 +2270,11 @@ static napi_value consumer_handle_new(napi_env env, kafka_consumer_KafkaConsumer
     c->mock = mock;
     kafka_common_Error_t* err = kc != NULL ? FFI_SET(c->view, kafka_consumer_KafkaConsumer__as_Consumer_err(kc, &ffi_err))
                                            : FFI_SET(c->view, kafka_consumer_MockConsumer__as_Consumer_err(mock, &ffi_err));
+    // The reentrancy handle the window's calls go through, made with the consumer.
+    if (err == NULL) err = FFI_SET(c->handle, kafka_consumer_Consumer_handle_err(c->view, &ffi_err));
     if (err != NULL || cbq_init(env, &c->queue, "confluent-kafka consumer callbacks", c, consumer_execute,
                                 consumer_tsfn_finalized) != 0) {
-        class_destroy(env, kc, mock);
+        class_destroy(env, kc, mock, c->handle);
         free(c);
         atomic_fetch_add(&stat_consumers_freed, 1);
         if (err != NULL) error_throw_owned(env, err);
@@ -1750,10 +2296,11 @@ static napi_value consumer_handle_new(napi_env env, kafka_consumer_KafkaConsumer
         err = FFI_ERR(kafka_consumer_Consumer__set_callbacks_notify_err(fault_due(FAULT_NOTIFY) ? NULL : c->view, cbq_notify,
                                                                        &c->queue, &ffi_err));
     if (err != NULL || thrown) {
-        class_destroy(env, kc, mock);
+        class_destroy(env, kc, mock, c->handle);
         c->kc = NULL;
         c->mock = NULL;
         c->view = NULL;
+        c->handle = NULL;
         // The handle object, never handed out, may be collected: its
         // finalizer releases its unit of c, a destroyed client's.
         cbq_detach(env, &c->queue);
@@ -2085,8 +2632,8 @@ static int stat_put(napi_env env, napi_value obj, const char* name, atomic_long*
 }
 
 // consumerStats(): the counts of the consumers, batches, external buffers,
-// header sources and copies made and freed, and the mocks' records and
-// injected errors. Test-only.
+// header sources and copies made and freed, the listeners' contexts and the
+// deferred reports, and the mocks' records and the carried values. Test-only.
 napi_value js_consumer_stats(napi_env env, napi_callback_info info) {
     (void)info;
     napi_value obj;
@@ -2095,7 +2642,9 @@ napi_value js_consumer_stats(napi_env env, napi_callback_info info) {
         || stat_put(env, obj, "batchesMade", &stat_batches_made) || stat_put(env, obj, "batchesDestroyed", &stat_batches_destroyed)
         || stat_put(env, obj, "buffersMade", &stat_buffers_made) || stat_put(env, obj, "buffersFreed", &stat_buffers_freed)
         || stat_put(env, obj, "sourcesMade", &stat_sources_made) || stat_put(env, obj, "sourcesFreed", &stat_sources_freed)
-        || stat_put(env, obj, "copies", &stat_copies))
+        || stat_put(env, obj, "copies", &stat_copies) || stat_put(env, obj, "listenersMade", &stat_listeners_made)
+        || stat_put(env, obj, "listenersFreed", &stat_listeners_freed) || stat_put(env, obj, "deferralsMade", &stat_deferrals_made)
+        || stat_put(env, obj, "deferralsFreed", &stat_deferrals_freed))
         return NULL;
     // The mocks' records and injected errors, counted for every mock.
     if (mock_values_stats_put(env, obj) != 0) {

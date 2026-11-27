@@ -21,19 +21,20 @@
 // first by another consumer of the group. Each runs the consumer protocol's
 // arm, as test/unit/consumer/kafka_consumer.test.js says.
 //
-// The 13 cases: testMissingOffsetNoResetPolicy, testResetToCommittedOffset,
+// The 14 cases: testMissingOffsetNoResetPolicy, testResetToCommittedOffset,
 // testResetUsingAutoResetPolicy, testResetUsingDurationBasedAutoResetPolicy,
 // testOffsetIsValidAfterSeek, testCommitsFetchedDuringAssign,
 // testNoCommittedOffsets, testManualAssignmentChangeWithAutoCommitEnabled,
 // testManualAssignmentChangeWithAutoCommitDisabled,
 // testOffsetOfPausedPartitions, testListOffsetShouldUpdateSubscriptions,
-// verifyNoCoordinatorLookupForManualAssignmentWithSeek and
-// testPollSendsRequestToJoin. Not here yet: testSubscriptionOnInvalidTopic,
-// which subscribes with a rebalance listener, for want of the listeners.
+// verifyNoCoordinatorLookupForManualAssignmentWithSeek,
+// testPollSendsRequestToJoin and testSubscriptionOnInvalidTopic, whose
+// broker answers the invalid topic name as Java's MockClient does.
 
 const assert = require('node:assert/strict');
 
 const { TopicPartition, TopicPartitionMap, TopicPartitionSet } = require('@confluentinc/kafka-javascript/common');
+const { InvalidTopicError } = require('@confluentinc/kafka-javascript/common/errors');
 const { CloseOptions, KafkaConsumer, NoOffsetForPartitionError, OffsetAndMetadata } = require('@confluentinc/kafka-javascript/consumer');
 const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
 const { createTopic, waitForBroker } = require('./_fetch_records');
@@ -449,6 +450,24 @@ it(
         await consumer.poll({ timeout: 0 });
         await new Promise((resolve) => setTimeout(resolve, 50));
       }
+    } finally {
+      await closeNow(consumer);
+    }
+  },
+  TIMEOUT,
+);
+
+it(
+  'testSubscriptionOnInvalidTopic',
+  async () => {
+    // Java's MockClient answers the topic's metadata with
+    // INVALID_TOPIC_EXCEPTION; the broker answers an invalid name so.
+    const consumer = new KafkaConsumer({ configs: configs() });
+    try {
+      // Java's getConsumerRebalanceListener: a listener that does nothing.
+      await consumer.subscribe({ topics: ['topic abc'], callback: { onPartitionsRevoked() {}, onPartitionsAssigned() {} } });
+      const error = await pollEventuallyRejects(consumer);
+      assert.ok(error instanceof InvalidTopicError, String(error));
     } finally {
       await closeNow(consumer);
     }

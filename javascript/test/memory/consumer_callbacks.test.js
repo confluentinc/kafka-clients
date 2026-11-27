@@ -1,0 +1,118 @@
+// Copyright 2026 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+'use strict';
+
+// The consumer's rebalance listeners and their reports, read through the
+// addon's test-only counts (consumerStats(), native/consumer.c): a listener's
+// context is kept until a later successful subscribe replaces it, kept by a
+// failed one, by assign() and unsubscribe() and by a KafkaConsumer's empty
+// topic list, let go once a KafkaConsumer's close() returns and kept by a mock
+// until its destroy; a report that waited for a Promise is freed once made;
+// and everything is freed once the consumers are closed and collected. Each
+// probe runs in a child with --expose-gc and the allocator's poisoning.
+
+const assert = require('node:assert/strict');
+
+const { NO_LEAKS, probeResult: probe } = require('./_probe');
+
+test("a listener's context lives as the FFI's subscribe docs give it, on a KafkaConsumer and on a mock", () => {
+  const out = probe(`
+    const { CloseOptions, KafkaConsumer, MockConsumer } = require(D + '/consumer');
+    const { TopicPartition } = require(D + '/common');
+    const live = () => { const s = native.consumerStats(); return s.listenersMade - s.listenersFreed; };
+    const listener = () => ({ onPartitionsRevoked() {}, onPartitionsAssigned() {} });
+    (async () => {
+      const hold = setInterval(() => {}, 1000);
+      const counts = {};
+      await (async () => {
+        const kc = new KafkaConsumer({ 'bootstrap.servers': '127.0.0.1:1', 'group.id': 'g', 'group.protocol': 'consumer' });
+        await kc.subscribe({ topics: ['t'], callback: listener() });
+        counts.subscribed = live();
+        await kc.subscribe({ topics: ['u'], callback: listener() });
+        counts.replaced = live();
+        // A failed subscribe keeps the earlier listener.
+        await kc.subscribe({ topics: [''], callback: listener() }).catch(() => {});
+        counts.failed = live();
+        // An empty topic list is unsubscribe(): it registers none.
+        await kc.subscribe({ topics: [], callback: listener() });
+        counts.empty = live();
+        await kc.unsubscribe();
+        counts.unsubscribed = live();
+        // A listener-less subscribe replaces it.
+        await kc.subscribe({ topics: ['t'] });
+        counts.withoutListener = live();
+        await kc.subscribe({ topics: ['t'], callback: listener() });
+        await kc.close({ option: CloseOptions.timeout({ timeout: 0 }) });
+        counts.closed = live();
+        const m = new MockConsumer('earliest');
+        await m.subscribe({ topics: ['t'], callback: listener() });
+        await m.assign([new TopicPartition({ topic: 'x', partition: 0 })]).catch(() => {});
+        await m.unsubscribe();
+        counts.mockKept = live();
+        await m.close();
+        counts.mockClosed = live();
+      })();
+      await settle();
+      counts.collected = live();
+      console.log(JSON.stringify({ counts, leaks: leaks() }));
+      clearInterval(hold);
+    })();
+  `);
+  assert.deepEqual(out.counts, {
+    subscribed: 1,
+    replaced: 1,
+    failed: 1,
+    empty: 1,
+    unsubscribed: 1,
+    withoutListener: 0,
+    closed: 0,
+    mockKept: 1,
+    mockClosed: 1,
+    collected: 0,
+  });
+  assert.deepEqual(out.leaks, NO_LEAKS);
+});
+
+test("a listener's report that waited for its Promise is freed once made, and a thrown value once the core let go of it", () => {
+  const out = probe(`
+    const { MockConsumer } = require(D + '/consumer');
+    const { TopicPartition } = require(D + '/common');
+    (async () => {
+      const hold = setInterval(() => {}, 1000);
+      const counts = {};
+      await (async () => {
+        const m = new MockConsumer('earliest');
+        const tp = new TopicPartition({ topic: 't', partition: 0 });
+        let n = 0;
+        await m.subscribe({ topics: ['t'], callback: {
+          onPartitionsRevoked: () => new Promise((resolve) => setImmediate(resolve)),
+          async onPartitionsAssigned() { if (++n % 2 === 0) throw new Error('boom ' + n); },
+        } });
+        for (let i = 0; i < 20; i++) await m.rebalance(i % 2 === 0 ? [tp] : []).catch(() => {});
+        await settle();
+        const s = native.consumerStats();
+        counts.deferrals = s.deferralsMade;
+        counts.pending = s.deferralsMade - s.deferralsFreed;
+        await m.close();
+      })();
+      await settle();
+      console.log(JSON.stringify({ counts, leaks: leaks() }));
+      clearInterval(hold);
+    })();
+  `);
+  assert.ok(out.counts.deferrals >= 20, JSON.stringify(out.counts));
+  assert.equal(out.counts.pending, 0);
+  assert.deepEqual(out.leaks, NO_LEAKS);
+});

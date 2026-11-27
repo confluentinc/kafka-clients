@@ -107,14 +107,6 @@ missing clients.consumer.MockConsumer#shouldRebalance
 # RecordHeader's constructor takes Java's (String, byte[]) form: JavaScript has
 # no ByteBuffer (a Buffer is a Uint8Array, the byte[] of the other form).
 overload-missing RecordHeader.constructor/RecordHeader(ByteBuffer,ByteBuffer)
-# Consumer and KafkaConsumer: subscribe's forms with a rebalance listener,
-# which come with the listeners.
-overload-missing Consumer.subscribe/subscribe(Collection,ConsumerRebalanceListener)
-overload-missing Consumer.subscribe/subscribe(SubscriptionPattern,ConsumerRebalanceListener)
-overload-missing KafkaConsumer.subscribe/subscribe(Collection,ConsumerRebalanceListener)
-overload-missing KafkaConsumer.subscribe/subscribe(SubscriptionPattern,ConsumerRebalanceListener)
-overload-missing MockConsumer.subscribe/subscribe(Collection,ConsumerRebalanceListener)
-overload-missing MockConsumer.subscribe/subscribe(SubscriptionPattern,ConsumerRebalanceListener)
 # Consumer and KafkaConsumer: commitAsync's forms with an offset-commit
 # callback, which come with the commit callbacks.
 overload-missing Consumer.commitAsync/commitAsync(OffsetCommitCallback)

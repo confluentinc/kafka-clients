@@ -29,8 +29,8 @@
 // unregisterMetricFromSubscription and addedMetrics. Left out, as in Python:
 // enforceRebalance(), enforceRebalance(reason), shouldRebalance() and
 // resetShouldRebalance(). Left out as on KafkaConsumer: the
-// subscribe(Pattern...) forms, and until the client has rebalance listeners
-// and commit callbacks, the forms taking one. Left out because Java
+// subscribe(Pattern...) forms, and until the client has commit callbacks,
+// the forms taking one. Left out because Java
 // deprecates them: MockConsumer(OffsetResetStrategy) and close(Duration).
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- src/internal/native.ts is an `export =` module, which TypeScript imports this way (the addon is loaded there alone, javascript/CLAUDE.md "Files and layout")
@@ -52,6 +52,7 @@ import type { TopicPartitionSet } from '../common/topic_partition_set';
 import type { Duration } from '../duration';
 import type { CloseOptions } from './close_options';
 import type { Consumer } from './consumer';
+import type { ConsumerRebalanceListener } from './consumer_rebalance_listener';
 import type { ConsumerGroupMetadata } from './consumer_group_metadata';
 import { ConsumerRecord } from './consumer_record';
 import type { ConsumerRecords } from './consumer_records';
@@ -179,6 +180,26 @@ export class MockConsumer<K, V> implements Consumer<K, V> {
     callback?: never;
   }): Promise<void>;
   subscribe(topics: Iterable<string>): Promise<void>;
+  subscribe(options: {
+    /** The list of topics to subscribe to. */
+    topics: Iterable<string>;
+    /**
+     * Non-null listener instance to get notifications on partition
+     * assignment/revocation for the subscribed topics.
+     */
+    callback: ConsumerRebalanceListener;
+    pattern?: never;
+  }): Promise<void>;
+  subscribe(options: {
+    /** Pattern to subscribe to, that must be compatible with Google RE2/J. */
+    pattern: SubscriptionPattern;
+    /**
+     * Non-null listener instance to get notifications on partition
+     * assignment/revocation for the subscribed topics.
+     */
+    callback: ConsumerRebalanceListener;
+    topics?: never;
+  }): Promise<void>;
   subscribe(options: {
     /** Pattern to subscribe to, that must be compatible with Google RE2/J. */
     pattern: SubscriptionPattern;

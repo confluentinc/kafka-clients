@@ -151,6 +151,13 @@ type ConsumerHandle = object;
 /** A partition's records of a poll, as the addon builds them: its topic and partition, then its records. */
 type NativePartitionRecords = [string, number, unknown[]];
 
+/**
+ * A rebalance listener's method as the addon calls it, with the partitions as
+ * `[topic, partition]` pairs: `undefined` once it returned, or a Promise the
+ * report waits for, rejecting with what the method threw or rejected with.
+ */
+type ListenerRun = (pairs: Array<[string, number]>) => Promise<unknown> | undefined;
+
 /** A next offset of a poll, as the addon reads it: topic, partition, offset, leader epoch (-1 for none), metadata. */
 type NativeNextOffset = [string, number, bigint, number, string];
 
@@ -191,6 +198,12 @@ interface ConsumerStats {
   mockRecordsFreed: number;
   injectedMade: number;
   injectedFreed: number;
+  // The rebalance listeners' contexts, made and freed.
+  listenersMade: number;
+  listenersFreed: number;
+  // The reports that waited for a callback's Promise, made and freed.
+  deferralsMade: number;
+  deferralsFreed: number;
 }
 
 /** The functions the addon registers (native/addon.c). */
@@ -324,11 +337,31 @@ interface Native {
     factory: RecordFactory,
     done: (error: unknown, partitions: NativePartitionRecords[] | null, nextOffsets: NativeNextOffset[] | null) => void,
   ): void;
-  // Java's subscribe(Collection) through subscribe_with_topics_cb; a null collection or topic goes to the FFI as NULL.
-  consumerSubscribeTopics(handle: ConsumerHandle, topics: Array<string | null> | null, done: (error: unknown) => void): void;
-  // Java's subscribe(SubscriptionPattern) through subscribe_with_pattern_cb:
-  // `given` false for a null pattern, else the pattern's string.
-  consumerSubscribePattern(handle: ConsumerHandle, given: boolean, pattern: string | null, done: (error: unknown) => void): void;
+  // Java's subscribe(Collection) through subscribe_with_topics_cb, or with
+  // `withListener` subscribe(Collection, ConsumerRebalanceListener) through
+  // subscribe_with_topics_listener_cb, `runs` the listener's three methods
+  // (null for a missing required one, which the FFI refuses), or null for a
+  // null listener; a null collection or topic goes to the FFI as NULL.
+  consumerSubscribeTopics(
+    handle: ConsumerHandle,
+    topics: Array<string | null> | null,
+    withListener: boolean,
+    runs: [ListenerRun | null, ListenerRun | null, ListenerRun] | null,
+    done: (error: unknown) => void,
+  ): void;
+  // Java's subscribe(SubscriptionPattern) through subscribe_with_pattern_cb,
+  // or with `withListener` subscribe(SubscriptionPattern,
+  // ConsumerRebalanceListener) through subscribe_with_pattern_listener_cb:
+  // `given` false for a null pattern, else the pattern's string; `runs` as for
+  // consumerSubscribeTopics.
+  consumerSubscribePattern(
+    handle: ConsumerHandle,
+    given: boolean,
+    pattern: string | null,
+    withListener: boolean,
+    runs: [ListenerRun | null, ListenerRun | null, ListenerRun] | null,
+    done: (error: unknown) => void,
+  ): void;
   // Java's assign, pause and resume of a Collection<TopicPartition>, as
   // [topic, partition] pairs; a null collection or element goes to the FFI as NULL.
   consumerAssign(handle: ConsumerHandle, partitions: Array<[string | null, number] | null> | null, done: (error: unknown) => void): void;

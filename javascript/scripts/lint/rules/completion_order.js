@@ -87,7 +87,24 @@ function guarded(code, from, to, at) {
  * one function a completion hands its whole run to, which is then the body
  * checked.
  */
-const COMPLETIONS = [{ key: 'send_on_completion', reason: "the record's Callback_t on_completion (kafka_producer_Callback_new_err)" }];
+const COMPLETIONS = [
+  { key: 'send_on_completion', reason: "the record's Callback_t on_completion (kafka_producer_Callback_new_err)" },
+  {
+    key: 'listener_on_revoked',
+    via: 'listener_invoke',
+    reason: "a ConsumerRebalanceListener's on_partitions_revoked (kafka_consumer_ConsumerRebalanceListener_new_err)",
+  },
+  {
+    key: 'listener_on_assigned',
+    via: 'listener_invoke',
+    reason: "a ConsumerRebalanceListener's on_partitions_assigned (kafka_consumer_ConsumerRebalanceListener_new_err)",
+  },
+  {
+    key: 'listener_on_lost',
+    via: 'listener_invoke',
+    reason: "a ConsumerRebalanceListener's on_partitions_lost (kafka_consumer_ConsumerRebalanceListener_new_err)",
+  },
+];
 
 /** The native functions whose function argument completes a wait on a record's future, not a delivery. */
 const WAITS = new Set(['recordFutureGet']);

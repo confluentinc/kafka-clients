@@ -12,12 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// What a mock keeps of the app's JavaScript values (javascript/CLAUDE.md,
-// JavaScript Binding Conventions, Implementation over the FFI), shared by the
-// mocks: a record whose key and value cross as the FFI's `void *`
-// (MockRecord), and an error JS gave a mock, which the core carries as a
-// LocalCallbackError (InjectedError). Each mock keeps its own lists of them;
-// the counts below are of every mock's.
+// What a client keeps of the app's JavaScript values (javascript/CLAUDE.md,
+// JavaScript Binding Conventions, Implementation over the FFI and Errors): a
+// mock's record whose key and value cross as the FFI's `void *` (MockRecord),
+// and a JS value the core carries as a LocalCallbackError (InjectedError): an
+// error JS gave a mock, or what a consumer's listener method or commit
+// callback threw or rejected with. Each client keeps its own lists of them;
+// the counts below are of every client's.
 
 #include <stdatomic.h>
 #include <stddef.h>
@@ -69,18 +70,20 @@ MockRecord* mock_record_of(const void* key) {
     return (MockRecord*)((const char*)key - offsetof(MockRecord, key_tag));
 }
 
-// ---- a mock's injected errors -----------------------------------------------
+// ---- the carried values -----------------------------------------------------
 
-// An error JS gave a mock (setSendException, errorNext, setPollException,
-// ...): the core carries it as a LocalCallbackError whose opaque is this
-// struct, and error.c hands the very same JS value back (javascript/CLAUDE.md,
-// JavaScript Binding Conventions, Errors). Two owners: the core's error,
-// which releases it from any thread once its last copy is dropped
-// (injected_error_release), and the mock's list, which deletes the reference
-// on the JS thread once the core's copies are gone (the sweep of every mock
-// call, injected_errors_sweep) or at the destroy (injected_errors_release);
-// the struct is freed by the last of them, and a value read after the destroy
-// is the core's plain error.
+// A JS value the core carries as a LocalCallbackError whose opaque is this
+// struct: an error JS gave a mock (setSendException, errorNext,
+// setPollException, ...), or what a consumer's listener method or commit
+// callback threw or rejected with, which may be any value. error.c hands the
+// very same JS value back (javascript/CLAUDE.md, JavaScript Binding
+// Conventions, Errors). Two owners: the core's error, which releases it from
+// any thread once its last copy is dropped (injected_error_release), and the
+// client's list, which deletes the reference on the JS thread once the core's
+// copies are gone (injected_errors_sweep, run by every mock call and every
+// callback run) or at the destroy (injected_errors_release); the struct is
+// freed by the last of them, and a value read after the destroy is the core's
+// plain error.
 struct InjectedError {
     uint32_t magic;
     atomic_int owners;
@@ -127,9 +130,11 @@ void injected_errors_sweep(napi_env env, InjectedError** list) {
 
 napi_value injected_error_value(napi_env env, void* opaque) {
     InjectedError* e = (InjectedError*)opaque;
-    napi_value value = NULL;
+    napi_value holder = NULL, value = NULL;
     if (e == NULL || e->magic != INJECTED_ERROR_MAGIC || e->env != env || e->value == NULL) return NULL;
-    if (napi_get_reference_value(env, e->value, &value) != napi_ok) return NULL;
+    if (napi_get_reference_value(env, e->value, &holder) != napi_ok || holder == NULL
+        || napi_get_element(env, holder, 0, &value) != napi_ok)
+        return NULL;
     return value;
 }
 
@@ -137,7 +142,13 @@ int injected_error_new(napi_env env, InjectedError** list, napi_value value, kaf
     *out = NULL;
     napi_valuetype type;
     NAPI_CHECK(env, napi_typeof(env, value, &type), -1);
+    // A mock's setter clears its error with null.
     if (type == napi_null) return 0;
+    return injected_error_carry(env, list, value, out);
+}
+
+int injected_error_carry(napi_env env, InjectedError** list, napi_value value, kafka_common_Error_t** out) {
+    *out = NULL;
     InjectedError* e = (InjectedError*)calloc(1, sizeof(InjectedError));
     if (e == NULL) {
         napi_throw_error(env, NULL, "out of memory");
@@ -146,7 +157,11 @@ int injected_error_new(napi_env env, InjectedError** list, napi_value value, kaf
     e->magic = INJECTED_ERROR_MAGIC;
     e->env = env;
     atomic_init(&e->owners, 2);
-    if (napi_create_reference(env, value, 1, &e->value) != napi_ok) {
+    // The value is held in a one-element array, as Node-API 9 references
+    // objects only and a callback may throw any value.
+    napi_value holder;
+    if (napi_create_array_with_length(env, 1, &holder) != napi_ok || napi_set_element(env, holder, 0, value) != napi_ok
+        || napi_create_reference(env, holder, 1, &e->value) != napi_ok) {
         free(e);
         js_throw_last_napi_error(env, "napi_create_reference");
         return -1;

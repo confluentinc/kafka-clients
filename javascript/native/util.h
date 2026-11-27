@@ -382,8 +382,13 @@ kafka_List_t* tp_list_from_js(napi_env env, napi_value array);
 // are not the list's to free). A NULL list is a no-op.
 void list_free(napi_env env, kafka_List_t* list, void (*destroy)(void*, kafka_common_Error_t**));
 
-// An owned list of owned TopicPartitions as an array of [topic, partition];
-// the list destroyed. NULL with a JS exception pending on failure.
+// A borrowed list of TopicPartitions as an array of [topic, partition] (a
+// listener's partitions). NULL with a JS exception pending on failure.
+napi_value tp_list_to_js(napi_env env, const kafka_List_t* list);
+
+// An owned list of owned TopicPartitions as an array of [topic, partition],
+// read by tp_list_to_js; the list destroyed. NULL with a JS exception pending
+// on failure.
 napi_value tp_list_take_to_js(napi_env env, kafka_List_t* list);
 
 // A number, or a bigint for a value a number does not hold exactly, as an
@@ -494,20 +499,26 @@ void mock_records_free(napi_env env, MockRecord** list);
 // The record whose key crossed as `key`, or NULL for NULL.
 MockRecord* mock_record_of(const void* key);
 
-// An error JS gave a mock, which the core carries as a LocalCallbackError.
+// A JS value the core carries as a LocalCallbackError: an error JS gave a
+// mock, or what a listener method or commit callback threw or rejected with.
 typedef struct InjectedError InjectedError;
 // The core's error for JS value `value`: NULL for `null`, else a
-// LocalCallbackError carrying it, held on the mock's `list` until the core
-// holds no copy of it. Throws and returns -1 on failure.
+// LocalCallbackError carrying it (injected_error_carry). Throws and returns
+// -1 on failure.
 int injected_error_new(napi_env env, InjectedError** list, napi_value value, kafka_common_Error_t** out);
-// Lets go of every error of `list`, at the mock's destroy.
+// The core's error for JS value `value`, whatever it is (`null` and
+// `undefined` included, a callback's failure): a LocalCallbackError carrying
+// it, held on the client's `list` until the core holds no copy of it. Throws
+// and returns -1 on failure.
+int injected_error_carry(napi_env env, InjectedError** list, napi_value value, kafka_common_Error_t** out);
+// Lets go of every error of `list`, at the client's destroy.
 void injected_errors_release(napi_env env, InjectedError** list);
 // Lets go of the errors of `list` the core holds no copy of any more: run by
-// every mock call.
+// every mock call and every callback run.
 void injected_errors_sweep(napi_env env, InjectedError** list);
-// The JS value an error JS gave a mock carries, for the LocalCallbackError
-// `opaque` the mock's error holds, or NULL when `opaque` is not one (another
-// callback's error) or its value is gone (the mock destroyed).
+// The JS value an InjectedError carries, for the LocalCallbackError `opaque`
+// the core's error holds, or NULL when `opaque` is not one (another callback's
+// error) or its value is gone (the client destroyed).
 napi_value injected_error_value(napi_env env, void* opaque);
 // Test-only: the counts of every mock's records and injected errors, made and
 // freed, set on `obj` (producerStats(), consumerStats()). -1 when Node-API

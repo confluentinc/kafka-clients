@@ -154,7 +154,7 @@ kafka_List_t* tp_list_from_js(napi_env env, napi_value array) {
     return list;
 }
 
-napi_value tp_list_take_to_js(napi_env env, kafka_List_t* list) {
+napi_value tp_list_to_js(napi_env env, const kafka_List_t* list) {
     kafka_common_Error_t* ffi_err = NULL;
     int32_t n = 0;
     kafka_common_Error_t* err = FFI_SET(n, kafka_List_size_err(list, &ffi_err));
@@ -173,12 +173,18 @@ napi_value tp_list_take_to_js(napi_env env, kafka_List_t* list) {
             arr = NULL;
         }
     }
-    // The list owns its elements: destroying it frees them.
-    error_warn(env, 1, FFI_ERR(kafka_List_destroy_err(list, &ffi_err)));
     if (err != NULL) {
         error_throw_owned(env, err);
         return NULL;
     }
+    return arr;
+}
+
+napi_value tp_list_take_to_js(napi_env env, kafka_List_t* list) {
+    kafka_common_Error_t* ffi_err = NULL;
+    napi_value arr = tp_list_to_js(env, list);
+    // The list owns its elements: destroying it frees them.
+    error_warn(env, 1, FFI_ERR(kafka_List_destroy_err(list, &ffi_err)));
     return arr;
 }
 

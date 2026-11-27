@@ -274,6 +274,74 @@ test('no blocking consumer call: every waiting call is a _cb twin (rule 4)', () 
   }
 });
 
+test("the consumer's listeners, their reports and the window use their entry points", () => {
+  const called = new Set(sources.flatMap((s) => [...calledFunctions(path.join(NATIVE, s))]));
+  for (const name of [
+    'kafka_consumer_Consumer_subscribe_with_topics_listener_cb',
+    'kafka_consumer_Consumer_subscribe_with_pattern_listener_cb',
+    'kafka_consumer_ConsumerRebalanceListener_new_err',
+    'kafka_consumer_ConsumerRebalanceListener_destroy_err',
+    'kafka_consumer_Consumer__set_callback_result_err',
+    'kafka_consumer_Consumer_handle_err',
+    'kafka_consumer_ConsumerHandle_destroy_err',
+    'kafka_consumer_ConsumerHandle_commit_sync_cb',
+    'kafka_consumer_ConsumerHandle_commit_sync_with_timeout_cb',
+    'kafka_consumer_ConsumerHandle_commit_sync_with_offsets_cb',
+    'kafka_consumer_ConsumerHandle_commit_sync_with_offsets_timeout_cb',
+    'kafka_consumer_ConsumerHandle_commit_async_cb',
+    'kafka_consumer_ConsumerHandle_seek_with_offset_cb',
+    'kafka_consumer_ConsumerHandle_seek_with_offset_and_metadata_cb',
+    'kafka_consumer_ConsumerHandle_seek_to_beginning_cb',
+    'kafka_consumer_ConsumerHandle_seek_to_end_cb',
+    'kafka_consumer_ConsumerHandle_pause_cb',
+    'kafka_consumer_ConsumerHandle_resume_cb',
+    'kafka_consumer_ConsumerHandle_position_cb',
+    'kafka_consumer_ConsumerHandle_position_with_timeout_cb',
+    'kafka_consumer_ConsumerHandle_committed_cb',
+    'kafka_consumer_ConsumerHandle_committed_with_timeout_cb',
+    'kafka_consumer_ConsumerHandle_partitions_for_cb',
+    'kafka_consumer_ConsumerHandle_partitions_for_with_timeout_cb',
+    'kafka_consumer_ConsumerHandle_list_topics_cb',
+    'kafka_consumer_ConsumerHandle_list_topics_with_timeout_cb',
+    'kafka_consumer_ConsumerHandle_offsets_for_times_cb',
+    'kafka_consumer_ConsumerHandle_offsets_for_times_with_timeout_cb',
+    'kafka_consumer_ConsumerHandle_beginning_offsets_cb',
+    'kafka_consumer_ConsumerHandle_beginning_offsets_with_timeout_cb',
+    'kafka_consumer_ConsumerHandle_end_offsets_cb',
+    'kafka_consumer_ConsumerHandle_end_offsets_with_timeout_cb',
+    'kafka_consumer_ConsumerHandle_current_lag_cb',
+    'kafka_consumer_ConsumerHandle_assignment_err',
+    'kafka_consumer_ConsumerHandle_paused_err',
+    'kafka_consumer_ConsumerHandle_group_metadata_err',
+    'kafka_consumer_ConsumerHandle_wakeup_err',
+  ]) {
+    assert.ok(called.has(name), `${name} is not called`);
+  }
+});
+
+test("no blocking listener or handle call, and none of the C invokers of a listener's methods", () => {
+  // Every blocking ConsumerHandle form, read from the header: each one with a _cb twin.
+  const handleBlocking = [...stripComments(header).matchAll(/\b(kafka_consumer_ConsumerHandle_\w+)_cb\s*\(/g)].map((m) => m[1]);
+  assert.ok(handleBlocking.length > 20, handleBlocking.join(', '));
+  for (const name of [
+    'kafka_consumer_Consumer_subscribe_with_topics_listener',
+    'kafka_consumer_Consumer_subscribe_with_pattern_listener',
+    ...handleBlocking,
+    'kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked',
+    'kafka_consumer_ConsumerRebalanceListener_on_partitions_assigned',
+    'kafka_consumer_ConsumerRebalanceListener_on_partitions_lost',
+    'kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked_cb',
+    'kafka_consumer_ConsumerRebalanceListener_on_partitions_assigned_cb',
+    'kafka_consumer_ConsumerRebalanceListener_on_partitions_lost_cb',
+  ]) {
+    for (const source of sources) {
+      const code = stripComments(fs.readFileSync(path.join(NATIVE, source), 'utf8'));
+      const calls = [...code.matchAll(new RegExp(`\\b${name}(_err)?\\s*\\(`, 'g'))];
+      assert.equal(calls.length, 0, `${source} calls ${name}`);
+    }
+  }
+});
+
 test("the generated FFI_NAMES table is the header's kafka_common_Error_e, both ways", () => {
   // src/internal/error_registry.ts is generated from rust/src/ffi/common.rs;
   // the addon is built against the header cbindgen generates from it. Read from the

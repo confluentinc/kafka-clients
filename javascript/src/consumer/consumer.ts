@@ -26,6 +26,7 @@ import type { TopicPartitionSet } from '../common/topic_partition_set';
 import type { Duration } from '../duration';
 import type { CloseOptions } from './close_options';
 import type { ConsumerGroupMetadata } from './consumer_group_metadata';
+import type { ConsumerRebalanceListener } from './consumer_rebalance_listener';
 import type { ConsumerRecords } from './consumer_records';
 import type { OffsetAndMetadata } from './offset_and_metadata';
 import type { OffsetAndTimestamp } from './offset_and_timestamp';
@@ -96,8 +97,7 @@ export interface Consumer<K = Buffer, V = Buffer> {
    * @throws `TypeError` rejects with it if `topics` is not an iterable of
    *   strings (a string included)
    *
-   * @remarks Java's blocking call returns a Promise here. The form with a
-   * rebalance listener is not in this release.
+   * @remarks Java's blocking call returns a Promise here.
    * *(deviation: a null collection is refused before the closed, busy and group
    * checks, with its null error where Java reports those first. Why: the FFI
    * refuses the NULL at its boundary. Goes when: the FFI refuses it after the
@@ -117,6 +117,106 @@ export interface Consumer<K = Buffer, V = Buffer> {
    * @returns settling once the subscription is set
    */
   subscribe(topics: Iterable<string>): Promise<void>;
+  /**
+   * Subscribe to the given list of topics to get dynamically assigned
+   * partitions. **Topic subscriptions are not incremental. This list will
+   * replace the current assignment (if there is one).** Note that it is not
+   * possible to combine topic subscription with group management with manual
+   * partition assignment through `assign`.
+   *
+   * If the given list of topics is empty, it is treated the same as
+   * `unsubscribe()`.
+   *
+   * As part of group management, the group coordinator will keep track of the
+   * list of consumers that belong to a particular group and will trigger a
+   * rebalance operation if any one of the following events are triggered:
+   *
+   * - Number of partitions change for any of the subscribed topics
+   * - A subscribed topic is created or deleted
+   * - An existing member of the consumer group is shutdown or fails
+   * - A new member is added to the consumer group
+   *
+   * When any of these events are triggered, the provided listener will be
+   * invoked in this way:
+   *
+   * - `ConsumerRebalanceListener.onPartitionsRevoked` will be invoked with the
+   *   partitions to revoke, before re-assigning those partitions to another
+   *   consumer.
+   * - `ConsumerRebalanceListener.onPartitionsAssigned` will be invoked when the
+   *   rebalance completes (even if no new partitions are assigned to the
+   *   consumer)
+   *
+   * Note that rebalances will only occur during an active call to `poll`, so
+   * callbacks will also only be invoked during that time.
+   *
+   * The provided listener will immediately override any listener set in a
+   * previous call to subscribe. It is guaranteed, however, that the partitions
+   * revoked/assigned through this interface are from topics subscribed in this
+   * call. See `ConsumerRebalanceListener` for more details.
+   *
+   * @param options - the list of topics to subscribe to, and the listener
+   * @returns settling once the subscription is set
+   * @throws `IllegalArgumentError` rejects with it if topics is null or
+   *   contains null or empty elements, or if listener is null
+   * @throws `IllegalStateError` rejects with it if `subscribe()` is called
+   *   previously with pattern, or assign is called previously (without a
+   *   subsequent call to `unsubscribe()`)
+   * @throws `TypeError` rejects with it if the listener lacks
+   *   `onPartitionsRevoked` or `onPartitionsAssigned`, or is no object
+   *
+   * @remarks Java's blocking call returns a Promise here. The listener's
+   * methods run inside the waiting call that delivers them, as in Java, and
+   * may return a Promise, which that call awaits.
+   */
+  subscribe(options: {
+    /** The list of topics to subscribe to. */
+    topics: Iterable<string>;
+    /**
+     * Non-null listener instance to get notifications on partition
+     * assignment/revocation for the subscribed topics.
+     */
+    callback: ConsumerRebalanceListener;
+    pattern?: never;
+  }): Promise<void>;
+  /**
+   * Subscribe to all topics matching the specified pattern, to get
+   * dynamically assigned partitions. The pattern matching will be done
+   * periodically against all topics. This is only supported under the
+   * CONSUMER group protocol (see `ConsumerConfig.GROUP_PROTOCOL_CONFIG`).
+   *
+   * If the provided pattern is not compatible with Google RE2/J, an
+   * `InvalidRegularExpression` will be eventually thrown on a call to `poll`
+   * following this call to subscribe.
+   *
+   * See `subscribe({ topics, callback })` for details on the use of the
+   * `ConsumerRebalanceListener`. Generally, rebalances are triggered when
+   * there is a change to the topics matching the provided pattern and when
+   * consumer group membership changes. Group rebalances only take place
+   * during an active call to `poll`.
+   *
+   * @param options - the pattern to subscribe to, and the listener
+   * @returns settling once the subscription is set
+   * @throws `IllegalArgumentError` rejects with it if pattern is null or
+   *   empty, or if the listener is null
+   * @throws `IllegalStateError` rejects with it if `subscribe()` is called
+   *   previously with topics, or assign is called previously (without a
+   *   subsequent call to `unsubscribe()`)
+   * @throws `TypeError` rejects with it if the listener lacks
+   *   `onPartitionsRevoked` or `onPartitionsAssigned`, or is no object
+   *
+   * @remarks Java's blocking call returns a Promise here. A `RegExp` is no
+   * pattern: Java's `Pattern` forms are left out.
+   */
+  subscribe(options: {
+    /** Pattern to subscribe to, that must be compatible with Google RE2/J. */
+    pattern: SubscriptionPattern;
+    /**
+     * Non-null listener instance to get notifications on partition
+     * assignment/revocation for the subscribed topics.
+     */
+    callback: ConsumerRebalanceListener;
+    topics?: never;
+  }): Promise<void>;
   /**
    * Subscribe to all topics matching the specified pattern, to get
    * dynamically assigned partitions. The pattern matching will be done

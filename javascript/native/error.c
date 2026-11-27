@@ -13,7 +13,9 @@
 // limitations under the License.
 
 // kafka_common_Error_t -> a JS error. The C layer reads the error through its
-// accessors into a plain object {code, message, apiError, payload, cause} and hands it to the factory src/internal/native.ts registered:
+// accessors into a plain object {code, message, apiError, payload, cause}, or
+// {code, message, carried} for a JS value the core carries, and hands it to
+// the factory src/internal/native.ts registered:
 // src/internal/errors.ts `fromNative` constructs the class of its code (KafkaError or a
 // subclass, or a Java built-in such as IllegalStateError). An OWNED error is
 // destroyed once read; a BORROWED one (a delivery callback's, a cause) never.
@@ -118,15 +120,19 @@ static napi_value error_object(napi_env env, const kafka_common_Error_t* e, int 
     error_discard(FFI_SET(api, kafka_common_Error_is_api_error_err(e, &ffi_err)));
     error_discard(FFI_SET(source, kafka_common_Error_source_err(e, &ffi_err)));
 
-    // An error JS gave a mock comes back as the very same value
-    // (javascript/CLAUDE.md, JavaScript Binding Conventions, Errors).
+    // A value the core carries (an error JS gave a mock, what a listener
+    // method or commit callback threw or rejected with) comes back as the very
+    // same value (javascript/CLAUDE.md, JavaScript Binding Conventions,
+    // Errors), under `carried`, so a value of any type is never read as an
+    // error's fields, with the LocalCallbackError's message, which a layer the
+    // core built from it alone repeats.
+    napi_value injected = NULL;
     if (code == kafka_common_Error_LOCAL_CALLBACK) {
         const kafka_common_LocalCallbackError_t* local = NULL;
         void* opaque = NULL;
         error_discard(FFI_SET(local, kafka_common_Error_local_callback_error_err(e, &ffi_err)));
         if (local != NULL) error_discard(FFI_SET(opaque, kafka_common_LocalCallbackError_opaque_err(local, &ffi_err)));
-        napi_value injected = opaque != NULL ? injected_error_value(env, opaque) : NULL;
-        if (injected != NULL) return injected;
+        injected = opaque != NULL ? injected_error_value(env, opaque) : NULL;
     }
 
     // apiError tells a bare KafkaException (UNKNOWN_SERVER_ERROR) from
@@ -135,10 +141,11 @@ static napi_value error_object(napi_env env, const kafka_common_Error_t* e, int 
     if (napi_create_object(env, &obj) != napi_ok
         || napi_create_int32(env, code, &v) != napi_ok || set_named(env, obj, "code", v)
         || napi_create_string_utf8(env, message != NULL ? message : "", NAPI_AUTO_LENGTH, &v) != napi_ok
-        || set_named(env, obj, "message", v)
-        || napi_get_boolean(env, api != 0, &v) != napi_ok || set_named(env, obj, "apiError", v)) {
+        || set_named(env, obj, "message", v)) {
         return NULL;
     }
+    if (injected != NULL) return set_named(env, obj, "carried", injected) ? NULL : obj;
+    if (napi_get_boolean(env, api != 0, &v) != napi_ok || set_named(env, obj, "apiError", v)) return NULL;
     // The payload the FFI's view of the class gives: its fields, keyed
     // by Java field name, which src/internal/throwable.ts reads.
     napi_value payload = error_payload_to_js(env, code, e);

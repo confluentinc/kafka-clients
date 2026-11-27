@@ -157,7 +157,10 @@ const ALLOWED = [
     key: 'native/mock_values.c:mock_record_new:calloc#1',
     reason: "the record a mock keeps: a reference to the app's record, no copy of its key or value",
   },
-  { key: 'native/mock_values.c:injected_error_new:calloc#1', reason: 'an error JS gives a mock: a reference to it, no record' },
+  {
+    key: 'native/mock_values.c:injected_error_carry:calloc#1',
+    reason: "an error JS gives a mock, or a callback's thrown value: a reference to it, no record",
+  },
 ];
 
 /** The text of each argument naming `field` (`&ctx->key_ref`) among the calls of `names` in `fns`. */

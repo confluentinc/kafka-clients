@@ -47,9 +47,8 @@
 //
 // Not here yet, for want of deserializers:
 // configurableObjectsShouldSeeGeneratedClientId. Against a broker, where Java
-// scripts a MockClient, in test/integration/kafka_consumer_broker.test.js: 13
-// cases, listed there, and, for want of the rebalance listeners,
-// testSubscriptionOnInvalidTopic.
+// scripts a MockClient, in test/integration/kafka_consumer_broker.test.js: 14
+// cases, listed there.
 //
 // The other 84 are not ported, each for its reason:
 // - the classic protocol only: Java runs these with group.protocol=classic,
@@ -162,6 +161,8 @@ const {
 const TOPIC = 'test';
 const GROUP_ID = 'mock-group';
 const TP0 = new TopicPartition({ topic: TOPIC, partition: 0 });
+// Java's getConsumerRebalanceListener: a listener that does nothing.
+const LISTENER = { onPartitionsRevoked() {}, onPartitionsAssigned() {} };
 const TP1 = new TopicPartition({ topic: TOPIC, partition: 1 });
 
 // The message of Java's AsyncKafkaConsumer.throwIfGroupIdNotDefined().
@@ -451,7 +452,7 @@ test('verifyPollTimesOutDuringMetadataUpdate', async () => {
   // Java asserts no FETCH is sent while the metadata is not updated; with an
   // unreachable broker there is none, and poll(0) returns an empty record set.
   const consumer = newConsumer();
-  await consumer.subscribe({ topics: [TOPIC] });
+  await consumer.subscribe({ topics: [TOPIC], callback: LISTENER });
   const records = await consumer.poll({ timeout: 0 });
   assert.ok(records instanceof ConsumerRecords);
   assert.equal(records.isEmpty(), true);
@@ -667,7 +668,7 @@ test('the constructor takes {configs} or the configs bare, and nothing else', ()
 
 test('subscribe: its forms, bare and by name, and their errors', async () => {
   const consumer = newConsumer();
-  const forms = 'subscribe() takes one of (topics), (pattern)';
+  const forms = 'subscribe() takes one of (topics), (topics, callback), (pattern, callback), (pattern)';
   await consumer.subscribe([TOPIC]);
   assert.deepEqual(consumer.subscription(), new Set([TOPIC]));
   await consumer.unsubscribe();
@@ -690,11 +691,11 @@ test('subscribe: its forms, bare and by name, and their errors', async () => {
     constructor: IllegalArgumentError,
     message: `${forms}; got (topics, pattern)`,
   });
-  // The listener forms come with the listeners.
-  // @ts-expect-error a callback key
-  await assert.rejects(consumer.subscribe({ topics: [TOPIC], callback: {} }), {
+  // A callback on its own is no form.
+  // @ts-expect-error a callback without topics or a pattern
+  await assert.rejects(consumer.subscribe({ callback: LISTENER }), {
     constructor: IllegalArgumentError,
-    message: `${forms}; got (topics, callback)`,
+    message: `${forms}; got (callback)`,
   });
   // @ts-expect-error a second argument
   await assert.rejects(consumer.subscribe([TOPIC], 1), {
@@ -732,6 +733,66 @@ test('subscribe: its forms, bare and by name, and their errors', async () => {
     constructor: IllegalStateError,
     message: 'Subscription to topics, partitions and pattern are mutually exclusive',
   });
+});
+
+test('subscribe with a listener: its two forms, a null listener with Java message, and the listener checks', async () => {
+  const consumer = newConsumer();
+  const pattern = new SubscriptionPattern({ pattern: 'te.*' });
+  await consumer.subscribe({ topics: [TOPIC], callback: LISTENER });
+  assert.deepEqual(consumer.subscription(), new Set([TOPIC]));
+  await consumer.unsubscribe();
+  await consumer.subscribe({ pattern, callback: LISTENER });
+  await consumer.unsubscribe();
+  // A listener without onPartitionsLost: Java's default runs.
+  await consumer.subscribe({ topics: [TOPIC], callback: { onPartitionsRevoked() {}, onPartitionsAssigned() {} } });
+  await consumer.unsubscribe();
+  // Java's "RebalanceListener cannot be null", before its check of the topics
+  // or the pattern (testRe2JPatternSubscription's assertion).
+  for (const call of [
+    // @ts-expect-error a null the types forbid
+    () => consumer.subscribe({ topics: [TOPIC], callback: null }),
+    // @ts-expect-error a null the types forbid
+    () => consumer.subscribe({ topics: null, callback: null }),
+    // @ts-expect-error a null the types forbid
+    () => consumer.subscribe({ pattern, callback: null }),
+    // @ts-expect-error a null the types forbid
+    () => consumer.subscribe({ pattern: null, callback: null }),
+  ]) {
+    await assert.rejects(call(), { constructor: IllegalArgumentError, message: 'RebalanceListener cannot be null' });
+  }
+  // A missing required method goes to the FFI as NULL, which refuses it: a
+  // TypeError with the FFI's text.
+  // @ts-expect-error no onPartitionsRevoked
+  await assert.rejects(consumer.subscribe({ topics: [TOPIC], callback: { onPartitionsAssigned() {} } }), {
+    constructor: TypeError,
+    message: 'on_partitions_revoked must not be null',
+  });
+  // @ts-expect-error no onPartitionsAssigned
+  await assert.rejects(consumer.subscribe({ pattern, callback: { onPartitionsRevoked() {} } }), {
+    constructor: TypeError,
+    message: 'on_partitions_assigned must not be null',
+  });
+  // A listener that is no object.
+  for (const callback of [() => {}, 'x', 1]) {
+    // @ts-expect-error no listener
+    await assert.rejects(consumer.subscribe({ topics: [TOPIC], callback }), {
+      constructor: TypeError,
+      message: 'callback must be a ConsumerRebalanceListener',
+    });
+  }
+  // An undefined listener, which TypeScript lets through as a key left out.
+  await assert.rejects(consumer.subscribe({ topics: [TOPIC], callback: undefined }), {
+    constructor: TypeError,
+    message: "callback must not be undefined. Leave the key out, or pass null for Java's null",
+  });
+  // @ts-expect-error a second argument, Java's subscribe(topics, listener) written positionally
+  await assert.rejects(consumer.subscribe([TOPIC], LISTENER), {
+    constructor: IllegalArgumentError,
+    message:
+      'subscribe() takes one of (topics), (topics, callback), (pattern, callback), (pattern); got 2 arguments, not one object of named parameters',
+  });
+  // Nothing was subscribed.
+  assert.equal(consumer.subscription().size, 0);
 });
 
 test('assign, pause and resume: their forms and errors, the FFI refusing a null', async () => {

@@ -34,6 +34,7 @@ import type { Duration } from '../duration';
 import { UnsupportedOperationError } from '../unsupported_operation_error';
 import type { CloseOptions } from './close_options';
 import type { Consumer } from './consumer';
+import type { ConsumerRebalanceListener } from './consumer_rebalance_listener';
 import type { ConsumerConfigs } from './consumer_configs';
 import type { ConsumerGroupMetadata } from './consumer_group_metadata';
 import type { ConsumerRecords } from './consumer_records';
@@ -136,6 +137,26 @@ export class KafkaConsumer<K = Buffer, V = Buffer> implements Consumer<K, V> {
     callback?: never;
   }): Promise<void>;
   subscribe(topics: Iterable<string>): Promise<void>;
+  subscribe(options: {
+    /** The list of topics to subscribe to. */
+    topics: Iterable<string>;
+    /**
+     * Non-null listener instance to get notifications on partition
+     * assignment/revocation for the subscribed topics.
+     */
+    callback: ConsumerRebalanceListener;
+    pattern?: never;
+  }): Promise<void>;
+  subscribe(options: {
+    /** Pattern to subscribe to, that must be compatible with Google RE2/J. */
+    pattern: SubscriptionPattern;
+    /**
+     * Non-null listener instance to get notifications on partition
+     * assignment/revocation for the subscribed topics.
+     */
+    callback: ConsumerRebalanceListener;
+    topics?: never;
+  }): Promise<void>;
   subscribe(options: {
     /** Pattern to subscribe to, that must be compatible with Google RE2/J. */
     pattern: SubscriptionPattern;
