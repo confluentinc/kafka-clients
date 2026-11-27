@@ -550,6 +550,26 @@ fn bounce_cluster_config() -> ClusterConfig {
     ClusterConfig::kraft_dedicated(BROKER_COUNT, 1).set_server_properties(props)
 }
 
+/// [`bounce_cluster_config`] without `broker.heartbeat.interval.ms=50` and
+/// `broker.session.timeout.ms=300`, so Kafka's defaults (2 s and 9 s) apply, for
+/// [`async_subscribe_when_topic_unavailable`].
+///
+/// Deviation: on a loaded CI host a 300 ms broker session fences healthy
+/// brokers. This test has failed to create its topic with "All brokers are
+/// currently fenced" before any broker was stopped, and its consumer has stopped
+/// receiving while the producer retried `NotLeaderOrFollower`. The short session
+/// speeds up the failover of most sibling tests, which stop one broker at a
+/// time; this test stops every broker at once, so nothing fails over, and a
+/// restarted broker at most waits for its previous session to expire before it
+/// registers.
+fn topic_unavailable_cluster_config() -> ClusterConfig {
+    let mut cfg = bounce_cluster_config();
+    for key in ["KAFKA_BROKER_HEARTBEAT_INTERVAL_MS", "KAFKA_BROKER_SESSION_TIMEOUT_MS"] {
+        cfg.server_properties.remove(key);
+    }
+    cfg
+}
+
 /// Java's `setUp`: `createTopic(topic, numPartitions, numReplica)`.
 /// Returns the per-test topic name.
 async fn set_up(ctx: &mut TestContext) -> String {
@@ -1102,9 +1122,11 @@ async fn receive_exact_records(poller: &ConsumerAssignmentPoller, backend: &str,
 /// then stop every broker, restart them all, and consume 1000 more on the same
 /// consumer, which is the backend's under test.
 ///
-/// Deviation: `max.poll.interval.ms` is 120000 instead of Java's 6000 (see the
-/// comment at the config). Everything else, including `metadata.max.age.ms=100`
-/// and the exact-count assertion on the second poller, is Java's.
+/// Deviations: `max.poll.interval.ms` is 120000 instead of Java's 6000 (see the
+/// comment at the config), and the brokers keep Kafka's default session
+/// ([`topic_unavailable_cluster_config`]). Everything else, including
+/// `metadata.max.age.ms=100` and the exact-count assertion on the second poller,
+/// is Java's.
 async fn async_subscribe_when_topic_unavailable<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let backend = factory.name();
     set_up(ctx).await;
@@ -1192,7 +1214,7 @@ async fn async_subscribe_when_topic_unavailable<F: ConsumerBackendFactory>(ctx: 
 multilanguage_consumer_test!(
     test_async_subscribe_when_topic_unavailable,
     async_subscribe_when_topic_unavailable,
-    bounce_cluster_config()
+    topic_unavailable_cluster_config()
 );
 
 /// Java's `gracefulCloseTimeMs`.

@@ -2292,9 +2292,8 @@ async fn fencing_on_transaction_expiration<F: ProducerBackendFactory>(ctx: &mut 
     let (topic1, _topic2) = create_txn_test_topics(ctx).await;
     let bootstrap = ctx.bootstrap_servers().to_string();
     let backend = factory.name();
-    let producer =
-        create_transactional_producer_with_transaction_timeout_ms(factory, ctx, &ctx.group_id("expiringProducer"), 300)
-            .await;
+    let txn_id = ctx.group_id("expiringProducer");
+    let producer = create_transactional_producer_with_transaction_timeout_ms(factory, ctx, &txn_id, 300).await;
 
     producer.init_transactions().await.expect("initTransactions");
     producer.begin_transaction().expect("beginTransaction");
@@ -2314,6 +2313,43 @@ async fn fencing_on_transaction_expiration<F: ProducerBackendFactory>(ctx: &mut 
 
     // Wait for the expiration cycle to kick in.
     tokio::time::sleep(Duration::from_millis(600)).await;
+    // Deviation: Java relies on the sleep alone. The coordinator finds the
+    // transaction expired up to 500 ms after it began (300 ms timeout, 200 ms
+    // check interval), then writes the abort markers; until they reach the
+    // partition leader it still takes the old epoch, and the second send
+    // succeeds. On CI's container brokers the abort can end after the sleep, so
+    // wait until the coordinator lists the transaction in COMPLETE_ABORT. On a
+    // timeout the panic gives the state the coordinator listed last, or the
+    // listing's error.
+    let admin = txn_test_admin(ctx);
+    test_utils::retry_on_error_with_timeout(Duration::from_millis(test_utils::DEFAULT_MAX_WAIT_MS), || {
+        let listing = admin.list_transactions().all();
+        let txn_id = txn_id.clone();
+        async move {
+            let listings = match listing.get().await {
+                Ok(listings) => listings,
+                Err(error) => return Err(format!("listTransactions failed: {error}")),
+            };
+            let states: Vec<TransactionState> = listings
+                .iter()
+                .filter(|txn| txn.transactional_id() == txn_id)
+                .map(|txn| txn.state())
+                .collect();
+            if states.contains(&TransactionState::CompleteAbort) {
+                Ok(())
+            } else if states.is_empty() {
+                Err(format!("listTransactions does not list the expired transaction {txn_id}"))
+            } else {
+                let states: Vec<String> = states.iter().map(ToString::to_string).collect();
+                Err(format!(
+                    "the expired transaction is in state {}, not CompleteAbort",
+                    states.join(", ")
+                ))
+            }
+        }
+    })
+    .await;
+    admin.close().await;
 
     // Now that the transaction has expired, the second send should fail with an
     // InvalidProducerEpochException. We may see some ConcurrentTransactionsExceptions.

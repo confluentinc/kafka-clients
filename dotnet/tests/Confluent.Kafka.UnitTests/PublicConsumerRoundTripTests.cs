@@ -17,6 +17,7 @@ using System.Diagnostics;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 
 using Confluent.Kafka.Common;
@@ -212,7 +213,7 @@ public sealed class PublicConsumerRoundTripTests
     {
         AsyncMockConsumer<byte[], byte[]> consumer = await ReadyToPoll();
         using IDisposable consumerDisposal = TestTimeout.Disposal(consumer);
-        WeakReference consumed = await PollAnUnreferencedPollException(consumer);
+        WeakReference consumed = PollAnUnreferencedPollException(consumer);
 
         Assert.False(await StaysAlive(consumed), "the poll that threw the exception must release it");
         Assert.Empty(await Poll(consumer));
@@ -275,12 +276,38 @@ public sealed class PublicConsumerRoundTripTests
         return new WeakReference(exception);
     }
 
+    // On .NET Framework the exception has stayed reachable past StaysAlive when the test awaited the poll through
+    // Assert.ThrowsAsync and TestTimeout.Run, and what held it was not found; the sync twin, whose poll blocks, has
+    // never failed. So the poll is waited for, and its exception caught, on a thread of its own that has ended when
+    // this returns, and only a bool leaves that thread.
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static async Task<WeakReference> PollAnUnreferencedPollException(AsyncMockConsumer<byte[], byte[]> consumer)
+    private static WeakReference PollAnUnreferencedPollException(AsyncMockConsumer<byte[], byte[]> consumer)
     {
         WeakReference pending = SetAnUnreferencedPollException(consumer);
-        KafkaException thrown = await Assert.ThrowsAsync<KafkaException>(() => Poll(consumer));
-        Assert.Same(pending.Target, thrown);
+        bool threwIt = false;
+        string? otherwise = null;
+        Thread poller = new Thread(() =>
+        {
+            try
+            {
+                consumer.Poll(s_pollTimeout).GetAwaiter().GetResult();
+                otherwise = "the poll returned";
+            }
+            catch (KafkaException e) when (ReferenceEquals(e, pending.Target))
+            {
+                threwIt = true;
+            }
+            catch (Exception e)
+            {
+                otherwise = $"the poll threw {e}";
+            }
+        })
+        {
+            IsBackground = true,
+        };
+        poller.Start();
+        Assert.True(poller.Join(s_deadline), $"the poll did not end within {s_deadline}");
+        Assert.True(threwIt, otherwise);
         return pending;
     }
 
