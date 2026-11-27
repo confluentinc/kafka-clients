@@ -304,6 +304,98 @@ newer.
   own or by name (`has({ key })`), as `MetricNameMap`'s do, and their types
   declare both.
 
+### Consumer
+
+- `KafkaConsumer` (`@confluentinc/kafka-javascript/consumer`), Java's consumer
+  of the KIP-848 group protocol, over the Rust client's C FFI, implementing
+  Java's `Consumer`: `subscribe` (topics, or a `SubscriptionPattern`, with or
+  without a `ConsumerRebalanceListener`), `assign`, `unsubscribe`, `poll`,
+  `commitSync`, `commitAsync`, `seek`, `seekToBeginning`, `seekToEnd`,
+  `position`, `committed`, `partitionsFor`, `listTopics`, `pause`, `resume`,
+  `paused`, `offsetsForTimes`, `beginningOffsets`, `endOffsets`,
+  `currentLag`, `groupMetadata`, `metrics`, `assignment`, `subscription`,
+  `wakeup`, `close()`, `close(CloseOptions)` and `[Symbol.asyncDispose]`.
+  The waiting calls return Promises; `assignment()`, `subscription()`,
+  `paused()`, `groupMetadata()`, `metrics()` and `wakeup()` answer at once.
+  The consumer takes one call at a time, the core's
+  `ConcurrentModificationError` passed through, `wakeup()` and `metrics()`
+  excepted. A consumer keeps Node running until `close()` closes it. Every
+  consumer sets `group.protocol: 'consumer'`: the classic protocol, Java's
+  default, is refused with the core's `UnsupportedOperationError`.
+- `ConsumerRecord` and `ConsumerRecords`, Java's, a `ConsumerRecord` a frozen
+  data object with Java's constructors; `OffsetAndTimestamp`,
+  `SubscriptionPattern`, `ConsumerGroupMetadata`, `CloseOptions` with its
+  `GroupMembershipOperation`, `GroupProtocol`, `ConsumerConfig`'s constants
+  and the `ConsumerConfigs` type, and the consumer's error classes
+  (`CommitFailedError`, `NoOffsetForPartitionError`, `OffsetOutOfRangeError`,
+  ...).
+- Zero copy on consume: a key or value is a `Buffer` over the memory the
+  client fetched, which keeps that fetch alive until it is collected; where
+  external buffers are refused, as on Electron, the client copies each key
+  and value. A record's `Headers` is its own, copied out of the fetch on its
+  first read or change.
+- The ten deserializer classes of Java (`StringDeserializer`,
+  `ByteArrayDeserializer`, `ShortDeserializer`, `IntegerDeserializer`,
+  `LongDeserializer`, `FloatDeserializer`, `DoubleDeserializer`,
+  `BooleanDeserializer`, `UUIDDeserializer`, `VoidDeserializer`, in
+  `common/serialization`), checked against Java's bytes and messages; a
+  deserializer as a constructor argument or through `key.deserializer` /
+  `value.deserializer`, run inside `poll()`, and possibly returning a
+  Promise; `KafkaConsumer.create()` *(js-only)* for config functions that
+  return a Promise.
+- `ConsumerRebalanceListener` and `OffsetCommitCallback`, each method taking
+  one object of Java's parameter names and possibly returning a Promise,
+  which the waiting call that runs it awaits; a listener without
+  `onPartitionsLost` gets Java's default. While one runs, the calls Java's
+  KIP-1306 callback view has go through the core's handle. What a callback
+  throws, or rejects with, comes back as the same value, where Java's
+  consumer has it.
+- `MockConsumer`, Java's mock, over the Rust client's own mock: its
+  constructors and its methods the FFI has (`addRecord`, `rebalance`,
+  `losePartitions`, `setMaxPollRecords`, `setPollException`,
+  `setOffsetsException`, `updateBeginningOffsets`, `updateEndOffsets`,
+  `updateDurationOffsets`, `updatePartitions`, `closed`,
+  `scheduleNopPollTask`, `lastPollTimeout`).
+- Deviations from Java's consumer, each recorded with its reason:
+  - while `poll()` awaits a deserializer's Promise, or seeks back, other
+    calls on the consumer go through, and `position()` answers past the
+    batch, where Java's `poll()` holds the consumer (accepted on
+    2026-11-27);
+  - a failing deserializer ends the batch where Java's does, and the
+    consumer seeks back, so the next poll fails on the record again, as in
+    Python;
+  - the keys a serde config function reads are listed by the core as
+    unused, where Java marks them used;
+  - inside a listener or commit callback, `poll()`, `subscribe()`,
+    `assign()`, `unsubscribe()`, `close()` and `subscription()` reject or
+    throw with `ConcurrentModificationError`, where Java's listener may call
+    them, as in Python;
+  - `commitAsync({ offsets, callback: null })` rejects with `TypeError`, where
+    Java's commits without a callback;
+  - a negative timeout rejects with "Timeout must not be negative", and a
+    negative `CloseOptions` timeout is read as zero;
+  - the closed getters' `IllegalStateError` carries the core's panic prefix;
+  - a null argument the FFI refuses, and a negative timeout, are refused
+    before the core's closed, busy and `group.id` checks, which Java runs
+    first, and `groupMetadata()` and `committed(null)` check `group.id`
+    first;
+  - a timed-out `close()`'s cause has the core's message;
+  - `close()` after `unsubscribe()` runs `onPartitionsLost` for the
+    partitions `unsubscribe()` revoked, where Java's runs no listener;
+  - `enforceRebalance()` is not translated, as in Python, and Java's
+    `Pattern` subscriptions are left out for `SubscriptionPattern`;
+  - `MockConsumer` does as the core's mock does where it differs from
+    Java's (the consumer package's documentation lists each place).
+- Left out, because the FFI has no entry point for them:
+  `clientInstanceId`, `registerMetricForSubscription`,
+  `unregisterMetricFromSubscription`, and the mock's `schedulePollTask`,
+  `setClientInstanceId`, `disableTelemetry`, `injectTimeoutException` and
+  `addedMetrics`.
+- `examples/consumer.js` subscribes, polls, prints and commits. The consumer's
+  broker tests also run over SSL and SASL_SSL (`make test-integration-ssl`,
+  `make test-integration-sasl`), and `make test-stress` reads a million
+  records through `StringDeserializer`s.
+
 ### Errors and security
 
 - The error classes of Java's client, generated from the Java sources as the

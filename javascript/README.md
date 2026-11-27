@@ -18,8 +18,9 @@ hashes keys with CRC-32).
 
 The API follows the Java client's shape (`KafkaProducer`, `ProducerRecord`,
 `RecordMetadata`, `KafkaFuture`), with JavaScript idioms (a `Promise` for a
-blocking call, a `KafkaFuture` whose `get()` returns a `Promise`). This first
-slice covers the producer only.
+blocking call, a `KafkaFuture` whose `get()` returns a `Promise`). It has the
+producer and the consumer (`KafkaConsumer`, `ConsumerRecord`,
+`SubscriptionPattern`; "The consumer", below).
 
 The package is `@confluentinc/kafka-javascript`, the npm name of the
 librdkafka-based client, at version `4.4.0-beta.1`: like the Rust-based Python
@@ -223,12 +224,14 @@ src/producer/          KafkaProducer, ProducerRecord, RecordMetadata, Callback (
 src/common/            KafkaError, KafkaFuture; errors/ (Java's common.errors), config/
                        (SslConfigs, SaslConfigs, SecurityConfig, SslClientAuth, ConfigError),
                        security/auth/ (SecurityProtocol), ...
-src/consumer/          the consumer's errors only (no consumer yet)
+src/consumer/          KafkaConsumer, MockConsumer, ConsumerRecord, ConsumerRecords,
+                       ConsumerRebalanceListener and OffsetCommitCallback (types),
+                       SubscriptionPattern, CloseOptions, ConsumerConfig, the consumer's errors
 src/internal/          private helpers (not exported, not declared)
 dist/                  src/ compiled by tsc (tsconfig.json): .js, .d.ts and maps, the
                        package's entry points (git-ignored)
 native/                the addon: util.h, addon.c, callback_queue.c, error.c, record.c, producer.c,
-                       and binding.gyp (node-gyp runs here, never at install)
+                       consumer.c, ..., and binding.gyp (node-gyp runs here, never at install)
 test/static|unit|typing|integration
 npm/                   one folder per platform package (its package.json and README)
 ```
@@ -718,6 +721,270 @@ venv/bin/python python/verifiable_clients/verifiable_consumer.py --bootstrap-ser
   --reset-policy earliest
 ```
 
+## The consumer
+
+`KafkaConsumer` (`@confluentinc/kafka-javascript/consumer`) is Java's
+consumer, of the KIP-848 group protocol, over the Rust client's C FFI. Its
+waiting methods return Promises (`poll()`, `subscribe()`, `assign()`, the
+commits, the seeks, the offset and metadata queries, `close()`), while
+`assignment()`, `subscription()`, `paused()`, `groupMetadata()`,
+`metrics()` and `wakeup()` answer at once, as their Java counterparts do.
+Every consumer sets `group.protocol: 'consumer'`, the only group protocol
+the client has.
+
+```js
+const { StringDeserializer } = require('@confluentinc/kafka-javascript/common/serialization');
+const { KafkaConsumer } = require('@confluentinc/kafka-javascript/consumer');
+
+const consumer = new KafkaConsumer({
+  configs: {
+    'bootstrap.servers': 'localhost:9092',
+    'group.id': 'demo-group',
+    'group.protocol': 'consumer',
+    'auto.offset.reset': 'earliest',
+  },
+  keyDeserializer: new StringDeserializer(), // without deserializers keys and values are Buffers
+  valueDeserializer: new StringDeserializer(),
+});
+await consumer.subscribe(['demo']);
+let printed = 0;
+while (printed === 0) {
+  const records = await consumer.poll(1000); // waits up to a second; 0 means "don't wait"
+  for (const record of records) {
+    console.log(record.topic, record.partition, record.offset, record.key, record.value);
+    printed++;
+  }
+}
+await consumer.commitSync(); // the offsets after the records poll() returned
+await consumer.close();
+```
+
+A consumer keeps Node running from its creation until `close()` closes it,
+and no garbage collection closes one, as with the producer: close every
+consumer, or `await using` it. A waiting call made on a closed consumer
+rejects with Java's `IllegalStateError` "This consumer has already been
+closed.", and the synchronous getters throw an `IllegalStateError` with the
+core's text of it (Limitations). The consumer takes one call at a time, as
+Java's does: a call made while another is pending rejects with
+`ConcurrentModificationError` "KafkaConsumer is not safe for multi-threaded
+access.", `wakeup()` and `metrics()` excepted. `examples/consumer.js` subscribes, polls, prints and
+commits.
+
+### Deserializers
+
+A consumer runs its deserializers in JavaScript, inside `poll()`, after the
+core returned the records. A deserializer is an object
+`{ deserialize({ topic, headers, data }), close?() }`, given as a constructor
+argument, or made by a function `({ configs, isKey }) => deserializer` in
+`key.deserializer` / `value.deserializer`, as the producer's serializers are.
+Java's built-in deserializers are classes, built with `new`:
+`StringDeserializer`, `ByteArrayDeserializer`, `ShortDeserializer`,
+`IntegerDeserializer`, `LongDeserializer`, `FloatDeserializer`,
+`DoubleDeserializer`, `BooleanDeserializer`, `UUIDDeserializer` and
+`VoidDeserializer`, in `common/serialization`, which read what Java's read.
+A deserializer is not called for a `null` key or value, and it gets the
+record's own `Headers` and a `Buffer` over the fetched bytes. It may return a
+Promise, which `poll()` awaits. The consumer closes both deserializers when
+it is closed. The keys a serde config function reads reach the core, which
+lists the ones it doesn't use *(deviation: Java marks them used, so Java
+doesn't list them)*. A function that returns a Promise in a
+config key needs `await KafkaConsumer.create(...)`, which awaits each such
+function, the key's first, and then builds the consumer as the constructor
+does *(js-only)*:
+
+<!-- snippet: fragment -->
+```js
+const typed = await KafkaConsumer.create({
+  ...configs,
+  'key.deserializer': () => new StringDeserializer(),
+  'value.deserializer': async ({ configs: given }) => {
+    // A Schema Registry deserializer would fetch what it needs here.
+    await Promise.resolve(given['schema.registry.url']);
+    return new StringDeserializer();
+  },
+});
+```
+
+When a deserializer throws or rejects, `poll()` returns the records before
+the one that failed, or, when there are none, rejects with
+`RecordDeserializationError`, with Java's message and payload (`err.offset()`,
+`err.topicPartition()`, ...) and what was thrown as its `cause`. The consumer
+seeks back, so each later poll fails on that record again until the app
+seeks past it: `await consumer.seek({ partition: err.topicPartition(), offset:
+err.offset() + 1n })` *(deviation, as in Python: Java's consumer never moves
+past the record; here the core's poll has, and the binding seeks back)*.
+
+**The deserializer window** *(deviation, accepted on 2026-11-27)*. While
+`poll()` awaits a deserializer's Promise, or seeks back after a failure, the
+core has already answered its poll, so another call on the consumer goes
+through meanwhile, where Java's `poll()` holds the consumer until it returns:
+`position()` answers past the whole batch, and `assignment()`, `pause()`,
+`resume()` and a second `poll()` go through. Code that needs Java's guarantee
+makes no other call on the consumer while such a `poll()` is pending.
+
+### `poll()` and the records
+
+`poll(timeout)` resolves to a `ConsumerRecords`: iterate it, or read
+`records.records(tp)` / `records.records(topic)`, `count()`, `isEmpty()`,
+`partitions()` and `nextOffsets()`. A `ConsumerRecord` is a frozen data
+object, read through fields (`record.topic`, `record.offset`, a `bigint`,
+`record.key`, `record.headers`, a `Headers` of its own, never `null`).
+
+**Keys and values are not copied.** A key or value from `poll()` points into
+the memory the client fetched, and a value you keep holds that whole fetch in
+memory. To keep a value for long, copy it with `Buffer.from(value)`. For
+example, a consumer that kept one 100-byte value of each poll, with the default
+settings, held about 210 KiB of memory per value kept (424 MiB for 2,064
+values), against 0.2 MiB for their copies (Apple M5 Max, Node.js 22,
+`tools/consumer-measurements/measure.js`). A deserializer's result holds nothing of the fetch unless it keeps the
+`Buffer` it was given (`ByteArrayDeserializer` returns that very `Buffer`).
+Electron doesn't allow external buffers, so on Electron the client copies each
+consumed key and value. Header values are always copies.
+
+### `subscribe()`, `assign()` and `SubscriptionPattern`
+
+`subscribe(topics)` (any iterable of topic names) and
+`subscribe({ topics, callback })` join the group named by `group.id`;
+`assign(partitions)` reads the partitions given, with no group, its commits
+still needing a `group.id`. A pattern is a `SubscriptionPattern`, which the
+broker matches against the whole topic name with RE2/J (KIP-848): a `RegExp`
+throws `TypeError` pointing to it, so `/^orders-/` becomes
+`new SubscriptionPattern('orders-.*')`. `unsubscribe()` leaves the group.
+
+### The rebalance listener
+
+A `ConsumerRebalanceListener` is an object with `onPartitionsRevoked`,
+`onPartitionsAssigned` and the optional `onPartitionsLost`, each taking one
+object, `({ partitions })`, a `TopicPartitionSet`. A listener without
+`onPartitionsLost` gets Java's default, which calls `onPartitionsRevoked`.
+The methods run on the JavaScript thread inside the waiting call that
+delivers them (`poll()`, `unsubscribe()`, `close()`), which settles only
+after they finish, as Java's `poll()` returns only after its listener
+returned: a method may return a Promise, which that call awaits, and the
+rebalance does not go on until it settles. So a listener must finish, and
+must await what it starts, such as the commit of the offsets it is about to
+lose:
+
+<!-- snippet: fragment -->
+```js
+await consumer.subscribe({
+  topics: ['orders'],
+  callback: {
+    onPartitionsRevoked: async ({ partitions }) => {
+      await consumer.commitSync(); // runs while the listener's Promise is pending
+    },
+    onPartitionsAssigned: ({ partitions }) => console.log(`assigned ${partitions}`),
+  },
+});
+```
+
+**The window.** While a listener's or commit callback's Promise is pending,
+from any code (a timer's included), the calls a listener needs work:
+`commitSync()`, `commitAsync()`, the seeks, `pause()`, `resume()`,
+`position()`, `committed()`, `partitionsFor()`, `listTopics()`,
+`offsetsForTimes()`, `beginningOffsets()`, `endOffsets()`, `currentLag()`,
+`assignment()`, `paused()`, `groupMetadata()` and `wakeup()`, and
+`metrics()` answers. `poll()`, `subscribe()`, `assign()`, `unsubscribe()`,
+`close()` and `subscription()` reject or throw with
+`ConcurrentModificationError` *(deviation, as in Python: Java's listener may
+call them; the core's callback handle has no form of them, KIP-1306)*.
+
+What a listener throws, or rejects with, comes back as the very same value,
+where Java's consumer has it: from `poll()` and `unsubscribe()` a
+`KafkaError` as itself and anything else as the `cause` of
+`KafkaError('User rebalance callback throws an error')`, and from `close()`
+inside `KafkaError('Failed to close kafka consumer')`. A listener whose
+Promise never settles has no time limit, as in Java: it holds the call that
+runs it, and `wakeup()` doesn't end it.
+
+### Commits
+
+`commitSync()` and `commitAsync()` keep Java's names, and both return
+Promises. `commitSync()` (with no offsets, the offsets after what `poll()`
+returned; or `commitSync(offsets)`, a `TopicPartitionMap` of
+`OffsetAndMetadata`) settles when the broker answers, retrying until it
+succeeds, fails with an error that can't be retried, or runs out of time.
+`commitAsync()` settles once the core has taken the commit, and the
+broker's answer goes to its optional `callback`, `({ offsets, exception }) =>
+...`, which runs inside the next waiting call (`poll()`, `commitSync()`,
+`close()`). Without a callback, a failed `commitAsync()` reaches no caller,
+as in Java, which only logs it. Await both: a commit that isn't awaited
+keeps the consumer busy. A callback's `offsets` is `null` for a failed commit
+and for an empty map committed, as Java's is; it may return a Promise, which
+the call that runs it awaits. What it throws comes back from `commitSync()`
+and `commitAsync()` as itself, from `poll()` a `KafkaError` as itself and
+anything else inside a `KafkaError` built from it, and from `close()` as the
+`cause` of `KafkaError('Failed to close kafka consumer')`.
+`commitAsync({ offsets, callback: null })` rejects with a `TypeError`, where
+Java's commits without a callback *(deviation)*: pass a callback with the
+offsets, or commit them with `commitSync(offsets)`.
+
+### `wakeup()` and stopping the poll loop
+
+`wakeup()` is a plain synchronous method, callable from any code on the
+consumer's thread, such as a signal handler: the waiting call, or the next
+one, rejects with `WakeupError`, once. `close()` during a pending `poll()`
+fails, as in Java, so stop the loop first:
+
+<!-- snippet: fragment -->
+```js
+const { WakeupError } = require('@confluentinc/kafka-javascript/common/errors');
+
+process.once('SIGINT', () => consumer.wakeup());
+try {
+  for (;;) {
+    for (const record of await consumer.poll(1000)) handle(record);
+  }
+} catch (e) {
+  if (!(e instanceof WakeupError)) throw e;
+} finally {
+  await consumer.close(); // once the loop has ended
+}
+```
+
+### Calls inside a callback
+
+- **Don't wait for the call that runs the callback.** A listener or commit
+  callback runs inside the waiting call that delivers it, which settles only
+  once the callback has. A callback that awaits that call, or anything that
+  happens only after it (the poll loop's next round, a Promise the loop
+  resolves), never settles, and neither does the call.
+- **Await every call you make on a consumer before you drop it**, the calls
+  made after `close()` included: a closed consumer that is garbage collected
+  while one of its calls still has an answer queued runs that answer's
+  JavaScript during the collection, and may hold the thread for up to 5
+  seconds while the client stops.
+
+### MockConsumer
+
+`MockConsumer` is Java's mock of the consumer, for testing code that uses
+Kafka. It implements `Consumer` and is the client core's own mock, reached
+as `KafkaConsumer` is: its waiting methods return Promises, it takes one call
+at a time, and it keeps Node running until `close()`, so a test closes every
+mock. It takes no deserializers, so its type arguments are written, as
+Java's are:
+
+```js
+const { TopicPartition, TopicPartitionMap } = require('@confluentinc/kafka-javascript/common');
+const { ConsumerRecord, MockConsumer } = require('@confluentinc/kafka-javascript/consumer');
+
+/** @type {MockConsumer<string, string>} */
+const mock = new MockConsumer('earliest');
+const tp = new TopicPartition({ topic: 'orders', partition: 0 });
+await mock.assign([tp]);
+mock.updateBeginningOffsets(new TopicPartitionMap([[tp, 0n]])); // where 'earliest' starts, as Java's mock needs
+mock.addRecord(new ConsumerRecord({ topic: 'orders', partition: 0, offset: 0, key: 'k', value: 'v' }));
+const records = await mock.poll(0);
+console.log(records.count(), [...records][0].value); // 1 v
+await mock.close();
+```
+
+`poll()` returns the very records `addRecord()` was given, and an error given
+to `setPollException()` or `setOffsetsException()` comes back as the very
+same object, once. `rebalance()` and `losePartitions()` run the listener.
+Where the core's mock differs from Java's, it does as the core's does: the
+consumer package's documentation lists each place.
+
 ## Migrating from the earlier development builds
 
 (For 1.x and KafkaJS, see [`MIGRATION.md`](MIGRATION.md).)
@@ -813,6 +1080,36 @@ package root.
 
   A delivered record's `RecordMetadata` is a data object: `{ ...metadata }`
   is plain data too.
+
+- **The consumer has the KIP-848 group protocol only.** A consumer without
+  `group.protocol: 'consumer'`, or with Java's default, `'classic'`, is
+  refused at construction with `UnsupportedOperationError` "Classic group
+  protocol is not yet supported in this client; set group.protocol=consumer
+  (KIP-848).". Java's `enforceRebalance()`, which Java's KIP-848 consumer only
+  logs as unsupported, is not translated *(deviation, as in Python)*.
+- **Members left out until the core's C API has them**: the consumer's
+  `clientInstanceId()`, `registerMetricForSubscription()` and
+  `unregisterMetricFromSubscription()`, and the mock's `schedulePollTask()`,
+  `setClientInstanceId()`, `disableTelemetry()`, `injectTimeoutException()`
+  and `addedMetrics()`.
+- **Where the consumer's core differs from Java's**, the client does as the
+  core does:
+  - after `unsubscribe()` has run `onPartitionsRevoked`, `close()` runs
+    `onPartitionsLost` for the same partitions, where Java's `close()` runs no
+    listener;
+  - the keys a deserializer config function reads are listed by the core as
+    unused, where Java marks them used;
+  - `assignment()`, `subscription()`, `paused()` and `groupMetadata()` on a
+    closed consumer throw `IllegalStateError` "Rust panic caught at the FFI
+    boundary in kafka_consumer_Consumer_assignment: This consumer has
+    already been closed." (with that getter's name), where Java's message is
+    "This consumer has already been closed." alone; the waiting calls reject
+    with Java's message;
+  - a negative timeout rejects with `IllegalArgumentError` "Timeout must not
+    be negative", where Java's `poll()`, `commitSync()` and `position()` say
+    "Invalid negative timeout <ms>" and its other calls wait without a time
+    limit, and a negative `CloseOptions` timeout is read as zero, where Java's
+    `close()` throws.
 
 ## Security
 

@@ -11,17 +11,19 @@ KafkaJS. 4.x has one API, shaped like Java's: code written for either API of
 This guide lists what users of 1.x and KafkaJS lose and what replaces it: the
 call sites to rewrite, what is not offered, what is not available yet, and the
 code that keeps running with another meaning. It is not exhaustive. The
-preview, `4.4.0-beta.1`, has the **producer only**: the rows about the
-consumer and the admin client say what comes with them.
+preview, `4.4.0-beta.1`, has the **producer and the consumer**: the rows
+about the admin client say what comes with it.
 
 Two rules explain most rows at once:
 
 - **Java's names and Java's shapes.** Classes, methods and parameters are
-  Java's (`KafkaProducer`, `ProducerRecord`, `send`, `flush`, `close`), and a
-  call takes Java's parameters by name in one object, or, for a form with one
-  parameter, the value on its own: `send({ record, callback })`,
-  `send(record)`, `close(5000)`, `close({ timeout: 5000 })`. Any other set of
-  names throws (or rejects with) `IllegalArgumentError`, listing Java's forms.
+  Java's (`KafkaProducer`, `ProducerRecord`, `send`, `flush`, `close`;
+  `KafkaConsumer`, `subscribe`, `poll`, `commitSync`), and a call takes Java's
+  parameters by name in one object, or, for a form with one parameter, the
+  value on its own: `send({ record, callback })`, `send(record)`,
+  `close(5000)`, `close({ timeout: 5000 })`, `poll(1000)`,
+  `subscribe({ topics, callback })`. Any other set of names throws (or
+  rejects with) `IllegalArgumentError`, listing Java's forms.
 - **Java's configuration keys.** The configuration is a plain object of Java's
   dotted keys (`bootstrap.servers`, `linger.ms`, `max.request.size`), not
   librdkafka's names and not a `kafkaJS` block.
@@ -124,12 +126,31 @@ producer for them.
 | `await producer.flush({ timeout })` / `flush(timeout, cb)` | `await producer.flush()` | Java's `flush()` takes no timeout: it waits until every record sent before it is delivered or failed |
 | `producer.transaction()`, `sendOffsets()`, `commit()`, `abort()` (KafkaJS) | `initTransactions()`, `beginTransaction()`, `sendOffsetsToTransaction()`, `commitTransaction()` and `abortTransaction()`, Java's names | Not in the preview yet (Section 3). When they come, they return Promises, `beginTransaction()` included. A send is part of the transaction once its `send()` Promise has resolved. `commitTransaction()` waits for its delivery, so there's no need to await `future.get()` first. A send whose Promise hasn't resolved yet may be left out |
 
+### Consuming
+
+| 1.x / KafkaJS | 4.x | Note |
+|---|---|---|
+| `new Kafka({ kafkaJS: { brokers } }).consumer({ kafkaJS: { groupId } })`, `new Kafka.KafkaConsumer(conf, topicConf)` | `new KafkaConsumer({ 'bootstrap.servers': 'host:9092', 'group.id': 'g', 'group.protocol': 'consumer' })`, or `new KafkaConsumer({ configs, keyDeserializer, valueDeserializer })` | Imported from `require('@confluentinc/kafka-javascript/consumer')`. Every consumer sets `group.protocol: 'consumer'` (KIP-848), the only group protocol the client has; without it the constructor throws `UnsupportedOperationError`. As the producer, it is ready once constructed: there is no `connect()`, and `close()` replaces `disconnect()` |
+| `await consumer.subscribe({ topics, fromBeginning: true })`, `subscribe({ topic })` | `await consumer.subscribe(topics)` (any iterable of names), with `'auto.offset.reset': 'earliest'` in the configuration for `fromBeginning` | A bare string rejects with `IllegalArgumentError` (and `{ topics: 't' }` with `TypeError`): pass an array. A topic `RegExp` becomes a `SubscriptionPattern` (below) |
+| `await consumer.run({ eachMessage: async ({ topic, partition, message }) => ... })`, `eachBatch` | a `poll()` loop: `for (;;) for (const record of await consumer.poll(1000)) ...` | Java's shape: one call reads one batch, in the app's own loop, so there is no `partitionsConsumedConcurrently`. `poll(timeout)` waits up to `timeout` milliseconds (a `Temporal.Duration` too); `0` means "don't wait" |
+| 1.x's `consumer.consume()` with `consumer.on('data', ...)`, `consume(n, cb)`, `setDefaultConsumeTimeout()` | `await consumer.poll(timeout)`, which resolves to a `ConsumerRecords` | There is no event emitter and no flowing mode: the loop calls `poll()` |
+| `message.value`, `message.key` (Buffers), `message.offset` (a string), `message.headers` (an object) | `record.value`, `record.key` (Buffers, or what the deserializers return), `record.offset` (a `bigint`), `record.headers` (a `Headers`: `lastHeader(key)?.value()`, iteration) | A `ConsumerRecord` is a frozen data object, read through fields. A key or value points into the memory the client fetched, so a value kept for long holds that whole fetch: copy it with `Buffer.from(value)` |
+| a string value read with `message.value.toString()` | `valueDeserializer: new StringDeserializer()` (`common/serialization`), or `{ 'value.deserializer': () => new StringDeserializer() }` | The serdes go in the constructor, or in Java's serde keys as a function; a deserializer is `{ deserialize({ topic, headers, data }) }` and may return a Promise |
+| `consumer.commitOffsets([{ topic, partition, offset }])`, 1.x's `commit()`, `commitMessage(msg)` | `await consumer.commitSync()` (the offsets after what `poll()` returned), `await consumer.commitSync(offsets)` or `await consumer.commitAsync({ offsets, callback })` | Java's names, and both return Promises: only `commitSync()` waits for the broker; `commitAsync()` settles once the core has taken the commit, and its `callback({ offsets, exception })` gets the broker's answer, inside the next waiting call. `offsets` is a `TopicPartitionMap` of `OffsetAndMetadata`: the next offset to read, `record.offset + 1n` |
+| `consumer.seek({ topic, partition, offset })` | `await consumer.seek({ partition: new TopicPartition({ topic, partition }), offset })` | A partition is a `TopicPartition` (`common`), the offset a `bigint` or a whole number |
+| `consumer.pause([{ topic, partitions }])`, `resume(...)` | `await consumer.pause(partitions)`, `await consumer.resume(partitions)`, an iterable of `TopicPartition`s | `consumer.paused()` and `consumer.assignment()` return a `TopicPartitionSet` |
+| `subscribe({ topics: [/^orders-/] })`, a topic regular expression | `subscribe(new SubscriptionPattern('orders-.*'))` | The broker matches the whole topic name with RE2/J (KIP-848), so a pattern is a string in a `SubscriptionPattern`; a `RegExp` throws `TypeError` pointing to it |
+| `rebalance_cb`, KafkaJS's `GROUP_JOIN` event, `consumer.on('rebalance', ...)` | a `ConsumerRebalanceListener` given to `subscribe({ topics, callback })`: `{ onPartitionsRevoked({ partitions }), onPartitionsAssigned({ partitions }), onPartitionsLost?({ partitions }) }` | Each method takes one object, as Java's take its parameter, and runs inside the waiting call that delivers it (`poll()`, `unsubscribe()`, `close()`). A listener must finish, and must await what it starts: the call, and the rebalance, wait until it, and the Promise it returns, settle, and one that never settles holds them without a time limit. Inside it, `commitSync()`, the seeks, `pause()`, `position()` and the other calls a listener needs work; `poll()`, `subscribe()`, `assign()`, `unsubscribe()` and `close()` reject with `ConcurrentModificationError` |
+| `offset_commit_cb` | the `callback` of `commitAsync()` | Per commit, not per client |
+| `await consumer.disconnect()` while `run()` is going | `consumer.wakeup()`, let the loop end on its `WakeupError`, then `await consumer.close()` | `close()` during a pending `poll()` fails, as in Java: stop the poll loop first. A consumer keeps Node running until `close()` closes it |
+| a hand-written mock of the consumer | `new MockConsumer('earliest')`, Java's mock (`consumer`) | It implements `Consumer` and is the core's own mock: `addRecord()`, `rebalance()`, `updateBeginningOffsets()`, ... Close every mock |
+
 ### Reading results and values
 
 | 1.x / KafkaJS | 4.x | Note |
 |---|---|---|
 | `RecordMetadata[]` from `send()`: `{ topicName, partition, baseOffset, errorCode }` | `RecordMetadata` from `future.get()`: `metadata.topic`, `.partition`, `.offset`, `.hasOffset`, `.timestamp`, `.serializedKeySize`, ... | A **data object**: Java's getters are `readonly` fields, so they read without `()`. **Silent:** `offset` and `timestamp`, Java's `long`, are bigints (`metadata.offset === 0n`), where 1.x's callback API gives numbers and its KafkaJS-style API strings; `JSON.stringify` writes them as decimal strings |
-| other reads | methods, with `()`: `header.key()`, `header.value()`, `future.isDone()`, `SecurityProtocol.SSL.name()` | Only the data objects (`ProducerRecord`, `RecordMetadata`, `TopicPartition`, `Node`; on the consumer side the records) read through fields. Without the `()` a read returns the function itself and raises no error |
+| other reads | methods, with `()`: `header.key()`, `header.value()`, `future.isDone()`, `SecurityProtocol.SSL.name()`, `records.count()` | Only the data objects (`ProducerRecord`, `RecordMetadata`, `TopicPartition`, `Node`, `OffsetAndMetadata`, `ConsumerRecord`) read through fields. Without the `()` a read returns the function itself and raises no error |
 | `err.code`, `err.type`, `err.retriable`, `KafkaJSError` subclasses | Java's classes, `Exception` read as `Error`: `instanceof RetriableError`, `instanceof TopicAuthorizationError`, `err.name` as the fallback | An error has no `code` or `retriable` field; they read `undefined`. The classes follow Java's `extends` chain and are in their packages (`common/errors`, `producer`, ...) |
 | an error's details as fields (KafkaJS's `KafkaJSProtocolError.type`, 1.x's `err.message` parsed for the topics) | Java's payload getters, methods with `()`: `err.unauthorizedTopics()` (a `Set`), `err.recordTooLargePartitions()` (a `TopicPartitionMap<bigint>`, or `null`), `err.invalidTopics()`, `err.groupId()`, `err.throttleTimeMs()` | Each returns a new collection the caller may change. An error is built with them by name: `new TopicAuthorizationError({ unauthorizedTopics: ['t'] })` |
 | a map or set keyed by `'topic:partition'` strings, or by `{ topic, partition }` objects | `TopicPartitionMap` and `TopicPartitionSet` (`common`) | A `Map` compares object keys by identity, so a new `TopicPartition` would miss; these compare by topic and partition and keep the original `TopicPartition`s. Where Java takes a `Map<TopicPartition, V>` only a `TopicPartitionMap` is taken, and a `Map` throws `TypeError` with a hint |
@@ -163,6 +184,10 @@ key, which the core lists in one log line and otherwise ignores.
 | `ssl.certificate.location`, `ssl.key.location` | `ssl: { cert, key }` | `ssl.keystore.location` (one PEM file with the chain and the key), or `ssl.keystore.certificate.chain` and `ssl.keystore.key` |
 | `sasl.mechanisms`, `sasl.username`, `sasl.password` | `sasl: { mechanism, username, password }` | `sasl.mechanism` and `sasl.jaas.config` (`org.apache.kafka.common.security.plain.PlainLoginModule required username="..." password="...";`); the preview supports `PLAIN` only |
 | `partitioner` | `createPartitioner` | `partitioner.type` (Read this first, above) |
+| `group.id` | `groupId` | `group.id`, with `group.protocol: 'consumer'` |
+| `auto.offset.reset` (`smallest`, `earliest`, ...) | `fromBeginning: true` | `auto.offset.reset: 'earliest'` (`'latest'`, the default, `'none'`, `'by_duration:<ISO-8601 duration>'`) |
+| `enable.auto.commit` | `autoCommit` (a `run()` option) | `enable.auto.commit` (on by default, as in Java) and `auto.commit.interval.ms` |
+| — | `eachBatch`'s batch size | `max.poll.records` |
 
 The config constants are Java's: `ProducerConfig.LINGER_MS_CONFIG`,
 `SslConfigs.SSL_TRUSTSTORE_LOCATION_CONFIG`, `SaslConfigs.SASL_JAAS_CONFIG`.
@@ -236,8 +261,9 @@ await registered.close();
 |---|---|---|
 | a KafkaJS-style API in the same package | 4.x has one API, Java's | the Java-shaped API of this guide |
 | `connect()`, `disconnect()`, `run()` helpers, events | a client is ready once constructed, as in Java; Java has no event emitter | construct it; `close()`; the callback and the futures |
+| the consumer's `run()`, `eachMessage`, `eachBatch`, `partitionsConsumedConcurrently`, `stop()`, flowing `consume()` and its `'data'` events | Java's consumer has none: the app calls `poll()` in its own loop | a `poll()` loop (Section 1), ended with `wakeup()` before `close()` |
 | a producer `poll()` / `setPollInterval()` | callbacks run on the JavaScript thread without polling | delete the call |
-| `error_cb`, `dr_cb`, `stats_cb`, `oauthbearer_token_refresh_cb`, `rebalance_cb`, `offset_commit_cb` config callbacks | no config value is a callback, as in Java | an operation's error rejects its call or fails its future; deliveries go to each `send()`'s callback; `stats_cb`'s statistics are `metrics()`, read when called (Section 1); 1.x's `rebalance_cb` becomes a listener passed to `subscribe()`, and `offset_commit_cb` the commit call's callback (with the consumer). A custom OAuth token callback has no replacement until the core has a token hook |
+| `error_cb`, `dr_cb`, `stats_cb`, `oauthbearer_token_refresh_cb`, `rebalance_cb`, `offset_commit_cb` config callbacks | no config value is a callback, as in Java | an operation's error rejects its call or fails its future; deliveries go to each `send()`'s callback; `stats_cb`'s statistics are `metrics()`, read when called (Section 1); 1.x's `rebalance_cb` becomes a listener passed to `subscribe()`, and `offset_commit_cb` the callback of `commitAsync()` (Section 1). A custom OAuth token callback has no replacement until the core has a token hook |
 | a `logger` option | the core logs on its own | `RUST_LOG` for the core, `NODE_DEBUG=confluent_kafka` for the binding |
 | `producer.sendBatch()`, a producer queue length | the core batches and applies backpressure itself (`max.block.ms`) | `send()` in a loop, then `flush()` |
 | 1.x's `types/kafkajs` type definitions | the package ships the types of its own API | import the types from the package paths |
@@ -248,44 +274,20 @@ await registered.close();
 
 | Feature | Comes with |
 |---|---|
-| The consumer: `KafkaConsumer` with `poll()`, `subscribe()`, `assign()`, `commitSync()` and `commitAsync()` | the consumer |
+| The classic consumer group protocol (`group.protocol: 'classic'`, Java's default), and with it `enforceRebalance()` | a later release of the Rust core: the consumer has the KIP-848 protocol only |
 | The admin client: `Admin.create()`, its RPCs, `*Options` and `*Result` classes | the admin client |
 | Transactions: `initTransactions()`, `beginTransaction()`, `sendOffsetsToTransaction()`, `commitTransaction()`, `abortTransaction()` | a later release: left out of the preview |
-| `clientInstanceId()` | the Rust core's C API, which has no entry point for it yet |
+| `clientInstanceId()`, on the producer and the consumer; the consumer's `registerMetricForSubscription()` and `unregisterMetricFromSubscription()`; `MockConsumer`'s `schedulePollTask()`, `setClientInstanceId()`, `disableTelemetry()`, `injectTimeoutException()` and `addedMetrics()` | the Rust core's C API, which has no entry points for them yet |
 | Schema Registry | the release of `@confluentinc/schemaregistry` that supports 4.x |
 | Musl (Alpine), Linux arm64 and Windows packages | later releases; build from source until then |
 
-When the consumer and the admin client come, this guide gains their rows. What
-is decided for them already:
+When the admin client comes, this guide gains its rows. What is decided for it
+already:
 
-- **Listeners must finish, and must await what they start.** A rebalance
-  listener (`onPartitionsRevoked`, `onPartitionsAssigned`, `onPartitionsLost`)
-  takes one object, `onPartitionsRevoked({ partitions })`; the rebalance does
-  not go on until the listener, and the Promise it returns, settles, and a
-  listener that never settles blocks its `poll()` without a time limit.
-- **Stop the poll loop before `close()`.** `close()` during a pending
-  `poll()` fails, as in Java: call `wakeup()`, let the loop exit, then
-  `await consumer.close()`.
-- **`commitSync()` and `commitAsync()` keep Java's names, and both return
-  Promises**: only `commitSync()` waits for the broker; `commitAsync()`
-  settles once the core has taken the commit, and its `callback` gets the
-  broker's answer.
-- **A pattern is a `SubscriptionPattern`, not a `RegExp`**: the broker
-  matches the whole topic name, so `/^orders-/` becomes
-  `new SubscriptionPattern({ pattern: 'orders-.*' })`.
-- **A map keyed by partition is a `TopicPartitionMap`**, and a set of
-  partitions (`assignment()`) a `TopicPartitionSet`, both available today
-  (Section 1): their `keys()` are `TopicPartition` objects (`tp.topic`,
-  `tp.partition`), not strings.
-- **Every consumer sets `group.protocol: 'consumer'`** (KIP-848) until the
-  core changes its default.
 - **The admin results and options are classes** (`new CreateTopicsOptions({
   timeoutMs: 5000 })`, `result.values()`), each RPC returning its `*Result` at
   once, with a `KafkaFuture` per key; and **`close()` has no time limit on the
   admin client either**.
-- **Serdes go in the constructor, or in `key.serializer` / `value.serializer`
-  as a function `({ configs, isKey }) => serializer`**, never as a class
-  name, and a string key or value needs `new StringSerializer()`.
 
 ## 4. Available here and not in 1.x or KafkaJS
 
@@ -297,7 +299,7 @@ is decided for them already:
   `instanceof`, and Java's messages word for word.
 - TypeScript declarations of every form: one overload signature per Java form,
   so `tsc` rejects a set of parameters Java has no form for.
-- `await using` closes a producer (`[Symbol.asyncDispose]`).
+- `await using` closes a producer or a consumer (`[Symbol.asyncDispose]`).
 - `Temporal.Duration` timeouts, beside milliseconds.
 - Java's config constants (`ProducerConfig`, `SslConfigs`, `SaslConfigs`,
   `SecurityConfig`) with Java's documentation strings.
@@ -310,6 +312,11 @@ is decided for them already:
 - Java's error payloads as getters (`err.unauthorizedTopics()`), and
   `TopicPartitionMap` / `TopicPartitionSet` for maps and sets keyed by
   partition.
+- A rebalance listener or commit callback that returns a Promise, which the
+  call that runs it awaits, and `await KafkaConsumer.create(...)` for
+  deserializers whose config function waits.
+- Java's `MockConsumer`, the client's own mock: `addRecord()`, `rebalance()`,
+  `losePartitions()`, the offset updates and an error to throw from `poll()`.
 
 ## 5. Same code, different result
 
@@ -321,7 +328,7 @@ behaves otherwise.
 | `await send()` | resolves on delivery, with the metadata (KafkaJS-style API, KafkaJS) | resolves on acceptance, with a `KafkaFuture` | Code that treats "resolved" as "delivered" loses records silently on a later failure (Read this first) |
 | Keyed record → partition | murmur2 (KafkaJS-style API, KafkaJS); CRC-32 (node-rdkafka style) | CRC-32 | The same key lands on another partition; set `partitioner.type: 'Murmur2RandomPartitioner'` (Read this first) |
 | A `Buffer` key or value changed after `send()` | the bytes at the call are sent: 1.x copies a plain Buffer inside `send()` (`RK_MSG_COPY`) | the client reads the Buffer after `send()` returns, until its Promise settles | A Buffer reused or written to before `send()` settles sends other bytes; await `send()` first, and have a serializer return a new Buffer for each record |
-| 64-bit values (`RecordMetadata.offset`, `.timestamp`) | numbers (callback API) or strings (KafkaJS-style API) | `bigint`s, Java's `long`, exact at every value | `offset === 0` is false for `0n`, and arithmetic mixing a `bigint` and a number throws `TypeError`; `JSON.stringify` writes them as decimal strings |
+| 64-bit values (`RecordMetadata.offset`, `.timestamp`, a consumed record's `offset` and `timestamp`) | numbers (callback API) or strings (KafkaJS-style API) | `bigint`s, Java's `long`, exact at every value | `offset === 0` is false for `0n`, and arithmetic mixing a `bigint` and a number throws `TypeError`; `JSON.stringify` writes them as decimal strings |
 | Keyless record → partition | round-robin or random | a sticky partition chosen by load (KIP-794) | Another distribution and batching |
 | A lone surrogate in a string key, value, header key or config value | written as U+FFFD (`Buffer.from`) | written as `?`, as Java's `String.getBytes(UTF_8)` writes it | Other bytes on the wire for a malformed string; well-formed strings encode the same |
 | `enable.idempotence` unset | off (librdkafka, KafkaJS) | on, as in Java, unless a conflicting setting turns it off | `acks` is `all` and retries keep each partition's order, as Java's producer does by default |
@@ -334,7 +341,13 @@ behaves otherwise.
 | `TimeoutError` | one class | two: the root's (Java's `java.util.concurrent.TimeoutException`), which a timed `future.get(timeout)` rejects with, and `common/errors`' Kafka `TimeoutError`, which a delivery or `max.block.ms` timeout fails a record with (the `cause` of `get()`'s `ExecutionError`, and the callback's `exception`) | Check the class you mean; neither is the `DOMException` of `AbortSignal.timeout()` |
 | A serializer that throws | the error is thrown or rejected as it is | as Java's `KafkaProducer`: an `ApiError` goes to the callback, with -1 metadata, and fails the future `send()` resolves to; a `TypeError` rejects as a `SerializationError` ("Can't convert key of class …"), the `TypeError` its `cause`; anything else rejects as it is | Check the callback or the future for an `ApiError` from a serializer, and `e.cause` for the `TypeError` |
 | A `MockProducer` callback whose Promise rejects | — | the callback's error, as a throw is: the record's own `send()` with `autoComplete`, and `flush()`, reject with it; after `completeNext()` / `errorNext()` the next `send()`, `flush()` or `close()` does, once, `flush()` still flushing first. The mock's callbacks run one at a time, as the producer's do: one that waits for its turn behind an earlier callback's Promise runs after `completeNext()` / `errorNext()` returned, and its throw is kept the same way. A `close()` inside a callback the core runs in its drain, before its first `await`, does not wait for the callbacks; after it, or in a callback that waited for its turn, `close()` waits for that callback, and a `flush()` there does too, unless a flush error is set, which it rejects with at once, so a callback that awaits either otherwise never settles. With `autoComplete`, a `send()` from a callback's synchronous part settles after its own callback, which runs in its turn once the outer one settled, so a callback that awaits it never settles | A test sees the callback's failure; await `flush()` or `close()` to collect it |
+| A consumed key or value kept after its batch | — | a `Buffer` over the memory the client fetched, so a value you keep holds that whole fetch in memory; on Electron the client copies each key and value | Copy a value you keep for long with `Buffer.from(value)` |
+| `commitAsync()` awaited | — | settles once the core has taken the commit, before the broker answers; the broker's answer goes to its callback, run inside the next waiting call | Await `commitSync()` when the commit must have reached the broker |
+| A rebalance listener's Promise | — | awaited: the call that delivers the listener, and the rebalance, wait until it settles, with no time limit | Make every listener finish; a listener that awaits the `poll()` that runs it, or the poll loop's next round, never settles |
+| A deserializer that throws | — | `poll()` returns the records before it, or rejects with `RecordDeserializationError`, and the consumer seeks back, so each later poll fails on that record again until the app seeks past it, `seek({ partition: e.topicPartition(), offset: e.offset() + 1n })` | Handle `RecordDeserializationError` in the poll loop |
+| A `poll()` with an awaited deserializer | — | the core has answered its poll while the deserializer's Promise is pending, so another call on the consumer goes through meanwhile, and `position()` answers past the whole batch *(deviation, accepted)* | Make no other call on the consumer while a `poll()` is pending |
 | String keys and values without a serializer | strings sent as UTF-8 | a string key or value throws `TypeError` pointing to `StringSerializer`, which encodes it as Java's does | Pass `keySerializer: new StringSerializer()` / `valueSerializer: new StringSerializer()` (or the config keys), or `Uint8Array`s |
 
-`README.md` is the reference for the rest of the producer's API, and
+`README.md` is the reference for the rest of the producer's and the consumer's
+API, and
 `CHANGELOG.md` lists each change in the release where it lands.
