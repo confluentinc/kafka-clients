@@ -86,19 +86,19 @@ const FORMAT_VERSION: u64 = 2;
 const ROOT_PACKAGE: &str = "confluent-kafka";
 
 const DEFAULT_BASE: &str = "origin/master";
-const DEFAULT_AGENT: &str = "claude";
-const DEFAULT_MODEL: &str = "opus";
+pub(crate) const DEFAULT_AGENT: &str = "claude";
+pub(crate) const DEFAULT_MODEL: &str = "opus";
 /// Claude Code's `--tools`: the only built-in tools the agent has. With
 /// `--restricted` the user, project and local settings files are ignored, so
 /// their allow rules and default permission mode do not apply.
-const AGENT_BUILTIN_TOOLS: &str = "Read,Grep,Glob,Bash";
+pub(crate) const AGENT_BUILTIN_TOOLS: &str = "Read,Grep,Glob,Bash";
 /// Claude Code's `--allowedTools`: the agent reads the repository and the
 /// history, and changes nothing.
-const AGENT_TOOLS: &str = "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*),\
+pub(crate) const AGENT_TOOLS: &str = "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*),\
                            Bash(git status:*),Bash(git ls-files:*),Bash(ls:*)";
 /// Claude Code's `--disallowedTools`: `git diff`, `git log` and `git show`
 /// write a file with `--output`, which `AGENT_TOOLS` would otherwise allow.
-const AGENT_DENIED_TOOLS: &str = "Bash(git * --output*)";
+pub(crate) const AGENT_DENIED_TOOLS: &str = "Bash(git * --output*)";
 /// How long the agent may take by default before `select-tests` gives up, so
 /// a stalled call cannot hang a commit.
 const DEFAULT_AGENT_TIMEOUT_SECS: u64 = 600;
@@ -847,7 +847,7 @@ fn select_into(options: &SelectOptions, head: &str, target: &Target) -> anyhow::
             .args(["--allowedTools", AGENT_TOOLS, "--disallowedTools", AGENT_DENIED_TOOLS])
             .args(["-p", &prompt])
             .current_dir(REPO_ROOT);
-        let (status, answer) = run_with_deadline(&mut command, timeout)?;
+        let (status, answer) = run_with_deadline("select-tests", &mut command, timeout)?;
         if !status.success() {
             bail!("select-tests: the agent failed ({status}):\n{answer}");
         }
@@ -1142,9 +1142,13 @@ fn extract_json(answer: &str) -> anyhow::Result<Value> {
 }
 
 /// Runs `command` with no stdin and its stderr inherited, and returns its exit
-/// status and stdout. Kills it and fails when it has not exited within
-/// `timeout`.
-fn run_with_deadline(command: &mut Command, timeout: Duration) -> anyhow::Result<(std::process::ExitStatus, String)> {
+/// status and stdout. Kills it and fails, naming `task`, when it has not
+/// exited within `timeout`.
+pub(crate) fn run_with_deadline(
+    task: &str,
+    command: &mut Command,
+    timeout: Duration,
+) -> anyhow::Result<(std::process::ExitStatus, String)> {
     let program = command.get_program().to_string_lossy().into_owned();
     let mut child = command
         .stdin(Stdio::null())
@@ -1166,7 +1170,7 @@ fn run_with_deadline(command: &mut Command, timeout: Duration) -> anyhow::Result
         if Instant::now() >= deadline {
             let _ = child.kill();
             let _ = child.wait();
-            bail!("select-tests: {program} did not answer within {} s", timeout.as_secs());
+            bail!("{task}: {program} did not answer within {} s", timeout.as_secs());
         }
         std::thread::sleep(Duration::from_millis(100));
     };
@@ -2424,13 +2428,18 @@ add_test(NAME mock_producer COMMAND test_mock_producer)
 
     #[test]
     fn test_run_with_deadline() {
-        let (status, out) =
-            run_with_deadline(Command::new("sh").args(["-c", "echo answer"]), Duration::from_secs(10)).unwrap();
+        let (status, out) = run_with_deadline(
+            "select-tests",
+            Command::new("sh").args(["-c", "echo answer"]),
+            Duration::from_secs(10),
+        )
+        .unwrap();
         assert!(status.success());
         assert_eq!(out, "answer\n");
 
         let started = Instant::now();
-        let error = run_with_deadline(Command::new("sleep").arg("30"), Duration::from_secs(1)).unwrap_err();
+        let error =
+            run_with_deadline("select-tests", Command::new("sleep").arg("30"), Duration::from_secs(1)).unwrap_err();
         assert_eq!(error.to_string(), "select-tests: sleep did not answer within 1 s");
         assert!(started.elapsed() < Duration::from_secs(10));
     }
