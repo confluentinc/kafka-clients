@@ -55,7 +55,7 @@ const {
   functionType,
 } = require('../java_ts');
 const { taggedMember } = require('./java_members');
-const { LEFT_OUT, MERGED_FORMS, liveForms, formOptionNames, formKey } = require('./overload_shape');
+const { LEFT_OUT, isMergedForm, liveForms, formOptionNames, formKey } = require('./overload_shape');
 
 /** The block tags whose text counts whatever Java has: Rust's notes and the sections of no tag. */
 const COUNTED_TAGS = new Set(['remarks', 'see', 'example']);
@@ -221,7 +221,7 @@ function joined(sizes, more) {
 /** The Java forms (overloads) signature `sig` of member `jm` translates, by the overload-shape mapping, else all. */
 function signatureForms(ts, checker, sig, jm) {
   let forms = liveForms(jm.overloads).filter((f) => !LEFT_OUT.has(`${jm.owner.fqn}#${formKey(f)}`));
-  if (MERGED_FORMS.has(`${jm.owner.fqn}#${jm.name}`) && forms.length > 0) {
+  if (isMergedForm(jm) && forms.length > 0) {
     forms = [forms.reduce((a, f) => (f.params.length > a.params.length ? f : a))];
   }
   if (forms.length < 2) return forms;

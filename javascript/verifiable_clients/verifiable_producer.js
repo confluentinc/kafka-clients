@@ -57,7 +57,7 @@ const {
 } = require('./_common');
 const { ThroughputThrottler } = require('./throughput_throttler');
 
-const { stringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
+const { StringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
 const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
 
 // ---------------------------------------------------------------------------
@@ -318,9 +318,9 @@ function parseArgs(parser, args) {
     retries: '0',
   };
   // Java also sets key.serializer and value.serializer to StringSerializer:
-  // here the factory of its JavaScript form, which a config key takes without ().
-  producerProps['key.serializer'] = stringSerializer;
-  producerProps['value.serializer'] = stringSerializer;
+  // a config key takes the function that builds it.
+  producerProps['key.serializer'] = () => new StringSerializer();
+  producerProps['value.serializer'] = () => new StringSerializer();
   if (res.producerConfig !== null) {
     printLine('Option --producer.config has been deprecated and will be removed in a future version. Use ' + '--command-config instead.');
     Object.assign(producerProps, loadProps(res.producerConfig));

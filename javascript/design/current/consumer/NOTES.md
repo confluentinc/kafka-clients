@@ -12,7 +12,8 @@ rule rather than repeat it. "Line N" is line N of `javascript/CLAUDE.md` at `8a2
   `KafkaConsumer__as_Consumer_err` view, through which every call is made, the reentrancy handle
   (`Consumer_handle_err`, destroyed after the class handle), through which the window's calls go (below), and the
   producer's callback queue (`callback_queue.c`, `CallbackQueue`). The configuration's `kafka_Map_t` is built by `config_map_build`
-  (`native/values.c`), which the producer's constructor calls too.
+  (`native/values.c`), and parsed into a configuration handle by `native/config.c`, which the producer's constructor
+  uses too (below, "The deserializers and the configuration").
 - Every waiting call goes through its `_cb` twin (JS conventions, Futures and waiting): `poll_cb`,
   `subscribe_with_topics_cb`, `subscribe_with_pattern_cb`, `assign_cb`, `unsubscribe_cb`, `pause_cb`, `resume_cb`,
   `close_cb` and `close_with_options_cb`, and the offset calls' twins (below). The three getters and
@@ -35,6 +36,56 @@ rule rather than repeat it. "Line N" is line N of `javascript/CLAUDE.md` at `8a2
   (`LOCAL_NULL_POINTER`, "options must not be null").
 - A RegExp given as a pattern is refused with a `TypeError` that names `SubscriptionPattern` (JS conventions,
   Signatures, Q15).
+
+## The deserializers and the configuration
+
+- A consumer runs its deserializers in JavaScript, inside `poll()` (line 124), over the records the core returns with
+  NULL deserializers: `deserializeBatch` (`src/internal/deserialize_batch.ts`) calls the key's, then the value's, each
+  only for a key or value that is not null, given the record's own `Headers` (its lazy copy, line 135) and the
+  `Buffer` over the fetched bytes, and builds the record again with what they returned
+  (`ConsumerRecord.internalWithKeyValue`), sharing its `Headers`. A plain result adds no microtask: a batch whose
+  deserializers return plain values settles `poll()` inside the native completion. A thenable is awaited, record by
+  record (line 127), and a `then` that cannot be read is the deserializer's failure. A consumer without deserializers
+  builds the batch as before, with no pass over its records. While a deserializer's Promise, or a seek back, is awaited,
+  the core's poll has already answered, so the core takes another call of the consumer's meanwhile, where Java's
+  `poll()` holds the consumer until it returns *(deviation, as in Python. Why: the deserializers run in JavaScript
+  after the core's poll. Goes when: the core runs the deserializers through the FFI)*.
+- A failing deserializer ends the batch where Java's `FetchCollector` ends it, as Python's binding does: the records
+  before it are returned, and `RecordDeserializationError` is the failure of a poll that has none, with Java's message
+  and fields (`CompletedFetch.newRecordDeserializationException`) and the thrown value as its `cause`, `null` and
+  `undefined` included. The partition cut short gets, as Java's `CompletedFetch.fetchRecords` leaves
+  `nextFetchOffset`, the last returned record's offset + 1 as its next offset, or none, and the partitions after it
+  none. The core has already moved past the whole batch, so before `poll()` settles each partition is sought back to
+  its first record not returned (`seek_with_offset_cb`, one after another), and a seek that fails is a process
+  warning *(deviation, line 130, as in Python: Java never moves past the record. Why: the deserializers run in
+  JavaScript after the core's poll)*. A record that failed to deserialize is fetched again by the next poll, which
+  fails on it again, as Java's cached exception does, until the app seeks past it.
+- The serdes' `close()` runs once the core reports the consumer closed by that call (`closedNow`), and what it throws
+  goes to `process.emitWarning`, a thrown `null` or `undefined` included. `MockConsumer` takes no deserializers, as
+  Java's typed mock doesn't, and has no `create()` (line 156).
+- Both clients are built in Java's order (`src/internal/client_construction.ts`): the configuration is parsed first
+  (`configCreate`, `ConsumerConfig_new` or `ProducerConfig_new`), so the core's `ConfigError` comes before any serde
+  config function runs; the functions get the configuration with the `client.id` it generated
+  (`ConsumerConfig_get_string`, `ProducerConfig_get_string`), as Java configures a serde with its `originals()` and
+  that `client.id`; and the client is built from the same handle (`KafkaConsumer_new`, `KafkaProducer_new`), which is
+  freed on every path (`configFree`), its handle object's finalizer freeing one never freed. `create()` parses before
+  it awaits the functions and holds the handle across its awaits. The serde config keys' own checks (a class name, a
+  serde object, a class, with the hint "did you mean `() => new X()`?" naming the class) run before the parse, as Java
+  reads its class names while it parses.
+- The keys a serde config function reads reach the core, which lists the ones it doesn't use *(deviation: Java's
+  `originals()` marks them used, so Java doesn't list them. Why: a client copies its config handle (`copy_for_client`)
+  without the handle's record of the keys used, so an `ignore()` on the handle can't reach the client's unused-keys
+  line. Goes when: ask 18; the binding then marks them with `ignore`, an additive change)*. The client's own serde keys
+  never reach the core (line 131), and the other client's do.
+- The built-in serdes (line 128) are plain TypeScript, translated from Java's classes and checked against Java's bytes
+  and messages (`test/java_vectors.json`). A deserializer's messages are those of Java's `ByteBuffer` form, which
+  Java's consumer calls (`DoubleDeserializer`'s names its class, where the `byte[]` form says "Deserializer").
+  `StringDeserializer` and `UUIDDeserializer` read bytes as Java's `new String(bytes, UTF_8)` does
+  (`decodeLikeJava`, `src/internal/encode.ts`): Node's decoder writes one U+FFFD per byte of an encoded surrogate
+  (`ED A0 80`), where Java writes one for the three. `FloatSerializer` and `FloatDeserializer` cannot keep a
+  signaling NaN *(deviation: a JavaScript number turns a float's signaling NaN quiet, `0x7f800001` into `0x7fc00001`.
+  Why: a number is a double. Goes when: never)*: `floatSerdeShouldPreserveNaNValues` checks the payload and that the
+  value stays a NaN.
 
 ## The batch and its count
 

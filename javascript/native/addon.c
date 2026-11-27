@@ -239,6 +239,11 @@ static napi_value addon_init(napi_env env, napi_value exports) {
         {"errorStats", NULL, js_error_stats, NULL, NULL, NULL, napi_default, NULL},
         {"previewNoticeDue", NULL, js_preview_notice_due, NULL, NULL, NULL, napi_default, NULL},
         {"faultNext", NULL, js_fault_next, NULL, NULL, NULL, napi_default, NULL},
+        // config.c
+        {"configCreate", NULL, js_config_create, NULL, NULL, NULL, napi_default, NULL},
+        {"configGetString", NULL, js_config_get_string, NULL, NULL, NULL, napi_default, NULL},
+        {"configFree", NULL, js_config_free, NULL, NULL, NULL, napi_default, NULL},
+        {"configStats", NULL, js_config_stats, NULL, NULL, NULL, napi_default, NULL},
         // producer.c
         {"producerCreate", NULL, js_producer_create, NULL, NULL, NULL, napi_default, NULL},
         {"producerSend", NULL, js_producer_send, NULL, NULL, NULL, napi_default, NULL},

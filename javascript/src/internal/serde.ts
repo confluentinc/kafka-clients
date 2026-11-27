@@ -12,45 +12,95 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// The serializers a producer is given (private): the check of the argument,
-// one serialize() call, and the close at the producer's close
-// (javascript/CLAUDE.md, JavaScript Binding Conventions, Serialization), used by
-// KafkaProducer.
+// The serdes a client is given (private): the check of the argument, the
+// functions of the serde config keys, and the close at the client's close
+// (javascript/CLAUDE.md, JavaScript Binding Conventions, Serialization and
+// Lifetime). One role for each client, the producer's serializers and the
+// consumer's deserializers, shares the code.
 
 import { kind } from './args';
-import { illegalArgument } from './errors';
+import { isTypeFailure } from './builtin_serde';
+import { DeserializerDefaults } from './deserializer_defaults';
+import { SerializerDefaults } from './serializer_defaults';
 import { ConfigError } from '../common/config/config_error';
 import { KafkaError } from '../common/kafka_error';
 import { SerializationError } from '../common/errors/serialization_error';
+import type { Deserializer } from '../common/serialization/deserializer';
 import type { Serializer } from '../common/serialization/serializer';
-import { SerializerDefaults } from './serializer_defaults';
+
+/** A serializer or a deserializer, as the binding holds it. */
+export type Serde = Serializer<unknown> | Deserializer<unknown>;
+
+/** What tells the producer's serializers from the consumer's deserializers. */
+export interface SerdeRole {
+  /** `producer` or `consumer`, for the messages. */
+  readonly client: 'producer' | 'consumer';
+  /** The client's class, which has the `create()` that awaits a Promise. */
+  readonly clientClass: 'KafkaProducer' | 'KafkaConsumer';
+  /** `serializer` or `deserializer`. */
+  readonly noun: 'serializer' | 'deserializer';
+  /** The serde's method, `serialize` or `deserialize`. */
+  readonly method: 'serialize' | 'deserialize';
+  /** The serde config keys, the key's then the value's. */
+  readonly keys: readonly [string, string];
+  /** The constructor arguments, the key's then the value's. */
+  readonly args: readonly [string, string];
+  /** The built-in class a hint names. */
+  readonly example: string;
+  /** Java's default `close()`, run for a serde without one. */
+  readonly defaultClose: (serde: Serde) => void;
+}
+
+/** The producer's serializers. */
+export const SERIALIZER: SerdeRole = Object.freeze({
+  client: 'producer',
+  clientClass: 'KafkaProducer',
+  noun: 'serializer',
+  method: 'serialize',
+  keys: Object.freeze(['key.serializer', 'value.serializer'] as const),
+  args: Object.freeze(['keySerializer', 'valueSerializer'] as const),
+  example: 'StringSerializer',
+  defaultClose: (serde: Serde) => SerializerDefaults.prototype.close.call(serde as Serializer<unknown>),
+});
+
+/** The consumer's deserializers. */
+export const DESERIALIZER: SerdeRole = Object.freeze({
+  client: 'consumer',
+  clientClass: 'KafkaConsumer',
+  noun: 'deserializer',
+  method: 'deserialize',
+  keys: Object.freeze(['key.deserializer', 'value.deserializer'] as const),
+  args: Object.freeze(['keyDeserializer', 'valueDeserializer'] as const),
+  example: 'StringDeserializer',
+  defaultClose: (serde: Serde) => DeserializerDefaults.prototype.close.call(serde as Deserializer<unknown>),
+});
+
+/** The pair of serdes a client holds, the key's then the value's, null where none is. */
+export type SerdePair = [Serde | null, Serde | null];
 
 /**
- * The serializer given as `name` (`keySerializer`, `valueSerializer`), or
- * null for Java's null (or one not given): the bytes the record holds then
- * cross as they are.
+ * The serde given as constructor argument `name` (`keySerializer`,
+ * `valueDeserializer`, ...), or null for Java's null (or one not given): the
+ * bytes then cross as they are.
  *
- * @param value - the serializer given, or null
+ * @param role - the client's role
+ * @param value - the serde given, or null
  * @param name - the argument's name, for the error
- * @returns the serializer, or null
+ * @returns the serde, or null
  *
- * @throws `IllegalArgumentError` for a function that is no serializer, the
- *   factory rather than what it returns (Python's hint)
- * @throws `TypeError` for any other value that is no serializer
+ * @throws `TypeError` for a function, which is no instance ("did you forget
+ *   `new`?"), and any other value that is no serde
  */
-export function checkSerializer(value: unknown, name: string): Serializer<unknown> | null {
+export function checkSerde(role: SerdeRole, value: unknown, name: string): Serde | null {
   if (value === null || value === undefined) return null;
-  const serialize: unknown =
-    typeof value === 'object' || typeof value === 'function' ? (value as { serialize?: unknown }).serialize : undefined;
-  if (typeof value === 'function' && typeof serialize !== 'function') {
-    throw illegalArgument(`${name}: pass a serializer, not a function that makes one — did you forget '()'?`);
-  }
-  if ((typeof value !== 'object' && typeof value !== 'function') || typeof serialize !== 'function') {
-    throw new TypeError(`${name} must be a Serializer: an object with a serialize({ topic, headers, data }) method, or null`);
+  if (typeof value === 'function') throw new TypeError(`${name}: pass an instance, not a function — did you forget \`new\`?`);
+  if (typeof value !== 'object' || typeof (value as Record<string, unknown>)[role.method] !== 'function') {
+    const noun = role.noun === 'serializer' ? 'Serializer' : 'Deserializer';
+    throw new TypeError(`${name} must be a ${noun}: an object with a ${role.method}({ topic, headers, data }) method, or null`);
   }
   const close: unknown = (value as { close?: unknown }).close;
   if (close !== undefined && typeof close !== 'function') throw new TypeError(`${name}.close must be a function when given`);
-  return value as Serializer<unknown>;
+  return value as Serde;
 }
 
 /**
@@ -67,6 +117,9 @@ function isClass(value: (...args: never[]) => unknown): boolean {
   }
 }
 
+/** An identifier, which a hint may name a class by. */
+const IDENTIFIER = /^[\p{ID_Start}$_][\p{ID_Continue}$‌‍]*$/u;
+
 /**
  * The name a class is written under: the one its declaration gives
  * (`class MySerializer {}`), else the one JavaScript inferred from a binding
@@ -78,7 +131,6 @@ function isClass(value: (...args: never[]) => unknown): boolean {
  * @returns its name, or null
  */
 function writtenClassName(value: (...args: never[]) => unknown): string | null {
-  const identifier = /^[\p{ID_Start}$_][\p{ID_Continue}$\u200c\u200d]*$/u;
   let source = '';
   try {
     source = Function.prototype.toString.call(value);
@@ -87,95 +139,122 @@ function writtenClassName(value: (...args: never[]) => unknown): string | null {
   }
   const declared = /^class\s+([^\s{]+)/u.exec(source)?.[1];
   // `class extends Base {}` declares no name.
-  if (declared !== undefined && declared !== 'extends' && identifier.test(declared)) return declared;
+  if (declared !== undefined && declared !== 'extends' && IDENTIFIER.test(declared)) return declared;
   const inferred: unknown = Object.getOwnPropertyDescriptor(value, 'name')?.value;
-  return typeof inferred === 'string' && identifier.test(inferred) ? inferred : null;
+  return typeof inferred === 'string' && IDENTIFIER.test(inferred) ? inferred : null;
 }
 
 /**
- * Whether `value` is an object or a function with a `serialize` method, and a `close` method or none.
+ * The class an object was built by, when it has a name, for a hint: a serde
+ * object's `() => new X()`.
  *
- * @param value - the value to test
- * @returns whether it is a serializer
+ * @param value - the object
+ * @returns its class name, or null for a plain object or an anonymous class
  */
-function isSerializer(value: unknown): value is Serializer<unknown> {
-  if (value === null || (typeof value !== 'object' && typeof value !== 'function')) return false;
-  const { serialize, close } = value as { serialize?: unknown; close?: unknown };
-  return typeof serialize === 'function' && (close === undefined || typeof close === 'function');
+function constructorName(value: object): string | null {
+  try {
+    const prototype: unknown = Object.getPrototypeOf(value);
+    const constructor: unknown = prototype === null ? undefined : (prototype as { constructor?: unknown }).constructor;
+    if (typeof constructor !== 'function' || constructor === Object) return null;
+    return writtenClassName(constructor as (...args: never[]) => unknown);
+  } catch {
+    return null;
+  }
 }
 
-/** The function a serde config key holds, `({ configs, isKey }) => serializer`. */
-type SerializerFunction = (options: { configs: Readonly<Record<string, unknown>>; isKey: boolean }) => unknown;
+/**
+ * Whether `value` is a serde of `role`: an object or a function with the
+ * role's method, and a `close` method or none.
+ *
+ * @param role - the client's role
+ * @param value - the value to test
+ * @returns whether it is a serde
+ */
+function isSerde(role: SerdeRole, value: unknown): value is Serde {
+  if (value === null || (typeof value !== 'object' && typeof value !== 'function')) return false;
+  const method: unknown = (value as Record<string, unknown>)[role.method];
+  const close: unknown = (value as { close?: unknown }).close;
+  return typeof method === 'function' && (close === undefined || typeof close === 'function');
+}
 
-/** A serde config key's function, checked, and how to call it and check what it made. */
+/** The function a serde config key holds, `({ configs, isKey }) => serde`. */
+type SerdeFunction = (options: { configs: Readonly<Record<string, unknown>>; isKey: boolean }) => unknown;
+
+/** A serde config key's function, checked, and how to check what it made. */
 type ConfiguredMaker = {
-  /** Calls the function once with the recording configuration. */
+  /** Calls the function once with the configuration. */
   call: () => unknown;
-  /** What it made, if a serializer; else the `ConfigError` saying so. */
-  check: (out: unknown) => Serializer<unknown>;
+  /** What it made, if a serde; else the `ConfigError` saying so. */
+  check: (out: unknown) => Serde;
 };
 
 /**
- * The function the serde config key `key` (`key.serializer`,
- * `value.serializer`) of `configs` holds, checked, or null when the key is
- * not set (`null` or `undefined`): a function `({ configs, isKey }) =>
- * serializer`, called once with the whole configuration, in place of Java's
- * class and its `configure(configs, isKey)` (javascript/CLAUDE.md,
- * JavaScript Binding Conventions, Serialization). The configuration it gets
- * records each of its keys the function reads, into `read`, so that the
- * producer leaves those the core doesn't know out of the configuration it
- * sends to the core, as Java's `originals()` marks them used. The
- * configuration is the user's, without Java's computed `client.id`, and the
- * function runs before the core checks it.
+ * The hint of a serde config key's `ConfigError`, naming class `name`, or
+ * none.
  *
- * @param configs - the producer's configuration
- * @param key - the serde config key
- * @param read - collects the keys the function reads
+ * @param name - the class name, or null
+ * @returns the hint, with its leading space
+ */
+function hint(name: string | null): string {
+  return name === null ? '' : ` (did you mean \`() => new ${name}()\`?)`;
+}
+
+/**
+ * The function the serde config key `index` (the key's 0, the value's 1) of
+ * `configs` holds, checked, or null when the key is not set (`null` or
+ * `undefined`): a function `({ configs, isKey }) => serde`, called once with
+ * the whole configuration, in place of Java's class and its
+ * `configure(configs, isKey)` (javascript/CLAUDE.md, JavaScript Binding
+ * Conventions, Serialization). The configuration it gets is the client's,
+ * with the `client.id` the parsed configuration generated, as Java configures
+ * a serde with its `originals()` and that `client.id`.
+ *
+ * @param role - the client's role
+ * @param configs - the client's configuration, as the function gets it
+ * @param index - the key's (0) or the value's (1)
  * @param awaits - whether the function may return a Promise (`create()`)
  * @returns the checked function, or null
  *
- * @throws `ConfigError` when the value is a class name (a string), a
- *   serializer object, a class or any other value that is no function
+ * @throws `ConfigError` when the value is a class name (a string), a serde
+ *   object, a class or any other value that is no function
  */
 function configuredMaker(
+  role: SerdeRole,
   configs: Readonly<Record<string, unknown>>,
-  key: 'key.serializer' | 'value.serializer',
-  read: Set<string>,
+  index: 0 | 1,
   awaits: boolean,
 ): ConfiguredMaker | null {
+  const key = role.keys[index];
   const value: unknown = configs[key];
   if (value === null || value === undefined) return null;
-  const isKey = key === 'key.serializer';
-  const argument = isKey ? 'keySerializer' : 'valueSerializer';
+  const isKey = index === 0;
+  const argument = role.args[index];
+  const example = `() => new ${role.example}()`;
   const pass = awaits
-    ? 'pass a function ({ configs, isKey }) => serializer, or one returning a Promise of it, such as stringSerializer, ' +
-      `or the serializer itself as the ${argument} argument`
-    : 'pass a synchronous function ({ configs, isKey }) => serializer, such as stringSerializer, ' +
-      `or the serializer itself as the ${argument} argument of the constructor`;
+    ? `pass a function ({ configs, isKey }) => ${role.noun}, or one returning a Promise of it, such as ${example}, ` +
+      `or the ${role.noun} itself as the ${argument} argument`
+    : `pass a synchronous function ({ configs, isKey }) => ${role.noun}, such as ${example}, ` +
+      `or the ${role.noun} itself as the ${argument} argument of the constructor`;
   const invalid = (why: string): ConfigError =>
     new ConfigError(`Invalid value ${typeof value === 'string' ? value : kind(value)} for configuration ${key}: ${why}`);
-  if (typeof value === 'string') throw invalid(`a class name cannot be loaded in JavaScript; ${pass}`);
+  if (typeof value === 'string') {
+    // A Java class name's last segment names the class a hint suggests.
+    const simple = /[^.$]+$/u.exec(value)?.[0] ?? '';
+    throw invalid(`a class name cannot be loaded in JavaScript${hint(IDENTIFIER.test(simple) ? simple : null)}; ${pass}`);
+  }
   if (typeof value !== 'function') {
-    throw invalid(isSerializer(value) ? `a serializer object is not a configuration value; ${pass}` : pass);
+    if (isSerde(role, value)) throw invalid(`a ${role.noun} object is not a configuration value${hint(constructorName(value))}; ${pass}`);
+    throw invalid(pass);
   }
-  const make = value as SerializerFunction;
-  if (isClass(make)) {
-    const name = writtenClassName(make);
-    const hint = name === null ? '' : ` (did you mean \`() => new ${name}()\`?)`;
-    throw invalid(`a class is not called${hint}; ${pass}`);
-  }
-  // Java's RecordingMap: a key the function reads is marked used.
-  const recording = new Proxy(configs, {
-    get(target, property, receiver): unknown {
-      if (typeof property === 'string' && Object.hasOwn(target, property)) read.add(property);
-      return Reflect.get(target, property, receiver) as unknown;
-    },
-  });
+  const make = value as SerdeFunction;
+  if (isClass(make)) throw invalid(`a class is not called${hint(writtenClassName(make))}; ${pass}`);
   return {
-    call: () => make({ configs: recording, isKey }),
+    call: () => make({ configs, isKey }),
     check: (out) => {
-      if (!isSerializer(out)) {
-        throw invalid(`the function returned ${kind(out)}, not a serializer: an object with a serialize({ topic, headers, data }) method`);
+      if (!isSerde(role, out)) {
+        throw invalid(
+          `the function returned ${kind(out)}, not a ${role.noun}: an object with a ${role.method}({ topic, headers, data }) method`,
+        );
       }
       return out;
     },
@@ -183,141 +262,155 @@ function configuredMaker(
 }
 
 /**
- * Java's relabelled construction failure, `KafkaException("Failed to
- * construct kafka producer", t)`, for a serde config function that threw or
- * whose Promise rejected.
+ * Checks the serde config keys whose serde is not given: each holds no value
+ * or a function, before the configuration is parsed and the functions are
+ * called (`configuredMaker`).
  *
- * @param cause - what it threw or rejected with
- * @returns the error
+ * @param role - the client's role
+ * @param configs - the client's configuration
+ * @param given - the key's and the value's serdes given, or null
+ * @param awaits - whether the functions may return a Promise (`create()`)
+ *
+ * @throws `ConfigError` as `configuredMaker`
  */
-function constructionFailure(cause: unknown): KafkaError {
-  return new KafkaError({ message: 'Failed to construct kafka producer', cause });
+export function checkSerdeKeys(
+  role: SerdeRole,
+  configs: Readonly<Record<string, unknown>>,
+  given: readonly [Serde | null, Serde | null],
+  awaits: boolean,
+): void {
+  if (given[0] === null) configuredMaker(role, configs, 0, awaits);
+  if (given[1] === null) configuredMaker(role, configs, 1, awaits);
 }
 
 /**
- * The serializer the serde config key `key` of `configs` makes, or null when
- * the key is not set, as the constructor takes it: its function must return
- * the serializer itself, synchronously (`configuredMaker`).
+ * Java's relabelled construction failure, `KafkaException("Failed to
+ * construct kafka producer", t)` (or `consumer`), for a serde config function
+ * that threw or whose Promise rejected.
  *
- * @param configs - the producer's configuration
- * @param key - the serde config key
- * @param read - collects the keys the function reads
- * @returns the serializer, or null
- *
- * @throws `ConfigError` when the value is a class name (a string), a
- *   serializer object, a class or any other value that is no function, or
- *   the function returns a Promise, which only `create()` waits for, or no
- *   serializer
- * @throws `KafkaError` "Failed to construct kafka producer", with the error
- *   as its `cause`, when the function throws, as Java wraps a serializer that
- *   fails to build
+ * @param role - the client's role
+ * @param cause - what it threw or rejected with
+ * @returns the error
  */
-export function configuredSerializer(
-  configs: Readonly<Record<string, unknown>>,
-  key: 'key.serializer' | 'value.serializer',
-  read: Set<string>,
-): Serializer<unknown> | null {
-  const maker = configuredMaker(configs, key, read, false);
+function constructionFailure(role: SerdeRole, cause: unknown): KafkaError {
+  const error = new KafkaError({ message: `Failed to construct kafka ${role.client}`, cause: null });
+  // The thrown value itself, whatever it is (`null` and `undefined` included).
+  Object.defineProperty(error, 'cause', { value: cause, writable: true, enumerable: false, configurable: true });
+  return error;
+}
+
+/**
+ * The serde the serde config key `index` of `configs` makes, or null when the
+ * key is not set, as the constructor takes it: its function must return the
+ * serde itself, synchronously (`configuredMaker`).
+ *
+ * @param role - the client's role
+ * @param configs - the client's configuration, as the function gets it
+ * @param index - the key's (0) or the value's (1)
+ * @returns the serde, or null
+ *
+ * @throws `ConfigError` when the value is no function, or the function
+ *   returns a Promise, which only `create()` waits for, or no serde
+ * @throws `KafkaError` "Failed to construct kafka producer" (or `consumer`),
+ *   with the error as its `cause`, when the function throws, as Java wraps a
+ *   serde that fails to build
+ */
+export function configuredSerde(role: SerdeRole, configs: Readonly<Record<string, unknown>>, index: 0 | 1): Serde | null {
+  const maker = configuredMaker(role, configs, index, false);
   if (maker === null) return null;
   let out: unknown;
   try {
     out = maker.call();
   } catch (cause) {
-    throw constructionFailure(cause);
+    throw constructionFailure(role, cause);
   }
   if (isThenable(out)) {
-    // Refused, so nobody else awaits it: the serializer it resolves to is
-    // closed, being nobody's, and its rejection is not an unhandled one.
-    const name = key === 'key.serializer' ? 'keySerializer' : 'valueSerializer';
+    // Refused, so nobody else awaits it: the serde it resolves to is closed,
+    // being nobody's, and its rejection is not an unhandled one.
     void Promise.resolve(out).then(
       (made: unknown) => {
-        if (isSerializer(made)) closeSerializer(made, name);
+        if (isSerde(role, made)) closeSerde(role, made, role.args[index]);
       },
       () => undefined,
     );
     throw new ConfigError(
-      `Invalid value a function for configuration ${key}: the function returned a Promise, which the constructor cannot wait for; ` +
-        'build the producer with await KafkaProducer.create(...), which waits for it',
+      `Invalid value a function for configuration ${role.keys[index]}: the function returned a Promise, which the constructor cannot wait for; ` +
+        `build the ${role.client} with await ${role.clientClass}.create(...), which waits for it`,
     );
   }
   return maker.check(out);
 }
 
 /**
- * The serializers the serde config keys make, key first, each function
- * awaited before the next is called, as `create()` takes them: a function may
- * return the serializer or a Promise of it. A key whose serializer is given
- * is not read, as the constructor ignores it. On a failure the serializers
- * already taken are closed, as the constructor closes them: the key's, made
- * or given, when the value's function fails, and only one made when the
- * value's config key is refused.
+ * The serdes the serde config keys make, key first, each function awaited
+ * before the next is called, as `create()` takes them: a function may return
+ * the serde or a Promise of it. A key whose serde is given is not read, as the
+ * constructor ignores it. On a failure the serdes already taken are closed, as
+ * the constructor closes them: the key's, made or given, when the value's
+ * function fails, and only one made when the value's config key is refused.
  *
- * @param configs - the producer's configuration
- * @param given - the key and the value serializers given, or null
- * @param read - collects the keys the functions read
- * @returns the key's and the value's serializers made, null where none is
+ * @param role - the client's role
+ * @param configs - the client's configuration, as the functions get it
+ * @param given - the key's and the value's serdes given, or null
+ * @returns the key's and the value's serdes made, null where none is
  *
- * @throws `ConfigError` (a rejection) as `configuredSerializer`, except for a
+ * @throws `ConfigError` (a rejection) as `configuredSerde`, except for a
  *   Promise, which is awaited
- * @throws `KafkaError` "Failed to construct kafka producer" (a rejection),
- *   with the error as its `cause`, when a function throws or its Promise
- *   rejects
+ * @throws `KafkaError` "Failed to construct kafka producer" (or `consumer`, a
+ *   rejection), with the error as its `cause`, when a function throws or its
+ *   Promise rejects
  */
-export async function awaitedSerializers(
+export async function awaitedSerdes(
+  role: SerdeRole,
   configs: Readonly<Record<string, unknown>>,
-  given: readonly [Serializer<unknown> | null, Serializer<unknown> | null],
-  read: Set<string>,
-): Promise<[Serializer<unknown> | null, Serializer<unknown> | null]> {
-  const made: [Serializer<unknown> | null, Serializer<unknown> | null] = [null, null];
-  const keys = ['key.serializer', 'value.serializer'] as const;
+  given: readonly [Serde | null, Serde | null],
+): Promise<SerdePair> {
+  const made: SerdePair = [null, null];
   for (const index of [0, 1] as const) {
     if (given[index] !== null) continue;
-    let maker: ConfiguredMaker | null = null;
     let out: unknown;
     try {
-      maker = configuredMaker(configs, keys[index], read, true);
+      const maker = configuredMaker(role, configs, index, true);
       if (maker === null) continue;
       try {
         out = await maker.call();
       } catch (cause) {
-        throw constructionFailure(cause);
+        throw constructionFailure(role, cause);
       }
       made[index] = maker.check(out);
     } catch (error) {
-      // The key's serializer is taken once the value's turn comes: a
-      // construction failure closes it, given or made (Java's constructor
-      // catch); a ConfigError only the one made, nobody else's.
-      if (index === 1) closeSerializer(error instanceof ConfigError ? made[0] : (given[0] ?? made[0]), 'keySerializer');
+      // The key's serde is taken once the value's turn comes: a construction
+      // failure closes it, given or made (Java's constructor catch); a
+      // ConfigError only the one made, nobody else's.
+      if (index === 1) closeSerde(role, error instanceof ConfigError ? made[0] : (given[0] ?? made[0]), role.args[0]);
       throw error;
     }
   }
   return made;
 }
 
-// The name of a built-in serializer's factory, on the object it made
-// (`stringSerializer()`'s), which a serializer's wrapped TypeError names as
-// Java names the class.
-const BUILT_IN_NAME: unique symbol = Symbol('built-in serializer');
-
 /**
- * Marks `serde` as the built-in factory `name`'s, so that an error naming its
- * class names the factory.
+ * Whether `error`, which a client's construction threw, is one Java's
+ * constructor relabels "Failed to construct kafka producer" (or `consumer`)
+ * in the catch around its body, closing the serdes it had taken: a serde
+ * config function's failure (`constructionFailure`) or the core's construction
+ * failure, which carries that message. A `ConfigError`, which Java's parse
+ * throws before that catch, is not.
  *
- * @param serde - the serializer the factory made
- * @param name - the factory's name
- * @returns `serde`
+ * @param role - the client's role
+ * @param error - what construction threw
+ * @returns whether it is a construction failure
  */
-export function nameBuiltIn<T extends object>(serde: T, name: string): T {
-  Object.defineProperty(serde, BUILT_IN_NAME, { value: name });
-  return serde;
+export function isConstructionFailure(role: SerdeRole, error: unknown): boolean {
+  return error instanceof KafkaError && error.constructor === KafkaError && error.message === `Failed to construct kafka ${role.client}`;
 }
 
 /**
  * The class name of a value, as Java's `getClass().getName()` names it in
  * `KafkaProducer#doSend`'s message, spelled for JavaScript: a value's
- * constructor name (`Buffer`), a primitive's wrapper (`String`, `Number`),
- * `Object` for an object without one, `null` for null, and a built-in
- * serializer's factory name (`stringSerializer`). It never throws.
+ * constructor name (`Buffer`, `StringSerializer`), a primitive's wrapper
+ * (`String`, `Number`), `Object` for an object without one, and `null` for
+ * null. It never throws.
  *
  * @param value - the value
  * @returns its class name
@@ -341,8 +434,6 @@ export function className(value: unknown): string {
       break;
   }
   try {
-    const builtIn: unknown = (value as { [BUILT_IN_NAME]?: unknown })[BUILT_IN_NAME];
-    if (typeof builtIn === 'string') return builtIn;
     const prototype: unknown = Object.getPrototypeOf(value);
     const constructor: unknown = prototype === null ? undefined : (prototype as { constructor?: unknown }).constructor;
     const name: unknown = typeof constructor === 'function' ? constructor.name : undefined;
@@ -354,9 +445,10 @@ export function className(value: unknown): string {
 
 /**
  * What `KafkaProducer#doSend` makes of a serializer's throw: a `TypeError`,
- * JavaScript's form of Java's `ClassCastException`, becomes a
- * `SerializationError` with Java's message and the `TypeError` as its cause;
- * anything else is returned as it is.
+ * JavaScript's form of Java's `ClassCastException`, or a built-in
+ * serializer's type failure, becomes a `SerializationError` with Java's
+ * message and what was thrown as its cause; anything else is returned as it
+ * is.
  *
  * @param thrown - what the serializer threw, or rejected with
  * @param isKey - whether it is the key serializer
@@ -365,7 +457,7 @@ export function className(value: unknown): string {
  * @returns the error to answer with
  */
 export function serializerFailure(thrown: unknown, isKey: boolean, data: unknown, serializer: object): unknown {
-  if (!(thrown instanceof TypeError)) return thrown;
+  if (!(thrown instanceof TypeError) && !isTypeFailure(thrown)) return thrown;
   const field = isKey ? 'key' : 'value';
   return new SerializationError({
     message: `Can't convert ${field} of class ${className(data)} to class ${className(serializer)} specified in ${field}.serializer`,
@@ -374,7 +466,7 @@ export function serializerFailure(thrown: unknown, isKey: boolean, data: unknown
 }
 
 /**
- * Whether `value` is a thenable, which the producer awaits.
+ * Whether `value` is a thenable, which the client awaits.
  *
  * @param value - the value to test
  * @returns whether it is a thenable
@@ -402,25 +494,26 @@ export function serializedBytes(out: unknown, name: string): Uint8Array | null {
 }
 
 /**
- * Closes a serializer at the producer's close, as Java's `closeQuietly`: a
- * serializer without `close()` is closed by doing nothing, and what one
- * throws, or the rejection of a Promise it returns, goes to
+ * Closes a serde at the client's close, as Java's `closeQuietly`: a serde
+ * without `close()` is closed by Java's default, which does nothing, and what
+ * one throws, or the rejection of a Promise it returns, goes to
  * `process.emitWarning`, never to the caller.
  *
- * @param serializer - the serializer, or null
- * @param name - the serializer's name, for the warning
+ * @param role - the client's role
+ * @param serde - the serde, or null
+ * @param name - the serde's name, for the warning
  */
-export function closeSerializer(serializer: Serializer<unknown> | null, name: string): void {
-  if (serializer === null) return;
+export function closeSerde(role: SerdeRole, serde: Serde | null, name: string): void {
+  if (serde === null) return;
   const warn = (thrown: unknown): void => {
-    process.emitWarning(`Failed to close producer ${name}: ${describe(thrown)}`);
+    process.emitWarning(`Failed to close ${role.client} ${name}: ${describe(thrown)}`);
   };
   try {
-    if (serializer.close === undefined) {
-      SerializerDefaults.prototype.close.call(serializer);
+    if (serde.close === undefined) {
+      role.defaultClose(serde);
       return;
     }
-    const returned: unknown = serializer.close();
+    const returned: unknown = serde.close();
     if (isThenable(returned)) void returned.then(undefined, warn);
   } catch (thrown) {
     warn(thrown);

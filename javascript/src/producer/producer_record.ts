@@ -14,7 +14,7 @@
 
 // Java's ProducerRecord<K, V>: the key and the value are what the producer's
 // serializers take. A producer without a serializer takes a Buffer, a
-// Uint8Array or null, checked at send: a string needs stringSerializer()
+// Uint8Array or null, checked at send: a string needs a StringSerializer
 // (javascript/CLAUDE.md, JavaScript Binding Conventions, Class family).
 // The headers are a Headers (common/header), made read-only by send().
 
@@ -60,7 +60,7 @@ function isBytes(value: unknown): value is Uint8Array {
 // The bytes of a key or value a producer without a serializer sends: bytes as
 // they are. The run-time type TypeScript cannot enforce on a
 // ProducerRecord<K, V> (javascript/CLAUDE.md); a string can't reach the FFI
-// as bytes, so it points to stringSerializer() (javascript/CLAUDE.md, JavaScript
+// as bytes, so it points to StringSerializer (javascript/CLAUDE.md, JavaScript
 // Binding Conventions, Class family).
 function rawBytes(value: unknown, what: 'key' | 'value'): Uint8Array | null {
   if (value === null) return null;
@@ -68,7 +68,7 @@ function rawBytes(value: unknown, what: 'key' | 'value'): Uint8Array | null {
   if (typeof value === 'string') {
     throw new TypeError(
       `${what} is a string, and the producer has no ${what} serializer: give the producer ` +
-        `${what}Serializer: stringSerializer() (or '${what}.serializer': stringSerializer in its configuration), ` +
+        `${what}Serializer: new StringSerializer() (or '${what}.serializer': () => new StringSerializer() in its configuration), ` +
         'from @confluentinc/kafka-javascript/common/serialization, or send a Buffer or a Uint8Array',
     );
   }
@@ -792,7 +792,7 @@ export class ProducerRecord<out K = never, out V = never> {
    *
    * `key` and `value` are what a serializer returned; one left out is the
    * record's own field, sent without a serializer: bytes as they are,
-   * anything else a `TypeError`, a string's pointing to `stringSerializer()`
+   * anything else a `TypeError`, a string's pointing to `new StringSerializer()`
    * (the headers are then left writable).
    *
    * @param key - the serialized key, or null; the record's key when left out

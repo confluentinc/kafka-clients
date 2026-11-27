@@ -38,7 +38,7 @@ const entriesAsBytes = /** @type {typeof import('../../../src/internal/config').
  * @returns {Array<[string, string]>}
  */
 function configEntries(configs) {
-  return entriesAsBytes(configs).map(([key, value]) => {
+  return entriesAsBytes(configs, ['key.serializer', 'value.serializer']).map(([key, value]) => {
     assert.ok(Buffer.isBuffer(key) && Buffer.isBuffer(value));
     return [key.toString(), value.toString()];
   });
@@ -157,8 +157,9 @@ test('numbers are written in decimal, never in exponent form', () => {
   }
 });
 
-test("the producer's own serde keys and the keys a serde function read never reach the core; the consumer's do", () => {
+test("a client's own serde keys never reach the core; the other client's, and every other key, do", () => {
   const make = () => ({ serialize: () => null });
+  // A producer's.
   assert.deepEqual(
     configEntries({ 'key.serializer': make, 'value.serializer': 'org.example.Serializer', 'key.deserializer': 'org.example.D', a: 1 }),
     [
@@ -166,27 +167,17 @@ test("the producer's own serde keys and the keys a serde function read never rea
       ['a', '1'],
     ],
   );
-  // A read key the core doesn't know is left out; a producer key of Java's
-  // reaches the core all the same, as Java only marks it used.
-  const read = new Set(['schema.registry.url', 'bootstrap.servers', 'client.id']);
+  // A consumer's. A key a serde config function reads, such as
+  // schema.registry.url, is a key like any other: the core lists it unused.
   assert.deepEqual(
-    entriesAsBytes({ 'schema.registry.url': 'http://sr', 'bootstrap.servers': 'b:1', 'client.id': 'c', b: 2 }, read).map(([k, v]) => [
-      k.toString(),
-      v.toString(),
-    ]),
+    entriesAsBytes(
+      { 'key.deserializer': make, 'value.deserializer': make, 'key.serializer': 'org.example.S', 'schema.registry.url': 'http://sr' },
+      ['key.deserializer', 'value.deserializer'],
+    ).map(([k, v]) => [k.toString(), v.toString()]),
     [
-      ['bootstrap.servers', 'b:1'],
-      ['client.id', 'c'],
-      ['b', '2'],
+      ['key.serializer', 'org.example.S'],
+      ['schema.registry.url', 'http://sr'],
     ],
-  );
-  // So does a producer key only the core defines.
-  assert.deepEqual(
-    entriesAsBytes({ 'partitioner.type': 'RoundRobinPartitioner' }, new Set(['partitioner.type'])).map(([k, v]) => [
-      k.toString(),
-      v.toString(),
-    ]),
-    [['partitioner.type', 'RoundRobinPartitioner']],
   );
 });
 

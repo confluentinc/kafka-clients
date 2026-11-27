@@ -323,3 +323,94 @@ function batchProbe({ count, headers, refuse, body }) {
   },
   180000,
 );
+
+// A consumer's deserializers run over the Buffers of its batch: a value they
+// return that keeps its consumer, and the records holding those values, let
+// the batch and the consumer go once they are dropped, the consumer closed
+// first; a failing deserializer's error keeps the record's Buffers, and the
+// batch with them, until it is dropped too.
+(SKIP ? test.skip : test)(
+  'deserialized values that reference their consumer, the records holding them, and a deserializer failure, are collected with the batch and the consumer',
+  () => {
+    const topic = `js-it-deser-${process.pid}-${Date.now()}`;
+    const out = probeResult(
+      `
+      const { KafkaProducer, ProducerRecord } = require(D + '/producer');
+      const { KafkaConsumer } = require(D + '/consumer');
+      const { TopicPartition } = require(D + '/common');
+      const { createTopic } = require(${JSON.stringify(path.join(__dirname, '_fetch_records'))});
+      const BOOTSTRAP = ${JSON.stringify(BOOTSTRAP)};
+      const TOPIC = ${JSON.stringify(topic)};
+      const stats = () => native.consumerStats();
+      const batches = () => stats().batchesMade - stats().batchesDestroyed;
+      const collected = [];
+      const registry = new FinalizationRegistry((name) => collected.push(name));
+      (async () => {
+        const hold = setInterval(() => {}, 1000);
+        await createTopic(BOOTSTRAP, TOPIC);
+        await (async () => {
+          const producer = new KafkaProducer({ configs: { 'bootstrap.servers': BOOTSTRAP } });
+          for (let i = 0; i < 6; i++) {
+            await (await producer.send(new ProducerRecord({ topic: TOPIC, partition: 0, key: Buffer.from('k' + i), value: Buffer.from('v' + i) }))).get();
+          }
+          await producer.close();
+        })();
+        const out = {};
+        let error = null;
+        await (async () => {
+          const box = { consumer: null };
+          const deserializer = {
+            // A value that keeps the consumer, and the Buffer it was given.
+            deserialize: ({ data }) => {
+              if (data.toString() === 'v4') throw new Error('bad v4');
+              return { consumer: box.consumer, data };
+            },
+          };
+          const consumer = new KafkaConsumer({
+            configs: { 'bootstrap.servers': BOOTSTRAP, 'group.protocol': 'consumer', 'auto.offset.reset': 'earliest' },
+            keyDeserializer: deserializer,
+            valueDeserializer: deserializer,
+          });
+          box.consumer = consumer;
+          registry.register(consumer, 'consumer');
+          await consumer.assign({ partitions: [new TopicPartition({ topic: TOPIC, partition: 0 })] });
+          let records = [];
+          const deadline = Date.now() + 30000;
+          while (error === null && Date.now() < deadline) {
+            try {
+              records.push(...(await consumer.poll({ timeout: 500 })));
+            } catch (e) {
+              error = e;
+            }
+          }
+          out.polled = records.length;
+          out.failedAt = error === null ? null : String(error.offset());
+          await consumer.close();
+          out.heldWhileKept = batches() > 0;
+          records = [];
+        })();
+        await settle();
+        out.heldByTheError = batches() > 0;
+        out.errorKeepsItsBuffer = error !== null && error.valueBuffer().toString() === 'v4';
+        error = null;
+        await settle();
+        out.batches = batches();
+        out.collected = collected;
+        out.leaks = leaks();
+        console.log(JSON.stringify(out));
+        clearInterval(hold);
+      })();
+    `,
+      { timeout: 120000 },
+    );
+    assert.equal(out.polled, 4);
+    assert.equal(out.failedAt, '4');
+    assert.equal(out.heldWhileKept, true);
+    assert.equal(out.heldByTheError, true);
+    assert.equal(out.errorKeepsItsBuffer, true);
+    assert.equal(out.batches, 0);
+    assert.deepEqual(out.collected, ['consumer']);
+    assert.deepEqual(out.leaks, NO_LEAKS);
+  },
+  180000,
+);

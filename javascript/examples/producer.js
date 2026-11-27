@@ -22,7 +22,7 @@
 // The package's own name resolves inside the package (Node's self-reference
 // through package.json `exports`), so this runs without an npm install.
 const { ExecutionError } = require('@confluentinc/kafka-javascript');
-const { stringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
+const { StringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
 const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
 
 async function main(argv) {
@@ -31,12 +31,12 @@ async function main(argv) {
     console.error('usage: node examples/producer.js <bootstrap-servers> <topic> [key] [value]');
     return 2;
   }
-  // stringSerializer() writes the string key and value as Java's
+  // new StringSerializer() writes the string key and value as Java's
   // StringSerializer does.
   const producer = new KafkaProducer({
     configs: { 'bootstrap.servers': bootstrap },
-    keySerializer: stringSerializer(),
-    valueSerializer: stringSerializer(),
+    keySerializer: new StringSerializer(),
+    valueSerializer: new StringSerializer(),
   });
   try {
     // Resolves once the producer has the record (Java's send() returning)...

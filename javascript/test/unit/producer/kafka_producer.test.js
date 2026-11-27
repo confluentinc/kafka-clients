@@ -18,9 +18,9 @@
 // record fails in the core with its own error.
 //
 // PlaintextProducerSendTest.testWrongSerializer is ported here: a Buffer
-// given to the configured stringSerializer rejects send() with
+// given to the configured StringSerializer rejects send() with
 // SerializationError, as Java's KafkaProducer#doSend wraps the serializer's
-// ClassCastException (a TypeError here).
+// ClassCastException (the built-in serializer's type failure here).
 
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
@@ -32,7 +32,7 @@ const { ExecutionError, IllegalArgumentError, IllegalStateError } = require('@co
 const { KafkaError, KafkaFuture } = require('@confluentinc/kafka-javascript/common');
 const errors = require('@confluentinc/kafka-javascript/common/errors');
 const { RecordHeader } = require('@confluentinc/kafka-javascript/common/header');
-const { stringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
+const { StringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
 const { KafkaProducer, ProducerRecord, RecordMetadata } = require('@confluentinc/kafka-javascript/producer');
 const { createFuture } = require('../../_internal');
 // Every probe child runs with the allocator's poisoning (freed memory filled,
@@ -1815,7 +1815,7 @@ test('a null serializer sends the record bytes as they are, as no serializer doe
       calls.map((c) => c.data),
       ['anything'],
     );
-    // Without a key serializer the key must be bytes; a string points to stringSerializer() (JS conventions, Types and Class family).
+    // Without a key serializer the key must be bytes; a string points to new StringSerializer() (JS conventions, Types and Class family).
     // @ts-expect-error a number key without a key serializer: the bytes check rejects with TypeError
     await assert.rejects(producer.send(new ProducerRecord({ topic: 'unit-serde-n', key: 3, value: 'v' })), {
       name: 'TypeError',
@@ -1825,16 +1825,16 @@ test('a null serializer sends the record bytes as they are, as no serializer doe
     await assert.rejects(producer.send(new ProducerRecord({ topic: 'unit-serde-n', key: 'k', value: 'v' })), {
       name: 'TypeError',
       message:
-        "key is a string, and the producer has no key serializer: give the producer keySerializer: stringSerializer() (or 'key.serializer': " +
-        'stringSerializer in its configuration), from @confluentinc/kafka-javascript/common/serialization, or send a Buffer or a Uint8Array',
+        "key is a string, and the producer has no key serializer: give the producer keySerializer: new StringSerializer() (or 'key.serializer': " +
+        '() => new StringSerializer() in its configuration), from @confluentinc/kafka-javascript/common/serialization, or send a Buffer or a Uint8Array',
     });
     const bytesOnly = new KafkaProducer({ configs: UNREACHABLE });
     // @ts-expect-error a string value without a value serializer: the bytes check rejects with TypeError
     await assert.rejects(bytesOnly.send(new ProducerRecord({ topic: 'unit-serde-n', value: 'v' })), {
       name: 'TypeError',
       message:
-        "value is a string, and the producer has no value serializer: give the producer valueSerializer: stringSerializer() (or 'value.serializer': " +
-        'stringSerializer in its configuration), from @confluentinc/kafka-javascript/common/serialization, or send a Buffer or a Uint8Array',
+        "value is a string, and the producer has no value serializer: give the producer valueSerializer: new StringSerializer() (or 'value.serializer': " +
+        '() => new StringSerializer() in its configuration), from @confluentinc/kafka-javascript/common/serialization, or send a Buffer or a Uint8Array',
     });
     await bytesOnly.close();
   } finally {
@@ -1954,8 +1954,12 @@ test('what a serializer throws, rejects with or returns that is no bytes rejects
 // goes to the callback and a FutureFailure, a ClassCastException becomes a
 // SerializationException, anything else is rethrown.
 
-test('PlaintextProducerSendTest.testWrongSerializer: a Buffer given to the configured stringSerializer rejects send() with SerializationError', async () => {
-  const producer = new KafkaProducer({ ...UNREACHABLE, 'key.serializer': stringSerializer, 'value.serializer': stringSerializer });
+test('PlaintextProducerSendTest.testWrongSerializer: a Buffer given to the configured StringSerializer rejects send() with SerializationError', async () => {
+  const producer = new KafkaProducer({
+    ...UNREACHABLE,
+    'key.serializer': () => new StringSerializer(),
+    'value.serializer': () => new StringSerializer(),
+  });
   try {
     const record = new ProducerRecord({ topic: 'topic', partition: 0, key: Buffer.from('key'), value: Buffer.from('value') });
     await assert.rejects(
@@ -1963,9 +1967,9 @@ test('PlaintextProducerSendTest.testWrongSerializer: a Buffer given to the confi
       producer.send(record),
       (e) =>
         e instanceof errors.SerializationError &&
-        e.message === "Can't convert key of class Buffer to class stringSerializer specified in key.serializer" &&
-        e.cause instanceof TypeError &&
-        e.cause.message === 'stringSerializer: data must be a string or null, not a Buffer',
+        e.message === "Can't convert key of class Buffer to class StringSerializer specified in key.serializer" &&
+        e.cause instanceof errors.SerializationError &&
+        e.cause.message === 'StringSerializer takes a string or null, not a Buffer',
     );
   } finally {
     await producer.close();
@@ -2226,12 +2230,14 @@ test("a serializer argument is a serializer object or null; a function gets Pyth
   assert.throws(() => new KafkaProducer({ configs: UNREACHABLE, keySerializer: value }), forms('configs, keySerializer'));
   // @ts-expect-error a value serializer without a key serializer: the form check throws IllegalArgumentError
   assert.throws(() => new KafkaProducer({ configs: UNREACHABLE, valueSerializer: value }), forms('configs, valueSerializer'));
-  // The built-in factory, given where its result goes.
-  // @ts-expect-error the factory for a serializer: the serde check throws IllegalArgumentError
-  assert.throws(() => new KafkaProducer({ configs: UNREACHABLE, keySerializer: stringSerializer, valueSerializer: null }), {
-    name: 'IllegalArgumentError',
-    message: "keySerializer: pass a serializer, not a function that makes one — did you forget '()'?",
-  });
+  // A class, or any function, given where an instance goes.
+  for (const fn of [StringSerializer, () => new StringSerializer(), Object.assign(() => null, { serialize: () => null })]) {
+    // @ts-expect-error a function for a serializer: the serde check throws TypeError
+    assert.throws(() => new KafkaProducer({ configs: UNREACHABLE, keySerializer: fn, valueSerializer: null }), {
+      name: 'TypeError',
+      message: 'keySerializer: pass an instance, not a function — did you forget `new`?',
+    });
+  }
   for (const bad of [{}, 'string', 1, { serialize: 'x' }]) {
     // @ts-expect-error values that are no serializer: the serde check throws TypeError
     assert.throws(() => new KafkaProducer({ configs: UNREACHABLE, keySerializer: null, valueSerializer: bad }), {
@@ -2348,10 +2354,11 @@ test('key.serializer and value.serializer take a function the producer calls onc
       made.map((m) => m.isKey),
       [true, false],
     );
-    // The whole configuration, each value as it was given, read-only.
+    // The whole configuration, each value as it was given, with the
+    // generated client.id, read-only.
     assert.equal(made[0].configs['some.key'], 5);
     assert.equal(made[0].configs['key.serializer'], configs['key.serializer']);
-    assert.deepEqual(Object.keys(made[0].configs), Object.keys(configs));
+    assert.deepEqual(Object.keys(made[0].configs), [...Object.keys(configs), 'client.id']);
     assert.ok(Object.isFrozen(made[0].configs));
     await producer.send(new ProducerRecord({ topic: 'unit-serde-c', key: 1, value: 2 }));
     assert.deepEqual(
@@ -2387,7 +2394,7 @@ test("a serializer argument wins over its config key, which is then ignored; a n
 test('a serde config key that is no synchronous function throws ConfigError, saying what to pass', async () => {
   /** @param {string} argument */
   const pass = (argument) =>
-    `pass a synchronous function ({ configs, isKey }) => serializer, such as stringSerializer, or the serializer itself as the ${argument} argument of the constructor`;
+    `pass a synchronous function ({ configs, isKey }) => serializer, such as () => new StringSerializer(), or the serializer itself as the ${argument} argument of the constructor`;
   /** A serializer class, which a serde config key refuses. */
   class StringSerializer {
     serialize() {
@@ -2407,11 +2414,22 @@ test('a serde config key that is no synchronous function throws ConfigError, say
     for (const [value, message] of [
       [
         'org.apache.kafka.common.serialization.StringSerializer',
-        `Invalid value org.apache.kafka.common.serialization.StringSerializer for configuration ${key}: a class name cannot be loaded in JavaScript; ${pass(argument)}`,
+        `Invalid value org.apache.kafka.common.serialization.StringSerializer for configuration ${key}: a class name cannot be loaded in JavaScript (did you mean \`() => new StringSerializer()\`?); ${pass(argument)}`,
       ],
+      // A class name's last segment names the class, when it is an identifier.
+      [
+        'org.example.Outer$Inner',
+        `Invalid value org.example.Outer$Inner for configuration ${key}: a class name cannot be loaded in JavaScript (did you mean \`() => new Inner()\`?); ${pass(argument)}`,
+      ],
+      ['not a class', `Invalid value not a class for configuration ${key}: a class name cannot be loaded in JavaScript; ${pass(argument)}`],
       [
         { serialize: () => null },
         `Invalid value an object for configuration ${key}: a serializer object is not a configuration value; ${pass(argument)}`,
+      ],
+      // A serializer object built by a class names it.
+      [
+        new StringSerializer(),
+        `Invalid value a StringSerializer for configuration ${key}: a serializer object is not a configuration value (did you mean \`() => new StringSerializer()\`?); ${pass(argument)}`,
       ],
       [5, `Invalid value a number for configuration ${key}: ${pass(argument)}`],
       [
@@ -2534,8 +2552,9 @@ test('a serde config function that throws is a construction failure, and the ser
       e.constructor === KafkaError && e.message === 'Failed to construct kafka producer' && e.cause === cause,
   );
   assert.deepEqual(closed, ['key argument']);
-  // One the core's configuration check refuses afterwards is closed too: only
-  // the producer holds it.
+  // The core checks the configuration first, as Java parses it first: its
+  // ConfigError comes before any function runs, so nothing is made, and the
+  // serializer given stays open, as Java's ConfigException leaves it.
   closed.length = 0;
   assert.throws(
     () =>
@@ -2550,7 +2569,7 @@ test('a serde config function that throws is a construction failure, and the ser
       }),
     { name: 'ConfigError', message: 'Invalid value sometimes for configuration acks: String must be one of: all, -1, 0, 1' },
   );
-  assert.deepEqual(closed, ['key']);
+  assert.deepEqual(closed, []);
   // close() closes a configured serializer as it closes a given one.
   closed.length = 0;
   const producer = new KafkaProducer({
@@ -2714,12 +2733,14 @@ test("create() wraps a throw or a rejection as Java's construction failure, and 
     {
       constructor: ConfigError,
       message:
-        'Invalid value x.Y for configuration value.serializer: a class name cannot be loaded in JavaScript; pass a function ({ configs, isKey }) => serializer, or one returning a Promise of it, such as stringSerializer, or the serializer itself as the valueSerializer argument',
+        'Invalid value x.Y for configuration value.serializer: a class name cannot be loaded in JavaScript (did you mean `() => new Y()`?); pass a function ({ configs, isKey }) => serializer, or one returning a Promise of it, such as () => new StringSerializer(), or the serializer itself as the valueSerializer argument',
     },
   );
-  assert.deepEqual(closed, ['key']);
-  // The core's check of the configuration fails once both were returned:
-  // both are closed, as only the producer holds them.
+  // The config keys are checked before any function runs, as Java reads its
+  // class names while it parses the configuration: nothing was made.
+  assert.deepEqual(closed, []);
+  // The core's check of the configuration comes first too, before create()
+  // awaits any function: nothing is made, and nothing closed.
   closed.length = 0;
   await assert.rejects(
     KafkaProducer.create({
@@ -2730,7 +2751,7 @@ test("create() wraps a throw or a rejection as Java's construction failure, and 
     }),
     { name: 'ConfigError', message: 'Invalid value sometimes for configuration acks: String must be one of: all, -1, 0, 1' },
   );
-  assert.deepEqual(closed, ['key', 'value']);
+  assert.deepEqual(closed, []);
 });
 
 test('the constructor refuses a Promise from a serde config function, closes what it resolves to, and leaves no rejection unhandled', () => {
@@ -2756,50 +2777,57 @@ test('the constructor refuses a Promise from a serde config function, closes wha
   assert.equal(r.stdout, `${refused}\n${refused}\nclosed\ndone\n`);
 });
 
-test('stringSerializer goes in a serde config key without (), configured by its encoding keys', async () => {
-  assert.throws(
-    () => new KafkaProducer({ ...UNREACHABLE, 'key.serializer': stringSerializer, 'key.serializer.encoding': 'UTF-32' }),
-    (/** @type {KafkaError & { cause: Error }} */ e) => {
-      assert.equal(e.constructor, KafkaError);
-      assert.equal(e.message, 'Failed to construct kafka producer');
-      assert.equal(e.cause.name, 'SerializationError');
-      assert.equal(e.cause.message, 'Unsupported encoding UTF-32');
-      return true;
-    },
-  );
-  // The key serializer reads key.serializer.encoding, the value one falls back to serializer.encoding.
-  assert.throws(
-    () =>
-      new KafkaProducer({
-        ...UNREACHABLE,
-        'key.serializer': stringSerializer,
-        'value.serializer': stringSerializer,
-        'key.serializer.encoding': 'UTF-8',
-        'serializer.encoding': 'windows-1252',
-      }),
-    (/** @type {Error & { cause: Error }} */ e) => e.cause.message === 'Unsupported encoding windows-1252',
-  );
-  const producer = new KafkaProducer({ ...UNREACHABLE, 'key.serializer': stringSerializer, 'value.serializer': stringSerializer });
-  await producer.close();
+test('a serde config function gets the configuration with the client.id the core generated, after the core checked it', () => {
+  // Java's KafkaProducerTest.configurableObjectsShouldSeeGeneratedClientId,
+  // for the serializers: Java configures them with originals() and the
+  // client.id its ProducerConfig generated ("producer-N"). The core checks
+  // the configuration first, so its ConfigError comes before any function
+  // runs.
+  /** @type {Array<Readonly<Record<string, unknown>>>} */
+  const seen = [];
+  const make = (/** @type {{ configs: Readonly<Record<string, unknown>> }} */ { configs }) => {
+    seen.push(configs);
+    return new StringSerializer();
+  };
+  const producer = new KafkaProducer({ ...UNREACHABLE, 'key.serializer': make, 'value.serializer': make });
+  assert.equal(seen.length, 2);
+  const clientId = seen[0]['client.id'];
+  assert.match(String(clientId), /^producer-\d+$/);
+  assert.equal(seen[1]['client.id'], clientId);
+  assert.equal(producer.metrics().keys().next().value?.tags().get('client-id'), clientId);
+  assert.ok(Object.isFrozen(seen[0]));
+  assert.equal(seen[0]['bootstrap.servers'], UNREACHABLE['bootstrap.servers']);
+  void producer.close();
+  // A client.id given is the one the functions see.
+  seen.length = 0;
+  const named = new KafkaProducer({ ...UNREACHABLE, 'client.id': 'mine', 'key.serializer': make });
+  assert.equal(seen[0]['client.id'], 'mine');
+  void named.close();
+  // The core's ConfigError first: no function runs.
+  seen.length = 0;
+  assert.throws(() => new KafkaProducer({ ...UNREACHABLE, 'linger.ms': 'soon', 'key.serializer': make }), { name: 'ConfigError' });
+  assert.equal(seen.length, 0);
 });
 
-test('a serde config function that reads the whole configuration leaves out only the keys the core does not know', () => {
-  // The function spreads the configuration, reading every key: the producer
-  // keys still reach the core (the producer has its bootstrap servers and
-  // client id), and only schema.registry.url, which no producer key is, is
-  // kept from the core, so the core lists nothing as unused.
+test('the keys a serde config function reads reach the core, which lists the ones it does not use; the serde keys do not', () => {
+  // The core lists the keys it does not use in one INFO line, at the RUST_LOG
+  // level read when its first client is built, so a fresh process builds it.
   const script = `
     const { KafkaProducer } = require('@confluentinc/kafka-javascript/producer');
+    const { StringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
     let seen;
     const p = new KafkaProducer({
       'bootstrap.servers': 'localhost:1',
       'client.id': 'spread-client',
-      'max.block.ms': 200,
       'schema.registry.url': 'http://sr',
-      'value.serializer': ({ configs }) => {
+      'key.deserializer': 'org.example.Deserializer',
+      'key.serializer': ({ configs }) => {
         seen = { ...configs };
         return { serialize: () => null };
       },
+      'value.serializer': () => new StringSerializer(),
+      // No charset key is read: the String serdes are UTF-8 only.
+      'value.serializer.encoding': 'UTF-8',
     });
     console.log(Object.keys(seen).sort().join(','));
     console.log(p.metrics().keys().next().value.tags().get('client-id'));
@@ -2807,41 +2835,16 @@ test('a serde config function that reads the whole configuration leaves out only
   `;
   const r = runNode(script, 120000, [], { RUST_LOG: 'info' });
   assert.equal(r.status, 0, r.stderr);
-  assert.equal(r.stdout, 'bootstrap.servers,client.id,max.block.ms,schema.registry.url,value.serializer\nspread-client\nclosed\n');
-  assert.ok(!r.stderr.includes('were supplied but are not used'), r.stderr);
-});
-
-test("the keys a serde config function reads don't reach the core, nor do the serde keys; the consumer's serde keys do", () => {
-  // The core lists the keys it does not use in one INFO line, at the RUST_LOG
-  // level read when its first client is built, so a fresh process builds it.
-  const script = `
-    const { KafkaProducer } = require('@confluentinc/kafka-javascript/producer');
-    const { stringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
-    new KafkaProducer({
-      'bootstrap.servers': 'localhost:1',
-      'schema.registry.url': 'http://sr',
-      'key.deserializer': 'org.example.Deserializer',
-      'key.serializer': ({ configs }) => {
-        if (configs['schema.registry.url'] !== 'http://sr') throw new Error('not read');
-        return { serialize: () => null };
-      },
-      // The built-in factory without (), which reads its encoding keys.
-      'value.serializer': stringSerializer,
-      'value.serializer.encoding': 'UTF-8',
-      'serializer.encoding': 'utf8',
-    })
-      .close()
-      .then(() => console.log('closed'));
-  `;
-  const r = runNode(script, 120000, [], { RUST_LOG: 'info' });
-  assert.equal(r.status, 0, r.stderr);
-  assert.equal(r.stdout, 'closed\n');
-  // serializer.encoding is not read: value.serializer.encoding is set, so
-  // Java's StringSerializer does not fall back to it.
-  assert.ok(
-    r.stderr.includes("These configurations '[key.deserializer, serializer.encoding]' were supplied but are not used yet."),
-    r.stderr,
+  assert.equal(
+    r.stdout,
+    'bootstrap.servers,client.id,key.deserializer,key.serializer,schema.registry.url,value.serializer,value.serializer.encoding\nspread-client\nclosed\n',
   );
+  // The deviation: Java's originals() marks schema.registry.url used, and the
+  // core, which gets no such mark (copy_for_client), lists it.
+  // The core lists them in its own order.
+  const unused = /These configurations '\[([^\]]*)\]' were supplied but are not used yet\./.exec(r.stderr);
+  assert.ok(unused, r.stderr);
+  assert.deepEqual(unused[1].split(', ').sort(), ['key.deserializer', 'schema.registry.url', 'value.serializer.encoding']);
 });
 
 // partitionsFor (Java's partitionsFor(String topic)): a Promise through the
@@ -2950,8 +2953,8 @@ const { ConfigError } = require('@confluentinc/kafka-javascript/common/config');
 function baseProducer(configs) {
   return new KafkaProducer({
     configs: { 'bootstrap.servers': '127.0.0.1:1', ...configs },
-    keySerializer: stringSerializer(),
-    valueSerializer: stringSerializer(),
+    keySerializer: new StringSerializer(),
+    valueSerializer: new StringSerializer(),
   });
 }
 
@@ -3071,8 +3074,8 @@ test('delivery.timeout.ms below linger.ms + request.timeout.ms fails the constru
 test('an unresolvable bootstrap fails partitionsFor with BootstrapResolutionError, and every later call too', async () => {
   const producer = new KafkaProducer({
     configs: { 'bootstrap.servers': 'unresolvable.invalid:9092', 'bootstrap.resolve.timeout.ms': 3000 },
-    keySerializer: stringSerializer(),
-    valueSerializer: stringSerializer(),
+    keySerializer: new StringSerializer(),
+    valueSerializer: new StringSerializer(),
   });
   const message = 'Failed to resolve bootstrap servers after 3000ms. Please check your bootstrap.servers configuration and DNS settings.';
   /** @param {unknown} e */
@@ -3125,8 +3128,8 @@ test('with the default bootstrap.resolve.timeout.ms an unresolvable bootstrap fa
 test("a failed send's callback gets Java's null metadata: the topic, no offset or timestamp, sizes and partition -1", async () => {
   const producer = new KafkaProducer({
     configs: { 'bootstrap.servers': '127.0.0.1:1', 'max.block.ms': 1000 },
-    keySerializer: stringSerializer(),
-    valueSerializer: stringSerializer(),
+    keySerializer: new StringSerializer(),
+    valueSerializer: new StringSerializer(),
   });
   try {
     /** @type {Array<{ metadata: RecordMetadata, exception: Error | null }>} */
@@ -3883,3 +3886,33 @@ for (const { closed, step, call } of FAULT_AFTER_CLOSE) {
     assert.match(r.stdout, /^after the call: Error: Node-API call failed: converting (a kafka_common_Error_t|a close's answer) \(/);
   }, 40000);
 }
+
+test('a serde config function that throws or rejects with null or undefined: that value is the cause of "Failed to construct kafka producer"', async () => {
+  for (const thrown of [null, undefined]) {
+    assert.throws(
+      () =>
+        new KafkaProducer({
+          ...UNREACHABLE,
+          'key.serializer': () => {
+            throw thrown;
+          },
+        }),
+      (/** @type {KafkaError} */ e) => {
+        assert.equal(e.constructor, KafkaError);
+        assert.equal(e.message, 'Failed to construct kafka producer');
+        assert.ok(Object.hasOwn(e, 'cause'));
+        assert.equal(e.cause, thrown);
+        return true;
+      },
+    );
+    await assert.rejects(
+      KafkaProducer.create({ ...UNREACHABLE, 'value.serializer': () => Promise.reject(thrown) }),
+      (/** @type {KafkaError} */ e) => {
+        assert.equal(e.message, 'Failed to construct kafka producer');
+        assert.ok(Object.hasOwn(e, 'cause'));
+        assert.equal(e.cause, thrown);
+        return true;
+      },
+    );
+  }
+});

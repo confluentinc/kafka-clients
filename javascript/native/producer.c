@@ -1640,22 +1640,19 @@ static void producer_finalize(napi_env env, void* data, void* hint) {
 
 // ---- construction -----------------------------------------------------------
 
-// The class handle KafkaProducer(configs) with NULL serializers (key and value
-// cross as kafka_Bytes_t), from `entries`, an array of [key, value] pairs, the
-// bytes of each string (encodeLikeJava's).
+// The class handle KafkaProducer(config) with NULL serializers (key and value
+// cross as kafka_Bytes_t), from the parsed configuration `config_handle`
+// (native/config.c), which it borrows: JS frees it after.
 // Returns NULL with a JS exception pending on failure.
-static kafka_producer_KafkaProducer_t* new_kafka_producer(napi_env env, napi_value entries) {
-    ConfigMap props;
-    if (config_map_build(env, entries, &props) != 0) return NULL;
+static kafka_producer_KafkaProducer_t* new_kafka_producer(napi_env env, napi_value config_handle) {
+    const kafka_producer_ProducerConfig_t* config =
+        (const kafka_producer_ProducerConfig_t*)config_handle_config(env, config_handle, 0);
+    if (config == NULL) return NULL;
     kafka_common_Error_t* ffi_err = NULL;
-    kafka_producer_ProducerConfig_t* config = NULL;
     kafka_producer_KafkaProducer_t* kp = NULL;
-    // kafka_producer_ProducerConfig_new and _KafkaProducer_new take an out_err
-    // of their own (no `_err` twin).
-    kafka_common_Error_t* err = FFI_SET(config, kafka_producer_ProducerConfig_new(props.map, &ffi_err));
-    config_map_free(env, &props);
-    if (err == NULL) err = FFI_SET(kp, kafka_producer_KafkaProducer_new(config, NULL, NULL, &ffi_err));
-    if (config != NULL) error_warn(env, 1, FFI_ERR(kafka_producer_ProducerConfig_destroy_err(config, &ffi_err)));
+    // kafka_producer_KafkaProducer_new takes an out_err of its own (no `_err`
+    // twin).
+    kafka_common_Error_t* err = FFI_SET(kp, kafka_producer_KafkaProducer_new(config, NULL, NULL, &ffi_err));
     if (err != NULL) {
         error_throw_owned(env, err);
         return NULL;
@@ -1739,17 +1736,15 @@ static napi_value producer_handle_new(napi_env env, kafka_producer_KafkaProducer
     return result;
 }
 
-// producerCreate(entries): a native producer handle over
-// KafkaProducer(configs), `entries` an array of [key, value] byte pairs. Throws a
-// KafkaError when the configuration is rejected or the producer cannot be
-// built.
+// producerCreate(config): a native producer handle over
+// KafkaProducer(config), `config` a producer's parsed configuration
+// (configCreate). Throws a KafkaError when the producer cannot be built.
 napi_value js_producer_create(napi_env env, napi_callback_info info) {
     size_t argc = 1;
     napi_value argv[1];
     NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
-    bool is_array = false;
-    if (argc != 1 || napi_is_array(env, argv[0], &is_array) != napi_ok || !is_array) {
-        napi_throw_type_error(env, NULL, "create(entries)");
+    if (argc != 1) {
+        napi_throw_type_error(env, NULL, "producerCreate(config)");
         return NULL;
     }
     kafka_producer_KafkaProducer_t* kp = new_kafka_producer(env, argv[0]);

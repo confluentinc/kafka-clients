@@ -16,18 +16,25 @@
 // Java's `ConsumerConfig` (with `SslConfigs` / `SaslConfigs`);
 // `cargo xtask check-generated` checks it is up to date.
 
+import type { Headers } from '../common/header/headers';
+
 /**
  * A consumer's configuration: Java's `ConsumerConfig` keys, as a plain object
  * (a `Map` is refused). Each value is written as the string the core parses
  * (`true` as `"true"`, numbers and bigints in decimal, arrays joined with
  * `,`, anything else by `String()`); `null` and `undefined` leave the key
  * out. The core checks every key and value, with Java's messages.
+ * `key.deserializer` and `value.deserializer` take a function
+ * `({ configs, isKey }) => deserializer`, such as
+ * `() => new StringDeserializer()`, and never reach the core. The
+ * constructor takes only a synchronous one; `KafkaConsumer.create()` also
+ * waits for one that returns a Promise.
  *
- * @remarks *(js-only)* The type of the configuration the consumer takes,
- * Java's `Map<String, Object>` and `Properties` as one. It lists the keys
- * Java's `ConsumerConfig` defines, for autocompletion, and takes any other
- * string too, through `(string & {})`, since an unknown key goes to the
- * core.
+ * @remarks *(js-only)* The type of the configuration the constructor and
+ * `create()` take, Java's `Map<String, Object>` and `Properties` as one. It
+ * lists the keys Java's `ConsumerConfig` defines, for autocompletion, and
+ * takes any other string too, through `(string & {})`, since an unknown key
+ * goes to the core.
  */
 export type ConsumerConfigs = {
   [key in
@@ -57,7 +64,6 @@ export type ConsumerConfigs = {
     | 'interceptor.classes'
     | 'internal.throw.on.fetch.stable.offset.unsupported'
     | 'isolation.level'
-    | 'key.deserializer'
     | 'max.partition.fetch.bytes'
     | 'max.poll.interval.ms'
     | 'max.poll.records'
@@ -150,11 +156,29 @@ export type ConsumerConfigs = {
     | 'ssl.truststore.location'
     | 'ssl.truststore.password'
     | 'ssl.truststore.type'
-    | 'value.deserializer'
     // Any other key, keeping the known keys' autocompletion: the core
-    // lists the keys it does not use.
-    | (string & {})]?: ConfigValue;
+    // lists the keys it does not use. `key.deserializer` and
+    // `value.deserializer` are among them, typed by the consumer's
+    // constructor, so that a configuration of this type binds none of its
+    // type arguments.
+    | (string & {})]?: string extends key ? ConfigValue | DeserializerConfig : ConfigValue;
 };
 
 // A value the core parses.
 type ConfigValue = string | number | boolean | bigint | ReadonlyArray<string | number | bigint> | null | undefined;
+
+// A serde config key's value: the function that makes the deserializer,
+// or a Promise of it, which only `create()` waits for.
+type DeserializerConfig =
+  | ((options: { configs: Readonly<Record<string, unknown>>; isKey: boolean }) => AnyDeserializer | PromiseLike<AnyDeserializer>)
+  | null
+  | undefined;
+
+// A deserializer of any data: what it returns is left unknown, so that a
+// configuration typed `ConsumerConfigs` binds no type argument of the
+// consumer, which infers them only from the functions an object literal
+// holds.
+type AnyDeserializer = {
+  deserialize(options: { topic: string; headers: Headers; data: Buffer }): unknown;
+  close?(): void;
+};

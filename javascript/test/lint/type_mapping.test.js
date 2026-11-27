@@ -604,3 +604,112 @@ test("a form the JS conventions leave out (overload_shape.js LEFT_OUT) is not co
     ],
   );
 });
+
+test("the serde classes' rows: a deserializer's byte[] or ByteBuffer is a Buffer, a serializer returns Uint8Array, Long | T is bigint | number, Void is null and a UUID a string, there only", () => {
+  const SERDE = 'org.apache.kafka.common.serialization.';
+  const serializer = javaClass('common.serialization.Serializer', {
+    kind: 'interface',
+    overloads: [method('serialize', ['String', 'Object', 'T'], { return_type: 'byte[]', param_names: ['topic', 'headers', 'data'] })],
+  });
+  const deserializer = javaClass('common.serialization.Deserializer', {
+    kind: 'interface',
+    overloads: [
+      method('deserialize', ['String', 'Object', 'byte[]'], { return_type: 'T', param_names: ['topic', 'headers', 'data'] }),
+      method('deserialize', ['String', 'Object', 'ByteBuffer'], { return_type: 'T', param_names: ['topic', 'headers', 'data'] }),
+    ],
+  });
+  /**
+   * A serde class of the fixture: its Java forms, and what implements them.
+   *
+   * @param {string} name
+   * @param {boolean} isSerializer
+   * @param {string} type Java's type of its data
+   * @param {string} supertypeFqn the interface's fqn, or '' for none
+   */
+  const serde = (name, isSerializer, type, supertypeFqn = `${SERDE}${isSerializer ? 'Serializer' : 'Deserializer'}`) =>
+    javaClass(`common.serialization.${name}`, {
+      supertypes: [isSerializer ? `Serializer<${type}>` : `Deserializer<${type}>`],
+      supertype_fqns: [supertypeFqn === '' ? null : supertypeFqn],
+      overloads: isSerializer
+        ? [
+            method('serialize', ['String', type], { return_type: 'byte[]', param_names: ['topic', 'data'] }),
+            method('serialize', ['String', 'Object', 'T'], { return_type: 'byte[]', param_names: ['topic', 'headers', 'data'] }),
+          ]
+        : [
+            method('deserialize', ['String', 'byte[]'], { return_type: type, param_names: ['topic', 'data'] }),
+            method('deserialize', ['String', 'Object', 'ByteBuffer'], { return_type: type, param_names: ['topic', 'headers', 'data'] }),
+          ],
+    });
+  const ts = (/** @type {string} */ name, /** @type {string} */ body) =>
+    `declare class Buffer extends Uint8Array {}\nexport class ${name} {\n  constructor() {}\n${body}\n}\n`;
+  const files = (/** @type {Record<string, string>} */ bodies, /** @type {string} */ longFqn = `${SERDE}Serializer`) =>
+    project({
+      'tsconfig.json': TSCONFIG,
+      'java-index.json': javaIndex([
+        ...classes,
+        serializer,
+        deserializer,
+        serde('LongSerializer', true, 'Long', longFqn),
+        serde('LongDeserializer', false, 'Long'),
+        serde('VoidDeserializer', false, 'Void'),
+        serde('UUIDSerializer', true, 'UUID'),
+      ]),
+      ...FILES,
+      ...LIB,
+      'src/producer/typed.ts': TYPED_TS,
+      'src/common/kafka_future.ts': FUTURE_TS,
+      'src/common/serialization/long_serializer.ts': ts('LongSerializer', bodies.longSerializer),
+      'src/common/serialization/long_deserializer.ts': ts('LongDeserializer', bodies.longDeserializer),
+      'src/common/serialization/void_deserializer.ts': ts('VoidDeserializer', bodies.voidDeserializer),
+      'src/common/serialization/uuid_serializer.ts': ts('UUIDSerializer', bodies.uuidSerializer),
+    });
+  const good = {
+    longSerializer:
+      '  serialize(options: { topic: string; headers: unknown; data: bigint | number | null }): Uint8Array | null { void options; return null; }',
+    longDeserializer:
+      '  deserialize(options: { topic: string; headers: unknown; data: Buffer | null }): bigint | null { void options; return null; }',
+    voidDeserializer:
+      '  deserialize(options: { topic: string; headers: unknown; data: Buffer | null }): null { void options; return null; }',
+    uuidSerializer:
+      '  serialize(options: { topic: string; headers: unknown; data: string | null }): Uint8Array | null { void options; return null; }',
+  };
+  let r = lint(files(good), [RULE]);
+  assert.deepEqual(
+    findings(r).filter((f) => f.includes('Serializer') || f.includes('Deserializer')),
+    [],
+    r.text,
+  );
+  // Each row refuses another type.
+  r = lint(
+    files({
+      longSerializer:
+        '  serialize(options: { topic: string; headers: unknown; data: bigint | null }): Buffer | null { void options; return null; }',
+      longDeserializer:
+        '  deserialize(options: { topic: string; headers: unknown; data: string | null }): bigint | number | null { void options; return null; }',
+      voidDeserializer:
+        '  deserialize(options: { topic: string; headers: unknown; data: Buffer | null }): undefined { void options; return undefined; }',
+      uuidSerializer:
+        '  serialize(options: { topic: string; headers: unknown; data: number | null }): Uint8Array | null { void options; return null; }',
+    }),
+    [RULE],
+  );
+  const bad = findings(r).filter((f) => f.includes('Serializer') || f.includes('Deserializer'));
+  for (const expected of [
+    /^LongSerializer\.serialize: option data: Java Long is not TypeScript /,
+    /^LongDeserializer\.deserialize: option data: Java byte\[\] \| ByteBuffer is not TypeScript string/,
+    /^LongDeserializer\.deserialize: return: Java Long is not TypeScript /,
+    /^VoidDeserializer\.deserialize: return: Java Void is not TypeScript undefined/,
+    /^UUIDSerializer\.serialize: option data: Java UUID is not TypeScript /,
+  ]) {
+    assert.ok(
+      bad.some((f) => expected.test(f)),
+      `${expected}: ${bad.join('\n')}`,
+    );
+  }
+  // A class implementing no serde interface gets no serde row: its return is Java's byte[] returned, a Buffer.
+  r = lint(files(good, ''), [RULE]);
+  assert.ok(
+    findings(r).some((f) => /^LongSerializer\.serialize: return: Java byte\[\] is not TypeScript Uint8Array/.test(f)),
+    r.text,
+  );
+});

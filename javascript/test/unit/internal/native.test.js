@@ -25,8 +25,10 @@ test('the addon loads and links libconfluent_kafka', () => {
 test('producerClose takes a bigint timeout exactly, and refuses one beyond 64 bits', async () => {
   // src/internal/duration.ts hands Infinity over as Long.MAX_VALUE, a bigint, which a
   // number cannot hold.
-  // The configuration crosses as encodeLikeJava's bytes.
-  const handle = native.producerCreate([[Buffer.from('bootstrap.servers'), Buffer.from('127.0.0.1:1')]]);
+  // The configuration crosses as encodeLikeJava's bytes, parsed first.
+  const config = native.configCreate(false, [[Buffer.from('bootstrap.servers'), Buffer.from('127.0.0.1:1')]]);
+  const handle = native.producerCreate(config);
+  native.configFree(config);
   assert.throws(() => native.producerClose(handle, 2n ** 64n, () => {}), {
     name: 'RangeError',
     message: 'close timeoutMs must fit a signed 64-bit integer',
@@ -39,11 +41,42 @@ test('producerClose takes a bigint timeout exactly, and refuses one beyond 64 bi
   assert.deepEqual(result, { error: null, destroyed: true });
 });
 
-test('producerCreate takes the configuration as bytes, and refuses a string', () => {
-  assert.throws(() => native.producerCreate([['bootstrap.servers', '127.0.0.1:1']]), {
-    name: 'TypeError',
-    message: 'config keys must be strings',
+test('configCreate takes the configuration as bytes, and refuses a string', () => {
+  for (const consumer of [false, true]) {
+    assert.throws(() => native.configCreate(consumer, [['bootstrap.servers', '127.0.0.1:1']]), {
+      name: 'TypeError',
+      message: 'config keys must be strings',
+    });
+  }
+});
+
+test('a parsed configuration answers its generated client.id, builds only its own client, and is freed once', () => {
+  const before = native.configStats();
+  const producerConfig = native.configCreate(false, [[Buffer.from('bootstrap.servers'), Buffer.from('127.0.0.1:1')]]);
+  const consumerConfig = native.configCreate(true, [
+    [Buffer.from('bootstrap.servers'), Buffer.from('127.0.0.1:1')],
+    [Buffer.from('client.id'), Buffer.from('mine')],
+  ]);
+  // Java's ProducerConfig and ConsumerConfig generate "producer-N" and
+  // "consumer-<group>-N" for an unset client.id.
+  assert.match(String(native.configGetString(producerConfig, 'client.id')), /^producer-\d+$/);
+  assert.equal(native.configGetString(consumerConfig, 'client.id'), 'mine');
+  assert.equal(native.configGetString(producerConfig, 'transactional.id'), null);
+  assert.throws(() => native.configGetString(producerConfig, 'no.such.key'), {
+    name: 'ConfigError',
+    message: "Unknown configuration 'no.such.key'",
   });
+  assert.throws(() => native.producerCreate(consumerConfig), { name: 'TypeError', message: 'a config handle of the other client' });
+  assert.throws(() => native.consumerCreate(producerConfig), { name: 'TypeError', message: 'a config handle of the other client' });
+  assert.throws(() => native.producerCreate({}), { name: 'TypeError', message: 'not a config handle' });
+  native.configFree(producerConfig);
+  native.configFree(producerConfig);
+  assert.throws(() => native.producerCreate(producerConfig), { name: 'TypeError', message: 'the config handle was freed' });
+  assert.throws(() => native.configGetString(producerConfig, 'client.id'), { name: 'TypeError', message: 'the config handle was freed' });
+  native.configFree(consumerConfig);
+  const after = native.configStats();
+  assert.equal(after.configsMade - before.configsMade, 2);
+  assert.equal(after.configsFreed - before.configsFreed, 2);
 });
 
 test("faultNext arms failures of the addon's steps, and answers and disarms the ones still armed", () => {

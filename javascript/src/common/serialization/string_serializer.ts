@@ -12,105 +12,33 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Java's StringSerializer, as the built-in factory stringSerializer()
-// (javascript/CLAUDE.md, JavaScript Binding Conventions, Serialization): a serializer that
-// writes a string as Java's String.getBytes(encoding) does, through
-// encodeLikeJava (src/internal/encode.ts), each lone surrogate as `?`
-// (Types). The factory takes an optional { configs, isKey }, Java's
-// configure(configs, isKey), so that it also goes in a serde config key
-// without `()`.
+// Java's StringSerializer (javascript/CLAUDE.md, JavaScript Binding Conventions,
+// Serialization): a string as its UTF-8 bytes, each lone surrogate
+// as `?`, as Java's String.getBytes writes it (encodeLikeJava, Types).
 
-import { JavaForms, kind } from '../../internal/args';
-import { nameBuiltIn } from '../../internal/serde';
-import { encodeLikeJava, type JavaCharset, javaCharsetForName } from '../../internal/encode';
-import { SerializationError } from '../errors/serialization_error';
+import { wrongType } from '../../internal/builtin_serde';
+import { encodeLikeJava } from '../../internal/encode';
+import type { Headers } from '../header/headers';
 import type { Serializer } from './serializer';
 
-const FORMS = new JavaForms('stringSerializer', [[], ['configs', 'isKey']]);
-
 /**
- * Java's `StringSerializer.configure`: the encoding of `key.serializer.encoding`
- * (for a key) or `value.serializer.encoding`, else of `serializer.encoding`;
- * a value that is not a string is ignored, as Java ignores one that is not a
- * `String`, and so is none (UTF-8).
+ * String encoding is UTF8.
  *
- * @param configs - the serializer's configuration
- * @param isKey - whether the serializer is for keys
- * @returns the charset to encode with
- *
- * @throws `SerializationError` "Unsupported encoding <name>" for a name that
- *   is not one of Java's standard charsets
+ * @remarks *(deviation)* UTF-8 only, with no `configure()`, so
+ * `key.serializer.encoding`, `value.serializer.encoding` and
+ * `serializer.encoding` are not read. Why: Node writes strings in only a few
+ * of Java's charsets. A lone surrogate is written as `?`, as Java writes it.
  */
-function configure(configs: Readonly<Record<string, unknown>>, isKey: boolean): JavaCharset {
-  const propertyName = isKey ? 'key.serializer.encoding' : 'value.serializer.encoding';
-  let encodingValue: unknown = configs[propertyName];
-  if (encodingValue === null || encodingValue === undefined) encodingValue = configs['serializer.encoding'];
-  if (typeof encodingValue !== 'string') return 'UTF-8';
-  const encoding = javaCharsetForName(encodingValue);
-  if (encoding === null) throw new SerializationError({ message: `Unsupported encoding ${encodingValue}` });
-  return encoding;
-}
-
-/**
- * The serializer of Java's `StringSerializer`: String encoding defaults to
- * UTF8 and can be customized by setting the property
- * `key.serializer.encoding`, `value.serializer.encoding` or
- * `serializer.encoding`. The first two take precedence over the last.
- *
- * @returns a serializer of strings, which writes a null string as null
- *
- * @remarks *(js-only)* The built-in factory of Java's class, which a
- * constructor argument takes called, `keySerializer: stringSerializer()`
- * (without `()` it throws "did you forget '()'?"), and a serde config key
- * without `()`, `'key.serializer': stringSerializer`. It writes Java's six
- * standard charsets (`US-ASCII`, `ISO-8859-1`, `UTF-8`, `UTF-16BE`,
- * `UTF-16LE`, `UTF-16`, under Java's names and aliases, ignoring case) byte
- * for byte as Java does. *(deviation: Java takes any charset its runtime
- * provides; another name throws `SerializationError` "Unsupported encoding
- * <name>". Why: Node has no Java charset providers. Goes when: never needed
- * for the standard set.)*
- */
-export function stringSerializer(): Serializer<string>;
-/**
- * The serializer of Java's `StringSerializer`, configured as Java's
- * `configure(configs, isKey)` configures it.
- *
- * @param options - the configuration and whether the serializer is for keys
- * @returns a serializer of strings, which writes a null string as null
- * @throws `SerializationError` "Unsupported encoding <name>" when the
- *   configured encoding is not UTF-8
- * @throws `IllegalArgumentError` when the given parameters are not `{}` or
- *   `{configs, isKey}`
- * @throws `TypeError` when `configs` is not an object (a `Map` included) or
- *   `isKey` not a boolean
- */
-export function stringSerializer(options: {
-  /** The configuration: `key.serializer.encoding`, `value.serializer.encoding` and `serializer.encoding` are read. */
-  configs: Readonly<Record<string, unknown>>;
-  /** Whether the serializer is for keys. */
-  isKey: boolean;
-}): Serializer<string>;
-export function stringSerializer(options?: unknown): Serializer<string> {
-  let encoding: JavaCharset = 'UTF-8';
-  if (FORMS.match(options, arguments.length) === 1) {
-    const configs = FORMS.value(options, 'configs');
-    const isKey = FORMS.value(options, 'isKey');
-    if (configs === null || typeof configs !== 'object') throw new TypeError(`configs must be an object, not ${kind(configs)}`);
-    // A Map's entries are no properties: refused, as a client's configs is,
-    // so that they are not silently ignored.
-    if (configs instanceof Map) throw new TypeError('configs must be a plain object, not a Map');
-    if (typeof isKey !== 'boolean') throw new TypeError(`isKey must be a boolean, not ${kind(isKey)}`);
-    encoding = configure(configs as Readonly<Record<string, unknown>>, isKey);
+export class StringSerializer implements Serializer<string> {
+  /** Creates a StringSerializer. */
+  constructor() {
+    // Java's implicit constructor: nothing to set.
   }
-  return nameBuiltIn(
-    {
-      serialize(given: { topic: string; data: string | null }): Uint8Array | null {
-        const data: unknown = given.data;
-        if (data === null) return null;
-        if (typeof data !== 'string') throw new TypeError(`stringSerializer: data must be a string or null, not ${kind(data)}`);
-        return encodeLikeJava(data, encoding);
-      },
-    },
-    'stringSerializer',
-  );
+
+  serialize(options: { topic: string; headers: Headers; data: string | null }): Uint8Array | null {
+    const data: unknown = options.data;
+    if (data === null) return null;
+    if (typeof data !== 'string') throw wrongType('StringSerializer', 'a string or null', data);
+    return encodeLikeJava(data);
+  }
 }

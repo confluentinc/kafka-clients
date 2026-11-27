@@ -194,9 +194,9 @@ newer.
   resize them until the Promise from `send()` settles (awaiting `send()` is
   enough), and a serializer must return a new Buffer for each record. The
   client holds a reference on each until then. A string key or value needs
-  `stringSerializer()`, which encodes it to UTF-8 as Java's `StringSerializer`
-  does, a lone surrogate as `?` (Node writes U+FFFD); without a serializer it
-  throws `TypeError` pointing to `stringSerializer()`. Header keys and config
+  `new StringSerializer()`, which encodes it to UTF-8 as Java's
+  `StringSerializer` does, a lone surrogate as `?` (Node writes U+FFFD);
+  without a serializer it throws `TypeError` pointing to `StringSerializer`. Header keys and config
   keys and values are encoded the same way; topic names are not.
 - `send({ record, callback })` (or `send(record)`) resolves at hand-over with a
   `KafkaFuture` whose `get()` settles at delivery; `flush()` and `close()` /
@@ -249,21 +249,19 @@ newer.
   like the app's bytes until `send()` settles. The producer's type arguments are inferred from them,
   and a producer without them is a `KafkaProducer<Uint8Array, Uint8Array>`.
   `close()` closes both; a failure there is a process warning. A function
-  given where a serializer goes throws `IllegalArgumentError` "... did you
-  forget '()'?". `ProducerRecord<K, V>` is generic: its key and value are
+  given where a serializer goes throws `TypeError` "... did you forget
+  `new`?". `ProducerRecord<K, V>` is generic: its key and value are
   what the serializers take, checked at `send()` when there is no serializer.
   An omitted or `null` key or value binds `never`, through a signature per
   null combination, so `send()` takes the `ProducerRecord<K, V>` of the
   producer's serializers.
-- `stringSerializer()` (`common/serialization`), Java's `StringSerializer`
-  byte for byte: a lone surrogate is written as `?`. It takes an optional
-  `{ configs, isKey }`, Java's `configure`, so `'key.serializer':
-  stringSerializer` works without `()`, and reads `key.serializer.encoding` /
-  `value.serializer.encoding`, then `serializer.encoding`. It writes Java's
-  six standard charsets byte for byte (`US-ASCII`, `ISO-8859-1`, `UTF-8`,
-  `UTF-16BE`, `UTF-16LE`, `UTF-16`, under Java's names and aliases, in any
-  case); another charset throws `SerializationError` "Unsupported encoding
-  <name>".
+- Java's built-in serializer and deserializer classes (`common/serialization`),
+  built with `new`: `StringSerializer`, `ByteArraySerializer`,
+  `ShortSerializer`, `IntegerSerializer`, `LongSerializer`, `FloatSerializer`,
+  `DoubleSerializer`, `BooleanSerializer`, `UUIDSerializer` and
+  `VoidSerializer`, and their deserializers, Java's byte for byte: a lone
+  surrogate is written as `?`. The String and UUID serdes are UTF-8 only,
+  with no `configure()`.
 - `KafkaProducer.NETWORK_THREAD_PREFIX` and `PRODUCER_METRIC_GROUP_NAME`, and,
   in `common`, `TopicPartition` (a frozen data object with a `toJSON()`),
   `Node` (a frozen data object) and `PartitionInfo` (Java's methods, its
@@ -368,11 +366,11 @@ newer.
   `key.serializer` and `value.serializer` take a synchronous function
   `({ configs, isKey }) => serializer`, which the producer calls once with the
   whole configuration, in place of Java's class and its `configure()`; these
-  two keys don't reach the core, and neither do the keys the function reads
-  that the core doesn't know (a `schema.registry.url`), as Java's
-  `originals()` marks them used; a producer key it reads still does. The
-  function gets the configuration without Java's computed `client.id`, and
-  runs before the core checks the configuration. A class name, a serializer object or a
+  two keys don't reach the core, while the keys the function reads do, and
+  the core lists the ones it doesn't use (a `schema.registry.url`). The
+  function gets the configuration with the `client.id` the core generated,
+  once the core has checked the configuration, as Java configures a
+  serializer. A class name, a serializer object or a
   function that returns a Promise there throws `ConfigError`, and a
   constructor argument wins. The `ProducerConfigs` type lists Java's producer
   keys for autocompletion and takes any other string.

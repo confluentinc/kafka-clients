@@ -85,7 +85,18 @@ import { QuotaViolationError } from '@confluentinc/kafka-javascript/common/metri
 import { ConfigError, SaslConfigs, SslClientAuth, SslConfigs } from '@confluentinc/kafka-javascript/common/config';
 import { SecurityProtocol } from '@confluentinc/kafka-javascript/common/security/auth';
 import { type Header, Headers, RecordHeader } from '@confluentinc/kafka-javascript/common/header';
-import { type Serializer, stringSerializer } from '@confluentinc/kafka-javascript/common/serialization';
+import {
+  type Deserializer,
+  IntegerDeserializer,
+  LongDeserializer,
+  LongSerializer,
+  type Serializer,
+  StringDeserializer,
+  StringSerializer,
+  UUIDSerializer,
+  VoidDeserializer,
+  VoidSerializer,
+} from '@confluentinc/kafka-javascript/common/serialization';
 
 void producer;
 
@@ -903,28 +914,34 @@ expectTypeOf(KafkaProducer.PRODUCER_METRIC_GROUP_NAME).toEqualTypeOf<string>();
 interface Order {
   id: number;
 }
-// The built-in factory: called as a constructor argument, or without () in a
-// serde config key, its configure(configs, isKey) form.
-expectTypeOf(stringSerializer()).toEqualTypeOf<Serializer<string>>();
-expectTypeOf(stringSerializer({ configs: { 'serializer.encoding': 'UTF-8' }, isKey: true })).toEqualTypeOf<Serializer<string>>();
-// @ts-expect-error configure takes the configuration and isKey together
-stringSerializer({ configs: {} });
-const viaFactory: ProducerConfigs = { 'key.serializer': stringSerializer, 'value.serializer': stringSerializer };
+// The built-in classes, built with new, are serializers of their types
+// (javascript/CLAUDE.md, JavaScript Binding Conventions, Serialization).
+expectTypeOf(new StringSerializer()).toMatchTypeOf<Serializer<string>>();
+expectTypeOf(new LongSerializer()).toMatchTypeOf<Serializer<bigint | number>>();
+expectTypeOf(new UUIDSerializer()).toMatchTypeOf<Serializer<string>>();
+expectTypeOf(new VoidSerializer()).toMatchTypeOf<Serializer<null>>();
+// @ts-expect-error a LongSerializer takes no string
+void new LongSerializer().serialize({ topic: 't', headers: new Headers(), data: '1' });
+const viaFactory: ProducerConfigs = { 'key.serializer': () => new StringSerializer(), 'value.serializer': () => new StringSerializer() };
 void viaFactory;
 // A configuration typed as ProducerConfigs has lost its functions' types:
 // the producer is typed as bytes.
 expectTypeOf(new KafkaProducer(viaFactory)).toEqualTypeOf<KafkaProducer<Uint8Array, Uint8Array>>();
 // The config keys bind the type their functions return, as arguments do
 // (JS conventions, Class family): the README's "the same through the configuration".
-expectTypeOf(new KafkaProducer({ ...configs, 'key.serializer': stringSerializer, 'value.serializer': stringSerializer })).toEqualTypeOf<
-  KafkaProducer<string, string>
->();
-expectTypeOf(new KafkaProducer({ configs: { ...configs, 'value.serializer': stringSerializer } })).toEqualTypeOf<
+expectTypeOf(
+  new KafkaProducer({ ...configs, 'key.serializer': () => new StringSerializer(), 'value.serializer': () => new StringSerializer() }),
+).toEqualTypeOf<KafkaProducer<string, string>>();
+expectTypeOf(new KafkaProducer({ configs: { ...configs, 'value.serializer': () => new StringSerializer() } })).toEqualTypeOf<
   KafkaProducer<Uint8Array, string>
 >();
 expectTypeOf(new KafkaProducer({ ...configs, 'key.serializer': null })).toEqualTypeOf<KafkaProducer<Uint8Array, Uint8Array>>();
 expectTypeOf(
-  new KafkaProducer({ configs: { ...configs, 'key.serializer': stringSerializer }, keySerializer: null, valueSerializer: null }),
+  new KafkaProducer({
+    configs: { ...configs, 'key.serializer': () => new StringSerializer() },
+    keySerializer: null,
+    valueSerializer: null,
+  }),
 ).toEqualTypeOf<KafkaProducer<string, Uint8Array>>();
 // create() takes the constructor's types, its serde config functions may
 // return a Promise, and it returns a Promise of the producer: a forgotten
@@ -932,15 +949,19 @@ expectTypeOf(
 async function createWaitsForTheSerdeFunctions(): Promise<void> {
   const awaited = KafkaProducer.create({
     ...configs,
-    'key.serializer': async () => stringSerializer(),
-    'value.serializer': stringSerializer,
+    'key.serializer': async () => new StringSerializer(),
+    'value.serializer': () => new StringSerializer(),
   });
   expectTypeOf(awaited).toEqualTypeOf<Promise<KafkaProducer<string, string>>>();
   expectTypeOf(KafkaProducer.create({ configs })).toEqualTypeOf<Promise<KafkaProducer<Uint8Array, Uint8Array>>>();
   expectTypeOf(
-    KafkaProducer.create({ configs: { ...configs, 'key.serializer': stringSerializer }, keySerializer: null, valueSerializer: null }),
+    KafkaProducer.create({
+      configs: { ...configs, 'key.serializer': () => new StringSerializer() },
+      keySerializer: null,
+      valueSerializer: null,
+    }),
   ).toEqualTypeOf<Promise<KafkaProducer<string, Uint8Array>>>();
-  expectTypeOf(KafkaProducer.create({ configs, keySerializer: stringSerializer(), valueSerializer: null })).toEqualTypeOf<
+  expectTypeOf(KafkaProducer.create({ configs, keySerializer: new StringSerializer(), valueSerializer: null })).toEqualTypeOf<
     Promise<KafkaProducer<string, Uint8Array>>
   >();
   // @ts-expect-error a Promise of the producer has no send(): await it
@@ -951,7 +972,11 @@ async function createWaitsForTheSerdeFunctions(): Promise<void> {
 }
 void createWaitsForTheSerdeFunctions;
 async function serializersFromTheConfiguration(): Promise<void> {
-  const same = new KafkaProducer({ ...configs, 'key.serializer': stringSerializer, 'value.serializer': stringSerializer });
+  const same = new KafkaProducer({
+    ...configs,
+    'key.serializer': () => new StringSerializer(),
+    'value.serializer': () => new StringSerializer(),
+  });
   await same.send(new ProducerRecord({ topic: 't', key: 'k', value: 'v' }));
   // @ts-expect-error a string serializer takes no number
   await same.send(new ProducerRecord({ topic: 't', key: 1, value: 'v' }));
@@ -972,7 +997,7 @@ const orderSerializer: Serializer<Order> = {
 const textSerializer: Serializer<string> = { serialize: ({ data }) => data };
 void textSerializer;
 async function serializers(): Promise<void> {
-  const typed = new KafkaProducer({ configs, keySerializer: stringSerializer(), valueSerializer: orderSerializer });
+  const typed = new KafkaProducer({ configs, keySerializer: new StringSerializer(), valueSerializer: orderSerializer });
   expectTypeOf(typed).toEqualTypeOf<KafkaProducer<string, Order>>();
   await typed.send(new ProducerRecord({ topic: 't', key: 'k', value: { id: 1 } }));
   await typed.send({ record: new ProducerRecord({ topic: 't', key: null, value: null }), callback: null });
@@ -982,14 +1007,16 @@ async function serializers(): Promise<void> {
   expectTypeOf(bytes).toEqualTypeOf<KafkaProducer<Uint8Array, Uint8Array>>();
   expectTypeOf(new KafkaProducer(configs)).toEqualTypeOf<KafkaProducer<Uint8Array, Uint8Array>>();
   await bytes.send(new ProducerRecord({ topic: 't', key: Buffer.from('k'), value: null }));
-  const half = new KafkaProducer({ configs, keySerializer: null, valueSerializer: stringSerializer() });
+  const half = new KafkaProducer({ configs, keySerializer: null, valueSerializer: new StringSerializer() });
   expectTypeOf(half).toEqualTypeOf<KafkaProducer<Uint8Array, string>>();
   // @ts-expect-error Java's forms take both serializers or neither
-  void new KafkaProducer({ configs, keySerializer: stringSerializer() });
-  // @ts-expect-error a constructor argument is the serializer, not the factory (did you forget '()'?)
-  void new KafkaProducer({ configs, keySerializer: stringSerializer, valueSerializer: null });
+  void new KafkaProducer({ configs, keySerializer: new StringSerializer() });
+  // @ts-expect-error a constructor argument is an instance, not the class (did you forget `new`?)
+  void new KafkaProducer({ configs, keySerializer: StringSerializer, valueSerializer: null });
   // @ts-expect-error a serializer is an object, not the function that makes one
-  void new KafkaProducer({ configs, keySerializer: () => stringSerializer(), valueSerializer: null });
+  void new KafkaProducer({ configs, keySerializer: () => new StringSerializer(), valueSerializer: null });
+  // @ts-expect-error a class in a serde config key: the key takes the function that builds one
+  void new KafkaProducer({ ...configs, 'key.serializer': StringSerializer });
   await Promise.all([typed.close(), bytes.close(), half.close()]);
 }
 void serializers;
@@ -1001,7 +1028,7 @@ async function mocks(): Promise<void> {
   const typed = new MockProducer({
     autoComplete: true,
     partitioner: null,
-    keySerializer: stringSerializer(),
+    keySerializer: new StringSerializer(),
     valueSerializer: orderSerializer,
   });
   expectTypeOf(typed).toEqualTypeOf<MockProducer<string, Order>>();
@@ -1123,8 +1150,55 @@ async function consumerUsage(): Promise<void> {
   expectTypeOf(new KafkaConsumer(configs)).toEqualTypeOf<KafkaConsumer<Buffer, Buffer>>();
   const asInterface: Consumer = consumer;
   expectTypeOf(asInterface).toEqualTypeOf<Consumer<Buffer, Buffer>>();
-  // @ts-expect-error the deserializer forms are not in this release
-  void new KafkaConsumer({ configs, keyDeserializer: null, valueDeserializer: null });
+  // The deserializers bind the consumer's type arguments: as arguments, through
+  // the serde config keys, and through create()'s functions, which may return
+  // a Promise; a null or omitted one binds Buffer.
+  expectTypeOf(
+    new KafkaConsumer({ configs, keyDeserializer: new StringDeserializer(), valueDeserializer: new LongDeserializer() }),
+  ).toEqualTypeOf<KafkaConsumer<string, bigint>>();
+  expectTypeOf(new KafkaConsumer({ configs, keyDeserializer: null, valueDeserializer: new IntegerDeserializer() })).toEqualTypeOf<
+    KafkaConsumer<Buffer, number>
+  >();
+  expectTypeOf(new KafkaConsumer({ ...configs, 'key.deserializer': () => new StringDeserializer() })).toEqualTypeOf<
+    KafkaConsumer<string, Buffer>
+  >();
+  expectTypeOf(new KafkaConsumer({ ...configs, 'value.deserializer': () => new VoidDeserializer() })).toEqualTypeOf<
+    KafkaConsumer<Buffer, null>
+  >();
+  expectTypeOf(
+    KafkaConsumer.create({
+      ...configs,
+      'key.deserializer': async () => new StringDeserializer(),
+      'value.deserializer': () => new LongDeserializer(),
+    }),
+  ).toEqualTypeOf<Promise<KafkaConsumer<string, bigint>>>();
+  expectTypeOf(KafkaConsumer.create({ configs })).toEqualTypeOf<Promise<KafkaConsumer<Buffer, Buffer>>>();
+  const orderDeserializer: Deserializer<Order> = {
+    // A deserializer may return a Promise, which poll() awaits.
+    deserialize: async ({ topic, headers, data }) => {
+      expectTypeOf(topic).toEqualTypeOf<string>();
+      expectTypeOf(headers).toEqualTypeOf<Headers>();
+      expectTypeOf(data).toEqualTypeOf<Buffer>();
+      return Promise.resolve({ id: data.length });
+    },
+  };
+  const typed = new KafkaConsumer({ configs, keyDeserializer: new StringDeserializer(), valueDeserializer: orderDeserializer });
+  const polled = await typed.poll(0);
+  for (const record of polled) {
+    expectTypeOf(record.key).toEqualTypeOf<string | null>();
+    expectTypeOf(record.value).toEqualTypeOf<Order | null>();
+  }
+  await typed.close();
+  // @ts-expect-error a class where an instance belongs (did you forget `new`?)
+  void new KafkaConsumer({ configs, keyDeserializer: StringDeserializer, valueDeserializer: null });
+  // @ts-expect-error Java's forms take both deserializers or neither
+  void new KafkaConsumer({ configs, keyDeserializer: new StringDeserializer() });
+  // @ts-expect-error a class in a serde config key: the key takes the function that builds one
+  void new KafkaConsumer({ ...configs, 'key.deserializer': StringDeserializer });
+  // @ts-expect-error a serializer is no deserializer
+  void new KafkaConsumer({ configs, keyDeserializer: new StringSerializer(), valueDeserializer: null });
+  // @ts-expect-error a Promise of the consumer has no poll(): await it
+  void KafkaConsumer.create({ configs }).poll(0);
   await consumer.subscribe({ topics: ['t'] });
   await consumer.subscribe(['t']);
   await consumer.subscribe({ pattern: new SubscriptionPattern({ pattern: 't.*' }) });

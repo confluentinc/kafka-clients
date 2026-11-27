@@ -526,7 +526,7 @@ test("the caller's key and value bytes cross as they are, for the addon to borro
   assert.equal(headers, null);
 });
 
-test('a string key or value points to stringSerializer(); null stays null', () => {
+test('a string key or value points to StringSerializer; null stays null', () => {
   const r = new ProducerRecord({
     topic: 't',
     partition: null,
@@ -549,8 +549,8 @@ test('a string key or value points to stringSerializer(); null stays null', () =
   assert.throws(() => sending(s).internalToNative(), {
     name: 'TypeError',
     message:
-      "key is a string, and the producer has no key serializer: give the producer keySerializer: stringSerializer() (or 'key.serializer': " +
-      'stringSerializer in its configuration), from @confluentinc/kafka-javascript/common/serialization, or send a Buffer or a Uint8Array',
+      "key is a string, and the producer has no key serializer: give the producer keySerializer: new StringSerializer() (or 'key.serializer': " +
+      '() => new StringSerializer() in its configuration), from @confluentinc/kafka-javascript/common/serialization, or send a Buffer or a Uint8Array',
   });
   s.headers.add({ key: 'still', value: null });
   // Bytes a serializer returned are what crosses.

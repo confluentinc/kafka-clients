@@ -1017,3 +1017,304 @@ listenerTest(
   },
   240000,
 );
+
+// ---- the deserializers ------------------------------------------------------
+//
+// poll() runs them over the records the core returns, as Java's
+// CompletedFetch.parseRecord does: the key's, then the value's, each only for
+// a key or value that is not null, given the record's own Headers and a
+// Buffer over the fetched bytes. A failing deserializer ends the batch where
+// Java's FetchCollector ends it: the records before it are returned,
+// RecordDeserializationError is the failure of a poll that has none, and
+// every partition is sought back to its first record not returned.
+
+const { RecordDeserializationError } = require('@confluentinc/kafka-javascript/common/errors');
+const { StringDeserializer, StringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
+
+/**
+ * Writes `count` string records, `k<p>-<i>` and `v<p>-<i>`, to each of the
+ * partitions of `topic`.
+ *
+ * @param {string} topic
+ * @param {number} partitions
+ * @param {number} count
+ */
+async function produceStrings(topic, partitions, count) {
+  const producer = new KafkaProducer({
+    configs: { 'bootstrap.servers': BOOTSTRAP, acks: 'all' },
+    keySerializer: new StringSerializer(),
+    valueSerializer: new StringSerializer(),
+  });
+  try {
+    const futures = [];
+    for (let p = 0; p < partitions; p++) {
+      for (let i = 0; i < count; i++) {
+        futures.push(await producer.send(new ProducerRecord({ topic, partition: p, key: `k${p}-${i}`, value: `v${p}-${i}` })));
+      }
+    }
+    for (const future of futures) await future.get();
+  } finally {
+    await producer.close();
+  }
+}
+
+/**
+ * A consumer assigned every partition of `topic`, from the start, with the
+ * deserializers given.
+ *
+ * @template K, V
+ * @param {string} topic
+ * @param {number} partitions
+ * @param {import('@confluentinc/kafka-javascript/common/serialization').Deserializer<K> | null} key
+ * @param {import('@confluentinc/kafka-javascript/common/serialization').Deserializer<V> | null} value
+ * @returns {Promise<KafkaConsumer<K, V>>}
+ */
+async function deserializing(topic, partitions, key, value) {
+  /** @type {KafkaConsumer<any, any>} */
+  const consumer = new KafkaConsumer({
+    configs: { 'bootstrap.servers': BOOTSTRAP, 'group.protocol': 'consumer', 'auto.offset.reset': 'earliest' },
+    keyDeserializer: key,
+    valueDeserializer: value,
+  });
+  await consumer.assign({ partitions: Array.from({ length: partitions }, (_, partition) => new TopicPartition({ topic, partition })) });
+  return consumer;
+}
+
+(SKIP ? test.skip : test)(
+  "poll() runs the deserializers, key then value, plain values and Promises alike, on the record's own Headers and its fetched bytes, and none for a null key or value",
+  async () => {
+    const topic = freshTopic('deser');
+    await createTopic(BOOTSTRAP, topic);
+    await produce(topic);
+    /** @type {string[]} */
+    const calls = [];
+    const consumer = await deserializing(
+      topic,
+      1,
+      {
+        deserialize: ({ topic: t, headers, data }) => {
+          assert.equal(t, topic);
+          assert.ok(Buffer.isBuffer(data));
+          calls.push(`key ${data.toString()}`);
+          headers.add({ key: 'by-key', value: null });
+          return `K:${data.toString()}`;
+        },
+      },
+      {
+        // A Promise, which poll() awaits.
+        deserialize: async ({ headers, data }) => {
+          calls.push(`value ${data.toString()}`);
+          // The key's deserializer, run first, added to these very headers (v1's key is null).
+          assert.equal(headers.lastHeader('by-key') !== null, data.toString() !== 'v1');
+          await new Promise((resolve) => setImmediate(resolve));
+          return { value: data.toString() };
+        },
+      },
+    );
+    try {
+      const records = await pollFor(/** @type {any} */ (consumer), 3);
+      assert.deepEqual(
+        records.map((r) => [r.key, r.value]),
+        [
+          ['K:k0', { value: 'v0' }],
+          [null, { value: 'v1' }],
+          ['K:k2', null],
+        ],
+      );
+      // Key then value, record by record; none for a null key or value.
+      assert.deepEqual(calls, ['key k0', 'value v0', 'value v1', 'key k2']);
+      // The headers the deserializers were given are the record's own.
+      assert.ok(records[0].headers.lastHeader('by-key') !== null);
+      assert.equal(records[1].headers.lastHeader('by-key'), null);
+      // The sizes are the serialized bytes'.
+      assert.deepEqual(
+        records.map((r) => [r.serializedKeySize, r.serializedValueSize]),
+        [
+          [2, 2],
+          [-1, 2],
+          [2, -1],
+        ],
+      );
+    } finally {
+      await consumer.close();
+    }
+  },
+  120000,
+);
+
+(SKIP ? test.skip : test)(
+  "a failing deserializer: the records before it are returned, the next poll rejects with Java's RecordDeserializationError, and seeking past it skips it",
+  async () => {
+    for (const thrown of [new Error('bad bytes'), null, undefined]) {
+      const topic = freshTopic('deser-fail');
+      await createTopic(BOOTSTRAP, topic);
+      await produce(topic);
+      let failAt = 'v1';
+      const consumer = await deserializing(topic, 1, new StringDeserializer(), {
+        deserialize: ({ data }) => {
+          if (data.toString() === failAt) throw thrown;
+          return data.toString();
+        },
+      });
+      try {
+        // The batch ends before the failing record; then the failing record is first.
+        const first = await pollFor(/** @type {any} */ (consumer), 1);
+        assert.deepEqual(
+          first.map((r) => [r.offset, r.key, r.value]),
+          [[0n, 'k0', 'v0']],
+        );
+        const tp = new TopicPartition({ topic, partition: 0 });
+        assert.equal(await consumer.position(tp), 1n);
+        /** @type {unknown} */
+        let error;
+        const deadline = Date.now() + 30000;
+        while (error === undefined && Date.now() < deadline) {
+          try {
+            const more = await consumer.poll(500);
+            assert.equal(more.count(), 0, 'no record past the failing one');
+          } catch (e) {
+            error = e;
+          }
+        }
+        assert.ok(error instanceof RecordDeserializationError, String(error));
+        assert.equal(
+          error.message,
+          `Error deserializing VALUE for partition ${topic}-0 at offset 1. If needed, please seek past the record to continue consumption.`,
+        );
+        assert.equal(error.origin(), RecordDeserializationError.DeserializationExceptionOrigin.VALUE);
+        assert.equal(String(error.topicPartition()), `${topic}-0`);
+        assert.equal(error.offset(), 1n);
+        assert.equal(error.timestamp(), 1700000000001n);
+        assert.equal(error.timestampType(), TimestampType.CREATE_TIME);
+        assert.equal(error.keyBuffer(), null);
+        assert.deepEqual(error.valueBuffer(), Buffer.from('v1'));
+        assert.deepEqual(
+          error
+            .headers()
+            .toArray()
+            .map((h) => h.key()),
+          ['h', 'i'],
+        );
+        assert.ok(Object.hasOwn(error, 'cause'));
+        assert.equal(error.cause, thrown);
+        // The position is back at the failing record, which fails again.
+        assert.equal(await consumer.position(tp), 1n);
+        await assert.rejects(pollFor(/** @type {any} */ (consumer), 1), RecordDeserializationError);
+        // Seeking past it skips it; a record a deserializer took is returned once.
+        await consumer.seek({ partition: error.topicPartition(), offset: error.offset() + 1n });
+        failAt = '';
+        const rest = await pollFor(/** @type {any} */ (consumer), 1);
+        assert.deepEqual(
+          rest.map((r) => [r.offset, r.key, r.value]),
+          [[2n, 'k2', null]],
+        );
+      } finally {
+        await consumer.close();
+      }
+    }
+  },
+  240000,
+);
+
+(SKIP ? test.skip : test)(
+  'a failing deserializer over several partitions seeks each back to its first record not returned: none is lost, none returned twice',
+  async () => {
+    const topic = freshTopic('deser-parts');
+    await createTopic(BOOTSTRAP, topic, { partitions: 3 });
+    await produceStrings(topic, 3, 5);
+    // Fails once at the third record of partition 1, and at the first record of partition 2.
+    const failing = new Set(['k1-2', 'k2-0']);
+    const consumer = await deserializing(
+      topic,
+      3,
+      {
+        deserialize: ({ data }) => {
+          const key = data.toString();
+          if (failing.delete(key)) throw new Error(`no ${key}`);
+          return key;
+        },
+      },
+      new StringDeserializer(),
+    );
+    try {
+      /** @type {string[]} */
+      const seen = [];
+      /** @type {RecordDeserializationError[]} */
+      const errors = [];
+      const deadline = Date.now() + 60000;
+      while (seen.length < 15 && Date.now() < deadline) {
+        try {
+          for (const record of await consumer.poll(500)) seen.push(/** @type {string} */ (record.key));
+        } catch (e) {
+          assert.ok(e instanceof RecordDeserializationError, String(e));
+          errors.push(e);
+        }
+      }
+      const expected = [];
+      for (let p = 0; p < 3; p++) for (let i = 0; i < 5; i++) expected.push(`k${p}-${i}`);
+      assert.deepEqual([...seen].sort(), expected);
+      // Each partition's records in their order.
+      for (let p = 0; p < 3; p++) {
+        assert.deepEqual(
+          seen.filter((k) => k.startsWith(`k${p}-`)),
+          expected.filter((k) => k.startsWith(`k${p}-`)),
+        );
+      }
+      assert.equal(failing.size, 0);
+    } finally {
+      await consumer.close();
+    }
+  },
+  180000,
+);
+
+(SKIP ? test.skip : test)(
+  'create() awaits the deserializer config functions, with the generated client.id, and the consumer closes the deserializers they made',
+  async () => {
+    const topic = freshTopic('deser-create');
+    await createTopic(BOOTSTRAP, topic);
+    await produceStrings(topic, 1, 2);
+    /** @type {unknown[]} */
+    const clientIds = [];
+    let closed = 0;
+    const consumer = await KafkaConsumer.create({
+      configs: {
+        'bootstrap.servers': BOOTSTRAP,
+        'group.protocol': 'consumer',
+        'group.id': `${topic}-group`,
+        'auto.offset.reset': 'earliest',
+        'schema.registry.url': 'http://localhost:8081',
+        'key.deserializer': async ({ configs: given, isKey }) => {
+          clientIds.push(given['client.id']);
+          assert.equal(isKey, true);
+          await new Promise((resolve) => setImmediate(resolve));
+          const inner = new StringDeserializer();
+          return { deserialize: (o) => inner.deserialize(o), close: () => void closed++ };
+        },
+        'value.deserializer': ({ configs: given }) => {
+          clientIds.push(given['client.id']);
+          return { deserialize: ({ data }) => data.length, close: () => void closed++ };
+        },
+      },
+    });
+    try {
+      await consumer.subscribe([topic]);
+      const records = await pollFor(/** @type {any} */ (consumer), 2);
+      assert.deepEqual(
+        records.map((r) => [r.key, r.value]),
+        [
+          ['k0-0', 4],
+          ['k0-1', 4],
+        ],
+      );
+      // Java's generated client.id for a group: consumer-<group>-<n>.
+      assert.equal(clientIds.length, 2);
+      assert.match(String(clientIds[0]), new RegExp(`^consumer-${topic}-group-\\d+$`));
+      assert.equal(clientIds[1], clientIds[0]);
+    } finally {
+      await consumer.close();
+    }
+    assert.equal(closed, 2);
+  },
+  120000,
+);

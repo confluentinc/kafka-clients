@@ -152,8 +152,9 @@ test('a static create() listed in CREATES may return a Promise; nothing else may
   ]);
   const unused = lint(fixture(), [RULE], { CREATES: allowed });
   assert.deepEqual(findings(unused), ['Producer.create: is allowed as the test, but nothing matches it any more: delete the entry']);
+  // The real tree's: the producer's and the consumer's create().
   assert.deepEqual(
     WAITING.CREATES.map((d) => d.key),
-    ['KafkaProducer.create'],
+    ['KafkaProducer.create', 'KafkaConsumer.create'],
   );
 });

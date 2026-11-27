@@ -43,7 +43,15 @@
  * inherits from `AbstractConfig`, such as `CONFIG_PROVIDERS_CONFIG`.
  *
  * Serializers: whether a serializer's methods must all be async is not
- * decided yet.
+ * decided yet. The functions of `key.serializer` and `value.serializer` get
+ * the configuration with the generated `client.id`, once the core has checked
+ * it. The keys a serde config function reads reach the core, which lists the
+ * ones it doesn't use *(deviation: Java's `originals()` marks them used, so
+ * Java doesn't list them. Why: a client copies its config handle
+ * (`copy_for_client`) without the handle's record of the keys used, so an
+ * `ignore()` on the handle can't reach the client's unused-keys line. Goes
+ * when: the core keeps that record in the copy; the binding then marks them
+ * with `ignore`, an additive change)*.
  *
  * @packageDocumentation
  */

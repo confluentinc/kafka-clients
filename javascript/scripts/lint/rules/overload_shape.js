@@ -67,7 +67,25 @@ const MERGED_FORMS = new Map([
     'org.apache.kafka.common.serialization.Serializer#serialize',
     "javascript/CLAUDE.md, JavaScript Binding Conventions, Serialization: a serde has one method for Java's two serialize methods (a deviation), which the user implements",
   ],
+  [
+    'org.apache.kafka.common.serialization.Deserializer#deserialize',
+    "javascript/CLAUDE.md, JavaScript Binding Conventions, Serialization: a serde has one method for Java's three deserialize methods (a deviation), which the user implements",
+  ],
 ]);
+
+/**
+ * Whether Java member `jm` is a merged form (`MERGED_FORMS`): listed itself,
+ * or the method of that name of a class implementing a listed interface, as
+ * each built-in serde class's `serialize` and `deserialize` implement the
+ * interface's one method.
+ *
+ * @param {{ name: string, owner: { fqn: string, supertype_fqns: Array<string | null> } }} jm
+ * @returns {boolean}
+ */
+function isMergedForm(jm) {
+  if (MERGED_FORMS.has(`${jm.owner.fqn}#${jm.name}`)) return true;
+  return (jm.owner.supertype_fqns || []).some((fqn) => fqn !== null && MERGED_FORMS.has(`${fqn}#${jm.name}`));
+}
 /**
  * The Java forms the JS conventions leave out (Scope: a form whose
  * only extra parameter has a type that isn't translated; Signatures: a
@@ -235,6 +253,7 @@ module.exports = {
     'Conventions, Signatures).',
   LEFT_OUT,
   MERGED_FORMS,
+  isMergedForm,
   liveForms,
   optionName,
   formOptionNames,
@@ -265,7 +284,7 @@ module.exports = {
       }
       if (jm.kind === 'field' || (m.kind !== 'method' && m.kind !== 'constructor')) continue;
       let forms = liveForms(jm.overloads).filter((f) => !LEFT_OUT.has(`${jm.owner.fqn}#${formKey(f)}`));
-      if (MERGED_FORMS.has(`${jm.owner.fqn}#${jm.name}`)) forms = [forms.reduce((a, f) => (f.params.length > a.params.length ? f : a))];
+      if (isMergedForm(jm)) forms = [forms.reduce((a, f) => (f.params.length > a.params.length ? f : a))];
       if (forms.length < 2) continue;
       const javaName = `${shortName(jm.owner)}#${jm.name}`;
       const allNames = formOptionNames(forms);

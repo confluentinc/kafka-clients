@@ -25,7 +25,7 @@ const { ExecutionError, TimeoutError: RootTimeoutError } = require('@confluentin
 const { KafkaFuture } = require('@confluentinc/kafka-javascript/common');
 const { TimeoutError } = require('@confluentinc/kafka-javascript/common/errors');
 const { Headers, RecordHeader } = require('@confluentinc/kafka-javascript/common/header');
-const { stringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
+const { StringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
 const { KafkaProducer, ProducerRecord, RecordMetadata } = require('@confluentinc/kafka-javascript/producer');
 const { fetchRecords } = require('./_fetch_records');
 const { createFuture } = require('../_internal');
@@ -868,10 +868,10 @@ async function assertSendOrder(futures) {
   "strings are encoded as Java's StringSerializer encodes them: a lone surrogate as ?",
   async () => {
     const topic = freshTopic('surrogates');
-    // stringSerializer() as a constructor argument, and in a serde config key without ().
+    // A StringSerializer as a constructor argument, and through a serde config key.
     const producer = new KafkaProducer({
-      configs: { 'bootstrap.servers': BOOTSTRAP, 'client.id': 'js-\uD800', 'value.serializer': stringSerializer },
-      keySerializer: stringSerializer(),
+      configs: { 'bootstrap.servers': BOOTSTRAP, 'client.id': 'js-\uD800', 'value.serializer': () => new StringSerializer() },
+      keySerializer: new StringSerializer(),
       valueSerializer: null,
     });
     // Java's StringSerializer bytes for each string.
@@ -3442,12 +3442,12 @@ async function withBrokerPaused(body) {
         message: /^Timestamp 1000 of message with offset 0 is out of range\./,
       },
       {
-        name: 'a value the configured stringSerializer cannot convert',
+        name: 'a value the configured StringSerializer cannot convert',
         run: async () => {
           const producer = new KafkaProducer({
             configs: { 'bootstrap.servers': BOOTSTRAP },
-            keySerializer: stringSerializer(),
-            valueSerializer: stringSerializer(),
+            keySerializer: new StringSerializer(),
+            valueSerializer: new StringSerializer(),
           });
           try {
             return await sendOutcome(
@@ -3461,8 +3461,8 @@ async function withBrokerPaused(body) {
         cls: errors.SerializationError,
         parents: [KafkaError, Error],
         path: 'send() rejects',
-        message: /^Can't convert value of class /,
-        check: (e) => assert.ok(e.cause instanceof TypeError),
+        message: /^Can't convert value of class Buffer to class StringSerializer specified in value.serializer$/,
+        check: (e) => assert.ok(e.cause instanceof errors.SerializationError),
       },
       {
         name: 'a forced close of a lingering record',

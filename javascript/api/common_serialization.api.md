@@ -10,6 +10,148 @@
 export const __esModule: true;
 
 // @public
+export class BooleanDeserializer implements Deserializer<boolean> {
+    constructor();
+    // (undocumented)
+    deserialize(options: {
+        topic: string;
+        headers: Headers_2;
+        data: Buffer | null;
+    }): boolean | null;
+}
+
+// @public
+export class BooleanSerializer implements Serializer<boolean> {
+    constructor();
+    // (undocumented)
+    serialize(options: {
+        topic: string;
+        headers: Headers_2;
+        data: boolean | null;
+    }): Uint8Array | null;
+}
+
+// @public
+export class ByteArrayDeserializer implements Deserializer<Buffer> {
+    constructor();
+    // (undocumented)
+    deserialize(options: {
+        topic: string;
+        headers: Headers_2;
+        data: Buffer | null;
+    }): Buffer | null;
+}
+
+// @public
+export class ByteArraySerializer implements Serializer<Uint8Array> {
+    constructor();
+    // (undocumented)
+    serialize(options: {
+        topic: string;
+        headers: Headers_2;
+        data: Uint8Array | null;
+    }): Uint8Array | null;
+}
+
+// @public
+export interface Deserializer<out T> {
+    close?(): void;
+    deserialize(options: {
+        topic: string;
+        headers: Headers_2;
+        data: Buffer;
+    }): T | null | Promise<T | null>;
+}
+
+// @public
+export class DoubleDeserializer implements Deserializer<number> {
+    constructor();
+    // (undocumented)
+    deserialize(options: {
+        topic: string;
+        headers: Headers_2;
+        data: Buffer | null;
+    }): number | null;
+}
+
+// @public
+export class DoubleSerializer implements Serializer<number> {
+    constructor();
+    // (undocumented)
+    serialize(options: {
+        topic: string;
+        headers: Headers_2;
+        data: number | null;
+    }): Uint8Array | null;
+}
+
+// @public
+export class FloatDeserializer implements Deserializer<number> {
+    constructor();
+    // (undocumented)
+    deserialize(options: {
+        topic: string;
+        headers: Headers_2;
+        data: Buffer | null;
+    }): number | null;
+}
+
+// @public
+export class FloatSerializer implements Serializer<number> {
+    constructor();
+    // (undocumented)
+    serialize(options: {
+        topic: string;
+        headers: Headers_2;
+        data: number | null;
+    }): Uint8Array | null;
+}
+
+// @public
+export class IntegerDeserializer implements Deserializer<number> {
+    constructor();
+    // (undocumented)
+    deserialize(options: {
+        topic: string;
+        headers: Headers_2;
+        data: Buffer | null;
+    }): number | null;
+}
+
+// @public
+export class IntegerSerializer implements Serializer<number> {
+    constructor();
+    // (undocumented)
+    serialize(options: {
+        topic: string;
+        headers: Headers_2;
+        data: number | null;
+    }): Uint8Array | null;
+}
+
+// @public
+export class LongDeserializer implements Deserializer<bigint> {
+    constructor();
+    // (undocumented)
+    deserialize(options: {
+        topic: string;
+        headers: Headers_2;
+        data: Buffer | null;
+    }): bigint | null;
+}
+
+// @public
+export class LongSerializer implements Serializer<bigint | number> {
+    constructor();
+    // (undocumented)
+    serialize(options: {
+        topic: string;
+        headers: Headers_2;
+        data: bigint | number | null;
+    }): Uint8Array | null;
+}
+
+// @public
 export interface Serializer<in T> {
     close?(): void;
     serialize(options: {
@@ -20,13 +162,92 @@ export interface Serializer<in T> {
 }
 
 // @public
-export function stringSerializer(): Serializer<string>;
+export class ShortDeserializer implements Deserializer<number> {
+    constructor();
+    // (undocumented)
+    deserialize(options: {
+        topic: string;
+        headers: Headers_2;
+        data: Buffer | null;
+    }): number | null;
+}
 
 // @public
-export function stringSerializer(options: {
-    configs: Readonly<Record<string, unknown>>;
-    isKey: boolean;
-}): Serializer<string>;
+export class ShortSerializer implements Serializer<number> {
+    constructor();
+    // (undocumented)
+    serialize(options: {
+        topic: string;
+        headers: Headers_2;
+        data: number | null;
+    }): Uint8Array | null;
+}
+
+// @public
+export class StringDeserializer implements Deserializer<string> {
+    constructor();
+    // (undocumented)
+    deserialize(options: {
+        topic: string;
+        headers: Headers_2;
+        data: Buffer | null;
+    }): string | null;
+}
+
+// @public
+export class StringSerializer implements Serializer<string> {
+    constructor();
+    // (undocumented)
+    serialize(options: {
+        topic: string;
+        headers: Headers_2;
+        data: string | null;
+    }): Uint8Array | null;
+}
+
+// @public
+export class UUIDDeserializer implements Deserializer<string> {
+    constructor();
+    // (undocumented)
+    deserialize(options: {
+        topic: string;
+        headers: Headers_2;
+        data: Buffer | null;
+    }): string | null;
+}
+
+// @public
+export class UUIDSerializer implements Serializer<string> {
+    constructor();
+    // (undocumented)
+    serialize(options: {
+        topic: string;
+        headers: Headers_2;
+        data: string | null;
+    }): Uint8Array | null;
+}
+
+// @public
+export class VoidDeserializer implements Deserializer<null> {
+    constructor();
+    // (undocumented)
+    deserialize(options: {
+        topic: string;
+        headers: Headers_2;
+        data: Buffer | null;
+    }): null;
+}
+
+// @public
+export class VoidSerializer implements Serializer<null> {
+    constructor();
+    // (undocumented)
+    serialize(options: {
+        topic: string;
+        headers: Headers_2;
+        data: null;
+    }): Uint8Array | null;
+}
 
 // (No @packageDocumentation comment for this package)
 

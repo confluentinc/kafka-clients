@@ -93,8 +93,57 @@ const PURE_JS_WAITING = new Map([
 const AWAITED_RETURNS = new Map([
   [
     'org.apache.kafka.common.serialization.Serializer#serialize',
-    'a serializer may return a Promise, which the producer awaits before it hands the record over',
+    {
+      taken: true,
+      reason:
+        'a serializer may return a Promise, which the producer awaits before it hands the record over; the bytes it returns are taken',
+    },
   ],
+  [
+    'org.apache.kafka.common.serialization.Deserializer#deserialize',
+    {
+      taken: false,
+      reason: 'a deserializer may return a Promise, which the consumer awaits; the value it returns is what poll() returns',
+    },
+  ],
+]);
+
+/**
+ * The `AWAITED_RETURNS` entry of Java member `jm`: its own, or that of the
+ * interface its class implements, as each built-in serde class's `serialize`
+ * and `deserialize` implement the interface's (overload_shape.js
+ * `isMergedForm`), or undefined.
+ *
+ * @param {{ name: string, owner: { fqn: string, supertype_fqns: Array<string | null> } }} jm
+ * @returns {{ taken: boolean, reason: string } | undefined}
+ */
+function awaitedReturn(jm) {
+  const own = AWAITED_RETURNS.get(`${jm.owner.fqn}#${jm.name}`);
+  if (own !== undefined) return own;
+  for (const fqn of jm.owner.supertype_fqns || []) {
+    const entry = fqn === null ? undefined : AWAITED_RETURNS.get(`${fqn}#${jm.name}`);
+    if (entry !== undefined) return entry;
+  }
+  return undefined;
+}
+
+/**
+ * Java's `Void` is `null` in the Void serdes (javascript/CLAUDE.md,
+ * JavaScript Binding Conventions, Serialization), and only there.
+ */
+const VOID_IS_NULL = new Set([
+  'org.apache.kafka.common.serialization.VoidSerializer',
+  'org.apache.kafka.common.serialization.VoidDeserializer',
+]);
+
+/**
+ * Java's `UUID` is its canonical text, a string, in the UUID serdes
+ * (javascript/CLAUDE.md, JavaScript Binding Conventions, Serialization), and
+ * only there.
+ */
+const UUID_IS_STRING = new Set([
+  'org.apache.kafka.common.serialization.UUIDSerializer',
+  'org.apache.kafka.common.serialization.UUIDDeserializer',
 ]);
 /**
  * The Java interfaces whose bare value takes one class of src/ that
@@ -268,6 +317,12 @@ module.exports = {
         const e = elementOf(t);
         return e === undefined ? false : matchesElement({ ...j, dims: j.dims - 1 }, e);
       }
+      // Java's ByteBuffer, which only a serde takes (a deserializer's
+      // ByteBuffer form): a Buffer, as byte[] is.
+      if (j.name === 'ByteBuffer') return parts(t).every((p) => (outward ? ['Buffer'] : ['Buffer', 'Uint8Array']).includes(symbolName(p)));
+      // Java's Void in the Void serdes: null, and nothing else.
+      if (voidIsNull && (j.name === 'Void' || j.name === 'void')) return parts(t0).every((p) => (p.flags & ts.TypeFlags.Null) !== 0);
+      if (uuidIsString && j.name === 'UUID') return (t.flags & ts.TypeFlags.StringLike) !== 0;
       if (NUMBERS.has(j.name)) return (t.flags & ts.TypeFlags.NumberLike) !== 0;
       if (LONGS.has(j.name)) {
         // Java's long: a bigint returned; taken, a bigint or a whole number
@@ -393,6 +448,10 @@ module.exports = {
     let checked = 0;
     // Whether the type being checked is returned (a return, a field) rather than taken.
     let outward = false;
+    // Whether Java's Void is null (VOID_IS_NULL), and its UUID a string
+    // (UUID_IS_STRING), for the member being checked.
+    let voidIsNull = false;
+    let uuidIsString = false;
     const waiting = waitingMembers(ctx);
     // Where the member being checked is declared, for its findings.
     let at = null;
@@ -401,13 +460,17 @@ module.exports = {
      * forms naming one option, their union); `promise` unwraps a Promise
      * return of a waiting member.
      */
-    const check = (subject, where, javaTypes, tsType, { promise = false, awaited = false } = {}) => {
-      const list = (Array.isArray(javaTypes) ? javaTypes : [javaTypes]).filter((x) => x);
+    const check = (subject, where, javaTypes, tsType, { promise = false, awaited = false, taken = false } = {}) => {
+      const given = (Array.isArray(javaTypes) ? javaTypes : [javaTypes]).filter((x) => x);
+      // A type variable beside a concrete type, a serde class's own type and
+      // the interface's `T` it binds (LongSerializer's `Long | T`), is that
+      // type.
+      const list = given.some((x) => !/^[A-Z]$/.test(x)) ? given.filter((x) => !/^[A-Z]$/.test(x)) : given;
       if (list.length === 0) return;
       checked += 1;
-      // A return the user's implementation gives the client (AWAITED_RETURNS)
-      // is taken, not returned.
-      outward = (where === 'type' || where === 'return') && !awaited;
+      // A return the user's implementation gives the client
+      // (AWAITED_RETURNS, `taken`) is taken, not returned.
+      outward = (where === 'type' || where === 'return') && !taken;
       const js = [...new Map(list.map((x) => [x, parseJava(x)])).values()];
       let t = tsType;
       if (promise) {
@@ -416,9 +479,14 @@ module.exports = {
       }
       let ok;
       if (awaited && js.length === 1) {
-        // Each part as itself, a Promise as what it resolves to.
-        const ps = parts(strip(t)).map((p) => (symbolName(p) === 'Promise' ? checker.getTypeArguments(p)[0] || p : p));
-        const each = ps.map((p) => matches(js[0], p));
+        // Each part as itself, a Promise as what it resolves to; null is
+        // dropped part by part, as a type variable stays itself (strip()
+        // would read `T | Promise<T> | null` as `(T & {}) | Promise<T>`).
+        const ps = parts(t)
+          .filter((p) => !(p.flags & (ts.TypeFlags.Null | ts.TypeFlags.Undefined)))
+          .map((p) => (symbolName(p) === 'Promise' ? checker.getTypeArguments(p)[0] || p : p));
+        // Nothing but null or undefined: the type as it is (a Void serde's null).
+        const each = ps.length === 0 ? [matches(js[0], t)] : ps.map((p) => matches(js[0], p));
         ok = each.includes('unmapped') ? 'unmapped' : each.every((x) => x === true);
       } else if (js.length === 1) {
         ok = matches(js[0], t);
@@ -461,6 +529,8 @@ module.exports = {
       if (constantsOnly(java.cls) && m.kind === 'constructor') continue;
       const subject = `${item.name}.${m.name}`;
       at = atNode(ctx, m.node);
+      voidIsNull = VOID_IS_NULL.has(jm.owner.fqn);
+      uuidIsString = UUID_IS_STRING.has(jm.owner.fqn);
       if (m.kind === 'property' || m.kind === 'get') {
         const javaType = jm.kind === 'field' ? jm.field.type : (liveForms(jm.overloads)[0] || jm.overloads[0]).return_type;
         const tsType =
@@ -492,8 +562,14 @@ module.exports = {
           const blocking =
             (waiting.has(subject) || PURE_JS_WAITING.has(`${jm.owner.fqn}#${jm.name}`)) &&
             parseJava(javaReturn || 'void').name !== 'CompletionStage';
-          const awaited = AWAITED_RETURNS.has(`${jm.owner.fqn}#${jm.name}`);
-          if (sig) check(where, 'return', javaReturn, checker.getReturnTypeOfSignature(sig), { promise: blocking, awaited });
+          const entry = awaitedReturn(jm);
+          if (sig) {
+            check(where, 'return', javaReturn, checker.getReturnTypeOfSignature(sig), {
+              promise: blocking,
+              awaited: entry !== undefined,
+              taken: entry !== undefined && entry.taken,
+            });
+          }
         }
         const p0 = params.length === 1 ? params[0] : null;
         const bareName = p0 !== null && ts.isIdentifier(p0.name) && bareNames.includes(p0.name.text) ? p0.name.text : null;

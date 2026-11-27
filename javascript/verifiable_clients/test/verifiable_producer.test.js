@@ -28,7 +28,24 @@ const { spawn, spawnSync } = require('node:child_process');
 
 const { KafkaError } = require('@confluentinc/kafka-javascript/common');
 const { TimeoutError } = require('@confluentinc/kafka-javascript/common/errors');
-const { stringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
+const { StringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
+
+/**
+ * The properties without their serde keys, once each is checked to build a
+ * StringSerializer, Java's for both.
+ *
+ * @param {Record<string, unknown>} props
+ * @returns {Record<string, unknown>}
+ */
+function withoutSerializers(props) {
+  const out = { ...props };
+  for (const key of ['key.serializer', 'value.serializer']) {
+    const make = /** @type {() => unknown} */ (out[key]);
+    assert.ok(make() instanceof StringSerializer, key);
+    delete out[key];
+  }
+  return out;
+}
 
 const common = require('../_common');
 const { ArgumentParserError } = common;
@@ -398,13 +415,11 @@ test('parse_args minimal', () => {
   const [res, props] = parse('--topic', 't', '--bootstrap-server', 'b:9092');
   assert.deepEqual([res.topic, res.bootstrapServer, res.maxMessages, res.throughput, res.acks], ['t', 'b:9092', -1, -1, -1]);
   assert.deepEqual([res.createTime, res.valuePrefix, res.repeatingKeys], [-1, null, null]);
-  // Java's StringSerializer for both, as its factory in the serde config keys.
-  assert.deepEqual(props, {
+  // Java's StringSerializer for both, as the functions that build it in the serde config keys.
+  assert.deepEqual(withoutSerializers(props), {
     'bootstrap.servers': 'b:9092',
     acks: '-1',
     retries: '0',
-    'key.serializer': stringSerializer,
-    'value.serializer': stringSerializer,
   });
 });
 
@@ -484,12 +499,10 @@ test('parse_args config files are mutually exclusive', () => {
 test('the command config overrides the command line', () => {
   const config = tmpFile('p.properties', '# written by the system test\nacks=1\nretries = 5\nlinger.ms: 10\nclient.id   tool\n');
   const [, props] = parse('--topic', 't', '--bootstrap-server', 'b', '--command-config', config);
-  assert.deepEqual(props, {
+  assert.deepEqual(withoutSerializers(props), {
     'bootstrap.servers': 'b',
     acks: '1',
     retries: '5',
-    'key.serializer': stringSerializer,
-    'value.serializer': stringSerializer,
     'linger.ms': '10',
     'client.id': 'tool',
   });

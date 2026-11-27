@@ -22,7 +22,23 @@
  * `ConsumerConfig` and the type of a consumer's configuration, and the
  * consumer's error classes, generated from the Java sources.
  *
- * `KafkaConsumer` returns keys and values as Buffers. A key or value from
+ * `KafkaConsumer` runs its deserializers inside `poll()`, given as
+ * constructor arguments or made by the functions of `key.deserializer` and
+ * `value.deserializer`, which get the configuration with the generated
+ * `client.id`; `await KafkaConsumer.create(...)` also awaits a function that
+ * returns a Promise. The keys a serde config function reads reach the core,
+ * which lists the ones it doesn't use *(deviation: Java's `originals()` marks
+ * them used, so Java doesn't list them. Why: a client copies its config
+ * handle (`copy_for_client`) without the handle's record of the keys used, so
+ * an `ignore()` on the handle can't reach the client's unused-keys line. Goes
+ * when: the core keeps that record in the copy; the binding then marks them
+ * with `ignore`, an additive change)*. A failing deserializer makes `poll()`
+ * return the records before it, and reject with `RecordDeserializationError`
+ * when there are none; the consumer seeks back, so the next poll fails on the
+ * record again until it is sought past *(deviation, as in Python)*.
+ *
+ * Without deserializers, `KafkaConsumer` returns keys and values as Buffers,
+ * which a deserializer gets too. A key or value from
  * `poll()` points into the memory the client fetched, and a value you keep
  * holds that whole fetch in memory. To keep a value for long, copy it with
  * `Buffer.from(value)`. Electron doesn't allow external buffers, so on
@@ -118,9 +134,6 @@
  *   `losePartitions()` and `commitAsync()` as itself, and a commit callback
  *   gets the map committed, as Java's mock passes it. The mock keeps its
  *   listener after `close()`, as Java's does.
- *
- * Not in this release yet: `KafkaConsumer`'s constructor forms with
- * deserializers, which throw `UnsupportedOperationError`.
  *
  * Left out for want of an FFI entry point: `clientInstanceId`,
  * `registerMetricForSubscription` and `unregisterMetricFromSubscription`, and

@@ -619,6 +619,35 @@ export class ConsumerRecord<out K = never, out V = never> {
   }
 
   /**
+   * The record `record` with its key and value deserialized, sharing its
+   * other fields and its `Headers`, as Java's `CompletedFetch.parseRecord`
+   * builds the record over the headers its deserializers were given.
+   *
+   * @param record - the record as fetched
+   * @param key - the key, deserialized, or null
+   * @param value - the value, deserialized, or null
+   * @returns the record
+   *
+   * @internal
+   */
+  static internalWithKeyValue<K, V>(record: ConsumerRecord<unknown, unknown>, key: K | null, value: V | null): ConsumerRecord<K, V> {
+    const out = Object.create(ConsumerRecord.prototype) as Record<string, unknown>;
+    out.topic = record.topic;
+    out.partition = record.partition;
+    out.offset = record.offset;
+    out.timestamp = record.timestamp;
+    out.timestampType = record.timestampType;
+    out.serializedKeySize = record.serializedKeySize;
+    out.serializedValueSize = record.serializedValueSize;
+    out.headers = record.headers;
+    out.key = key;
+    out.value = value;
+    out.leaderEpoch = record.leaderEpoch;
+    out.deliveryCount = record.deliveryCount;
+    return Object.freeze(out) as unknown as ConsumerRecord<K, V>;
+  }
+
+  /**
    * The record as Java's `ConsumerRecord.toString()` writes it.
    *
    * @returns `ConsumerRecord(topic = ..., partition = ..., leaderEpoch = ...,

@@ -34,10 +34,11 @@ test('registrations and uses agree, and only the loader and src/internal/native.
     [RULE],
   );
   assert.equal(r.status, 0, r.text);
-  // 12 registrations (probe, headerStats, producerStats, errorStats,
-  // recordSpy, metricsStats, faultNext, consumerStats and
-  // consumerRefuseExternalBuffers, the test-only ones), 3 uses, 4 src/ files.
-  assert.ok(r.out.includes('✅ check-native-registry: 19 item(s) checked'), r.text);
+  // 13 registrations (probe, headerStats, producerStats, errorStats,
+  // recordSpy, metricsStats, faultNext, consumerStats,
+  // consumerRefuseExternalBuffers and configStats, the test-only ones), 3
+  // uses, 4 src/ files.
+  assert.ok(r.out.includes('✅ check-native-registry: 20 item(s) checked'), r.text);
 });
 
 test('each finding kind, with its exact text', () => {
@@ -68,7 +69,9 @@ test('each finding kind, with its exact text', () => {
 });
 
 test('the test-only entry also needs its test to call the registration', () => {
-  const r = lint(fixture({ 'test/unit/internal/native.test.js': "require('../../../dist/internal/native');\n" }), [RULE]);
+  const r = lint(fixture({ 'test/unit/internal/native.test.js': "require('../../../dist/internal/native');\nnative.configStats();\n" }), [
+    RULE,
+  ]);
   assert.deepEqual(findings(r), [
     'probe: is allowed unused as a test-only registration: the load check test/unit/internal/native.test.js calls, but test/unit/internal/native.test.js does not call it: delete the entry',
   ]);

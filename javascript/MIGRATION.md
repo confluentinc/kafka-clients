@@ -119,7 +119,7 @@ producer for them.
 | `acks`, `timeout`, `compression` per `send()` (KafkaJS) | the producer's `acks`, `delivery.timeout.ms` and `compression.type` configuration | Java sets them per producer |
 | `stats_cb` with `statistics.interval.ms` (librdkafka's JSON statistics, pushed on a timer) | `producer.metrics()`, read when you call it | Java's metrics: a `MetricNameMap<Metric>` keyed by `MetricName` (group, name and tags), a live view, each kept `metric.metricValue()` measured when called; `metrics().get(new MetricName({ name: 'record-send-total', group: 'producer-metrics', description: '', tags: new Map([['client-id', id]]) }))`. `statistics.interval.ms` reaches the core as an unknown key |
 | `producer.getMetadata({ topic }, cb)` (node-rdkafka style), the KafkaJS admin's `fetchTopicMetadata` for a producer's topic | `await producer.partitionsFor(topic)` | Java's `partitionsFor`: a Promise of `PartitionInfo[]`, each with `topic()`, `partition()`, `leader()`, `replicas()`, `inSyncReplicas()` and `offlineReplicas()` (`Node`s), waiting up to `max.block.ms` for the topic's metadata |
-| a string key or value given as it is | `keySerializer: stringSerializer()` / `valueSerializer: stringSerializer()`, or `{ 'key.serializer': stringSerializer }` | `stringSerializer()` (`common/serialization`) writes a string as Java's `StringSerializer` does (UTF-8, or Java's standard charsets through `serializer.encoding`); without a serializer a key or value is bytes, and a string throws `TypeError` pointing to it (Section 5). A serializer is `{ serialize({ topic, headers, data }) }`, and may return a Promise |
+| a string key or value given as it is | `keySerializer: new StringSerializer()` / `valueSerializer: new StringSerializer()`, or `{ 'key.serializer': () => new StringSerializer() }` | `StringSerializer` (`common/serialization`) writes a string as Java's does, in UTF-8; without a serializer a key or value is bytes, and a string throws `TypeError` pointing to it (Section 5). A serializer is `{ serialize({ topic, headers, data }) }`, and may return a Promise |
 | a hand-written mock of the producer, `jest.mock(...)` | `new MockProducer()`, Java's mock (`producer`) | It implements `Producer` and is the core's own mock: `history()` returns the records sent, `completeNext()` / `errorNext(e)` complete them, `setSendException(e)` (and the flush, close and `partitionsFor` setters) makes a call throw `e`. Close every mock: it keeps Node running until closed |
 | `await producer.flush({ timeout })` / `flush(timeout, cb)` | `await producer.flush()` | Java's `flush()` takes no timeout: it waits until every record sent before it is delivered or failed |
 | `producer.transaction()`, `sendOffsets()`, `commit()`, `abort()` (KafkaJS) | `initTransactions()`, `beginTransaction()`, `sendOffsetsToTransaction()`, `commitTransaction()` and `abortTransaction()`, Java's names | Not in the preview yet (Section 3). When they come, they return Promises, `beginTransaction()` included. A send is part of the transaction once its `send()` Promise has resolved. `commitTransaction()` waits for its delivery, so there's no need to await `future.get()` first. A send whose Promise hasn't resolved yet may be left out |
@@ -181,7 +181,7 @@ not used. A serializer is a constructor argument,
 object `{ serialize({ topic, headers, data }) }` (or `null`), whose
 `serialize` may return a Promise, or it comes through Java's
 `key.serializer` and `value.serializer`, which take a synchronous function
-`({ configs, isKey }) => serializer`, such as `stringSerializer`, called once
+`({ configs, isKey }) => serializer`, such as `() => new StringSerializer()`, called once
 with the whole configuration in place of Java's class and its `configure()`.
 A class name, a serializer object or a class there throws `ConfigError`,
 and so does a function that returns a Promise, which the constructor cannot
@@ -228,7 +228,7 @@ await registered.close();
 | positional arguments, `send(record, callback)` | one object of Java's names, `send({ record, callback })`, or the value on its own for a one-parameter form, `send(record)`, `close(5000)` | A second argument is refused with `IllegalArgumentError`, never dropped |
 | `undefined` for "not given" | leave the key or the argument out; `null` is Java's null | `undefined` as a value throws `TypeError` naming the parameter (`"value must not be undefined. Pass null for Java's null, which sends a tombstone."`), except in a configuration, where it leaves the key out |
 | timeouts in milliseconds, `-1` for "forever" | milliseconds or a `Temporal.Duration`; `Infinity` for no limit, `0` for "don't wait" | A negative timeout throws `IllegalArgumentError` |
-| keys and values: `Buffer`, string | `Uint8Array` (a `Buffer` is one), or a string with `stringSerializer()` | Not copied: don't write to, transfer or resize a key or value until the Promise from `send()` settles (1.x copies a plain Buffer inside `send()`, with librdkafka's `RK_MSG_COPY`); awaiting `send()` is enough, and a serializer returns a new Buffer for each record. A key or value read back from the client is a `Buffer` |
+| keys and values: `Buffer`, string | `Uint8Array` (a `Buffer` is one), or a string with `new StringSerializer()` | Not copied: don't write to, transfer or resize a key or value until the Promise from `send()` settles (1.x copies a plain Buffer inside `send()`, with librdkafka's `RK_MSG_COPY`); awaiting `send()` is enough, and a serializer returns a new Buffer for each record. A key or value read back from the client is a `Buffer` |
 
 ## 2. Not offered, by design
 
@@ -252,7 +252,6 @@ await registered.close();
 | The admin client: `Admin.create()`, its RPCs, `*Options` and `*Result` classes | the admin client |
 | Transactions: `initTransactions()`, `beginTransaction()`, `sendOffsetsToTransaction()`, `commitTransaction()`, `abortTransaction()` | a later release: left out of the preview |
 | `clientInstanceId()` | the Rust core's C API, which has no entry point for it yet |
-| The built-in serializer factories other than `stringSerializer()` | the serdes |
 | Schema Registry | the release of `@confluentinc/schemaregistry` that supports 4.x |
 | Musl (Alpine), Linux arm64 and Windows packages | later releases; build from source until then |
 
@@ -286,7 +285,7 @@ is decided for them already:
   admin client either**.
 - **Serdes go in the constructor, or in `key.serializer` / `value.serializer`
   as a function `({ configs, isKey }) => serializer`**, never as a class
-  name, and a string key or value needs `stringSerializer()`.
+  name, and a string key or value needs `new StringSerializer()`.
 
 ## 4. Available here and not in 1.x or KafkaJS
 
@@ -335,7 +334,7 @@ behaves otherwise.
 | `TimeoutError` | one class | two: the root's (Java's `java.util.concurrent.TimeoutException`), which a timed `future.get(timeout)` rejects with, and `common/errors`' Kafka `TimeoutError`, which a delivery or `max.block.ms` timeout fails a record with (the `cause` of `get()`'s `ExecutionError`, and the callback's `exception`) | Check the class you mean; neither is the `DOMException` of `AbortSignal.timeout()` |
 | A serializer that throws | the error is thrown or rejected as it is | as Java's `KafkaProducer`: an `ApiError` goes to the callback, with -1 metadata, and fails the future `send()` resolves to; a `TypeError` rejects as a `SerializationError` ("Can't convert key of class …"), the `TypeError` its `cause`; anything else rejects as it is | Check the callback or the future for an `ApiError` from a serializer, and `e.cause` for the `TypeError` |
 | A `MockProducer` callback whose Promise rejects | — | the callback's error, as a throw is: the record's own `send()` with `autoComplete`, and `flush()`, reject with it; after `completeNext()` / `errorNext()` the next `send()`, `flush()` or `close()` does, once, `flush()` still flushing first. The mock's callbacks run one at a time, as the producer's do: one that waits for its turn behind an earlier callback's Promise runs after `completeNext()` / `errorNext()` returned, and its throw is kept the same way. A `close()` inside a callback the core runs in its drain, before its first `await`, does not wait for the callbacks; after it, or in a callback that waited for its turn, `close()` waits for that callback, and a `flush()` there does too, unless a flush error is set, which it rejects with at once, so a callback that awaits either otherwise never settles. With `autoComplete`, a `send()` from a callback's synchronous part settles after its own callback, which runs in its turn once the outer one settled, so a callback that awaits it never settles | A test sees the callback's failure; await `flush()` or `close()` to collect it |
-| String keys and values without a serializer | strings sent as UTF-8 | a string key or value throws `TypeError` pointing to `stringSerializer()`, which encodes it as Java's `StringSerializer` does | Pass `keySerializer: stringSerializer()` / `valueSerializer: stringSerializer()` (or the config keys), or `Uint8Array`s |
+| String keys and values without a serializer | strings sent as UTF-8 | a string key or value throws `TypeError` pointing to `StringSerializer`, which encodes it as Java's does | Pass `keySerializer: new StringSerializer()` / `valueSerializer: new StringSerializer()` (or the config keys), or `Uint8Array`s |
 
 `README.md` is the reference for the rest of the producer's API, and
 `CHANGELOG.md` lists each change in the release where it lands.

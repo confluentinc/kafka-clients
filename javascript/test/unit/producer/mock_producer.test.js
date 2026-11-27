@@ -36,9 +36,9 @@ const path = require('node:path');
 
 const { ExecutionError, IllegalArgumentError, IllegalStateError } = require('@confluentinc/kafka-javascript');
 const { KafkaError } = require('@confluentinc/kafka-javascript/common');
-const { RecordTooLargeError } = require('@confluentinc/kafka-javascript/common/errors');
+const { RecordTooLargeError, SerializationError } = require('@confluentinc/kafka-javascript/common/errors');
 const { RecordHeader } = require('@confluentinc/kafka-javascript/common/header');
-const { stringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
+const { IntegerSerializer, StringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
 const { MockProducer, ProducerRecord, RecordMetadata } = require('@confluentinc/kafka-javascript/producer');
 // Every probe child runs with the allocator's poisoning (freed memory filled,
 // guard pages around large blocks), so a use after free or a double free in
@@ -148,21 +148,17 @@ test('shouldThrowOnFlushProducerIfProducerIsClosed', async () => {
 
 test('shouldThrowClassCastException', async () => {
   // Java's IntegerSerializer (the key serializer) given the string "key1"
-  // throws ClassCastException; the JavaScript serializer of a type throws its
-  // TypeError, which rejects the send as it is. The key serializer runs first,
-  // so the value serializer is never reached.
+  // throws ClassCastException; the JavaScript IntegerSerializer throws its
+  // SerializationError for a value of another type, which the mock passes out
+  // as it is, as Java's mock does. The key serializer runs first, so the
+  // value serializer is never reached.
   /** @type {unknown[]} */
   const valueCalls = [];
-  const valueSerializer = stringSerializer();
+  const valueSerializer = new StringSerializer();
   const customProducer = new MockProducer({
     autoComplete: true,
     partitioner: null,
-    keySerializer: {
-      serialize: ({ data }) => {
-        if (typeof data !== 'number') throw new TypeError(`integerSerializer: data must be a number or null, not a ${typeof data}`);
-        return Buffer.alloc(4);
-      },
-    },
+    keySerializer: new IntegerSerializer(),
     valueSerializer: {
       serialize: (args) => {
         valueCalls.push(args.data);
@@ -170,17 +166,18 @@ test('shouldThrowClassCastException', async () => {
       },
     },
   });
+  // @ts-expect-error a string key for the IntegerSerializer: its type check throws SerializationError
   await assert.rejects(customProducer.send(new ProducerRecord({ topic, key: 'key1', value: 'value1' })), {
-    constructor: TypeError,
-    message: 'integerSerializer: data must be a number or null, not a string',
+    constructor: SerializationError,
+    message: 'IntegerSerializer takes a number or null, not a string',
   });
   assert.deepEqual(valueCalls, []);
   // The value serializer's own type check, as before: a number for the string serializer.
   const stringValued = new MockProducer({ autoComplete: true, partitioner: null, keySerializer: null, valueSerializer });
-  // @ts-expect-error a number for the string serializer: its type check throws TypeError
+  // @ts-expect-error a number for the string serializer: its type check throws SerializationError
   await assert.rejects(stringValued.send(new ProducerRecord({ topic, key: null, value: 2 })), {
-    constructor: TypeError,
-    message: 'stringSerializer: data must be a string or null, not a number',
+    constructor: SerializationError,
+    message: 'StringSerializer takes a string or null, not a number',
   });
   await customProducer.close();
   await stringValued.close();
@@ -251,10 +248,10 @@ test("the constructor takes Java's () and (autoComplete, partitioner, keySeriali
     constructor: TypeError,
     message: 'autoComplete must be a boolean',
   });
-  // @ts-expect-error the factory for a serializer: the serde check throws IllegalArgumentError
-  assert.throws(() => new MockProducer({ autoComplete: true, partitioner: null, keySerializer: stringSerializer, valueSerializer: null }), {
-    constructor: IllegalArgumentError,
-    message: "keySerializer: pass a serializer, not a function that makes one — did you forget '()'?",
+  // @ts-expect-error a class where an instance belongs: the serde check throws TypeError
+  assert.throws(() => new MockProducer({ autoComplete: true, partitioner: null, keySerializer: StringSerializer, valueSerializer: null }), {
+    constructor: TypeError,
+    message: 'keySerializer: pass an instance, not a function — did you forget `new`?',
   });
   // Java's MockProducer() does not complete sends on its own.
   const producer = new MockProducer();

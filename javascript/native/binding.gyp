@@ -45,6 +45,7 @@
       "sources": [
         "addon.c",
         "callback_queue.c",
+        "config.c",
         "consumer.c",
         "error.c",
         "error_payload.c",

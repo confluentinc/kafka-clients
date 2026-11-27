@@ -107,3 +107,30 @@ test("an interface an exported class implements is the client's, not the user's:
   );
   assert.equal(r.status, 0, r.text);
 });
+
+test("the serde interfaces stay the user's although a built-in class implements them: their helper is still asked for, and used", () => {
+  const serializer = javaClass('common.serialization.Serializer', {
+    kind: 'interface',
+    overloads: [method('serialize', ['String', 'T']), method('close', [], { default: true })],
+  });
+  const files = (/** @type {Record<string, string>} */ extra) =>
+    project({
+      'tsconfig.json': TSCONFIG,
+      'java-index.json': javaIndex([...CLASSES, serializer]),
+      ...LIB,
+      'src/common/serialization/serializer.ts':
+        'export interface Serializer<T> {\n  serialize(options: { data: T }): unknown;\n  close?(): void;\n}\n',
+      'src/common/serialization/string_serializer.ts':
+        "import type { Serializer } from './serializer';\nexport class StringSerializer implements Serializer<string> {\n  serialize(): unknown { return null; }\n}\n",
+      'src/common/serialization/index.ts':
+        "export type { Serializer } from './serializer';\nexport { StringSerializer } from './string_serializer';\n",
+      ...extra,
+    });
+  // The built-in class implements Serializer, and its helper is still the user's.
+  let r = lint(files({ 'src/internal/serializer_defaults.ts': 'export class SerializerDefaults {\n  close(): void {}\n}\n' }), [RULE]);
+  assert.equal(r.status, 0, r.text);
+  r = lint(files({}), [RULE]);
+  assert.deepEqual(findings(r), [
+    'Serializer: has the default methods close in Java, but src/internal/serializer_defaults.ts declares no class SerializerDefaults',
+  ]);
+});

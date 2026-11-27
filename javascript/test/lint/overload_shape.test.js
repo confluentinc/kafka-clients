@@ -563,3 +563,49 @@ test("a nested class's overload set is checked as an export's: one options objec
     'Outer.Inner.seek: translates 2 Java forms of clients.producer.Outer$Inner#seek (seek(String topic); seek(String topic, int partition)) but takes (topic: string, partition?: number), not one options object',
   ]);
 });
+
+test("a serde class's serialize and deserialize are their interface's one merged form, found through the interface the class implements", () => {
+  const { javaClass } = require('./_java_fixture');
+  const serializer = javaClass('common.serialization.Serializer', {
+    kind: 'interface',
+    overloads: [
+      method('serialize', ['String', 'T'], { param_names: ['topic', 'data'] }),
+      method('serialize', ['String', 'Headers', 'T'], { param_names: ['topic', 'headers', 'data'], default: true }),
+    ],
+  });
+  /** @param {(string | null)[]} supertypeFqns */
+  const longSerializer = (supertypeFqns) =>
+    javaClass('common.serialization.LongSerializer', {
+      supertypes: ['Serializer<Long>'],
+      supertype_fqns: supertypeFqns,
+      overloads: [
+        method('LongSerializer', []),
+        method('serialize', ['String', 'Long'], { param_names: ['topic', 'data'] }),
+        method('serialize', ['String', 'Headers', 'T'], { param_names: ['topic', 'headers', 'data'] }),
+      ],
+    });
+  const files = (/** @type {(string | null)[]} */ supertypeFqns) =>
+    project({
+      'tsconfig.json': TSCONFIG,
+      'java-index.json': javaIndex([...CLASSES, serializer, longSerializer(supertypeFqns)]),
+      ...LIB,
+      'src/producer/rec.ts': REC_PER_FORM,
+      'src/common/serialization/serializer.ts':
+        'export interface Serializer<in T> {\n  serialize(options: { topic: string; headers: object; data: T | null }): Uint8Array | null;\n}\n',
+      'src/common/serialization/long_serializer.ts':
+        "import type { Serializer } from './serializer';\n" +
+        'export class LongSerializer implements Serializer<bigint> {\n  constructor() {}\n' +
+        '  serialize(options: { topic: string; headers: object; data: bigint | null }): Uint8Array | null { void options; return null; }\n}\n',
+    });
+  // Through the interface the class implements: the class's three forms are the merged one.
+  let r = lint(files(['org.apache.kafka.common.serialization.Serializer']), [RULE]);
+  assert.equal(r.status, 0, r.text);
+  // A class that implements no listed interface keeps its forms apart.
+  r = lint(files([null]), [RULE]);
+  assert.ok(
+    findings(r).some((f) =>
+      f.startsWith('LongSerializer.serialize: translates 2 Java forms of common.serialization.LongSerializer#serialize'),
+    ),
+    r.text,
+  );
+});

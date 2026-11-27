@@ -58,10 +58,18 @@ missing clients.producer.MockProducer#transactionInitialized
 missing clients.producer.MockProducer#uncommittedOffsets
 missing clients.producer.MockProducer#uncommittedRecords
 missing clients.producer.MockProducer#unregisterMetricFromSubscription
-# Serializer: the JS conventions (Serialization) give a serde no
-# configure(): a serializer is given only as a constructor argument, for
+# Serializer and Deserializer: the JS conventions (Serialization) give a
+# serde no configure(): a serde is given only as a constructor argument, for
 # which Java does not call it either.
 missing common.serialization.Serializer#configure
+missing common.serialization.Deserializer#configure
+# The String and UUID serdes: UTF-8 only, with no configure(), which reads
+# Java's charset keys (javascript/CLAUDE.md, JavaScript Binding Conventions,
+# Serialization).
+missing common.serialization.StringSerializer#configure
+missing common.serialization.StringDeserializer#configure
+missing common.serialization.UUIDSerializer#configure
+missing common.serialization.UUIDDeserializer#configure
 # ConsumerRecords: the JS conventions (Scope, and Class family's table of JDK
 # interfaces) translate Java's Iterable iterator() as [Symbol.iterator](),
 # which this rule doesn't count as iterator().
@@ -107,10 +115,6 @@ missing clients.consumer.MockConsumer#shouldRebalance
 # RecordHeader's constructor takes Java's (String, byte[]) form: JavaScript has
 # no ByteBuffer (a Buffer is a Uint8Array, the byte[] of the other form).
 overload-missing RecordHeader.constructor/RecordHeader(ByteBuffer,ByteBuffer)
-# KafkaConsumer's constructor: the forms with deserializers, which come with
-# the deserializers.
-overload-missing KafkaConsumer.constructor/KafkaConsumer(Map,Deserializer,Deserializer)
-overload-missing KafkaConsumer.constructor/KafkaConsumer(Properties,Deserializer,Deserializer)
 
 
 # check-public-audience: members the JS conventions make public although

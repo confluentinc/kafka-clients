@@ -331,12 +331,12 @@ function checkHeadersModel(r, seeds) {
 // empty one; null. Each record the sends built is read back
 // (native/record_spy.c recordSpy()) and compared, byte for byte, with what was
 // given, and its key and value must be the caller's own memory. Then 200
-// strings through stringSerializer(), the bytes the client makes itself.
+// strings through StringSerializer, the bytes the client makes itself.
 // Every record fails with the metadata timeout, which each future, read
 // after the collections, holds.
 const SEND_PROBE = `
 const { RecordHeader } = require(D + '/common/header');
-const { stringSerializer } = require(D + '/common/serialization');
+const { StringSerializer } = require(D + '/common/serialization');
 const { KafkaProducer, ProducerRecord } = require(D + '/producer');
 const hex = (b) => (b === null ? null : Buffer.from(b.buffer, b.byteOffset, b.byteLength).toString('hex'));
 function bytes(i) {
@@ -416,7 +416,7 @@ function churn(i) {
       }
     }
     await p.close();
-    const t = new KafkaProducer({ configs, keySerializer: stringSerializer(), valueSerializer: stringSerializer() });
+    const t = new KafkaProducer({ configs, keySerializer: new StringSerializer(), valueSerializer: new StringSerializer() });
     const strings = [];
     for (let i = 0; i < 200; i++) strings.push(['k-' + i + '-é', 'v-' + i + '-' + 'ü'.repeat(i % 7)]);
     native.recordSpy(true);

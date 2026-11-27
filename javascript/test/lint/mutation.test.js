@@ -778,9 +778,9 @@ MUTATIONS.push(
     apply: (root) =>
       edit(
         root,
-        'native/producer.c',
-        '    if (config != NULL) error_warn(env, 1, FFI_ERR(kafka_producer_ProducerConfig_destroy_err(config, &ffi_err)));\n',
-        '',
+        'native/config.c',
+        '                    : FFI_ERR(kafka_producer_ProducerConfig_destroy_err((kafka_producer_ProducerConfig_t*)h->config, &ffi_err));\n',
+        '                    : NULL;\n',
       ),
   },
   {

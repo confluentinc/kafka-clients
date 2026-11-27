@@ -45,8 +45,8 @@
 //   testCommittedThrowsTimeoutExceptionForNoResponse, testOffsetsForTimesTimeout,
 //   testBeginningOffsetsTimeout and testEndOffsetsTimeout.
 //
-// Not here yet, for want of deserializers:
-// configurableObjectsShouldSeeGeneratedClientId. Against a broker, where Java
+// configurableObjectsShouldSeeGeneratedClientId is ported without its
+// interceptor (the client runs no interceptors). Against a broker, where Java
 // scripts a MockClient, in test/integration/kafka_consumer_broker.test.js: 14
 // cases, listed there.
 //
@@ -140,6 +140,7 @@ const {
 } = require('@confluentinc/kafka-javascript');
 const { KafkaError, TopicPartition, TopicPartitionMap, TopicPartitionSet } = require('@confluentinc/kafka-javascript/common');
 const { ConfigError } = require('@confluentinc/kafka-javascript/common/config');
+const { IntegerDeserializer, StringDeserializer } = require('@confluentinc/kafka-javascript/common/serialization');
 const {
   BootstrapResolutionError,
   InvalidConfigurationError,
@@ -170,7 +171,6 @@ const NO_GROUP_ID = 'To use the group management or offset commit APIs, you must
 const CLOSED = 'This consumer has already been closed.';
 const CONCURRENT = 'KafkaConsumer is not safe for multi-threaded access.';
 const CLASSIC = 'Classic group protocol is not yet supported in this client; set group.protocol=consumer (KIP-848).';
-const NO_DESERIALIZERS = 'KafkaConsumer takes no deserializer yet: keys and values are Buffers';
 const NOT_SUBSCRIBED = 'Consumer is not subscribed to any topics or assigned any partitions';
 /** @param {string} fn */
 const CLOSED_GETTER = (fn) => `Rust panic caught at the FFI boundary in kafka_consumer_Consumer_${fn}: ${CLOSED}`;
@@ -630,15 +630,346 @@ test('the classic protocol, the default, gets the core UnsupportedOperationError
   });
 });
 
-test('deserializers are refused until the client has them, as arguments and as config keys', () => {
-  const error = { constructor: UnsupportedOperationError, message: NO_DESERIALIZERS };
-  // @ts-expect-error the deserializer forms are not in this release's types
-  assert.throws(() => new KafkaConsumer({ configs: configs(), keyDeserializer: null, valueDeserializer: null }), error);
-  for (const key of ['key.deserializer', 'value.deserializer']) {
-    assert.throws(() => new KafkaConsumer({ configs: configs(GROUP_ID, { [key]: 'org.example.Deserializer' }) }), error);
-  }
+test('configurableObjectsShouldSeeGeneratedClientId', () => {
+  // Java's interceptor is left out (the client runs no interceptors): the two
+  // config-route deserializers see the client.id the consumer generated.
+  /** @type {unknown[]} */
+  const clientIds = [];
+  const deserializerForClientId = (/** @type {{ configs: Readonly<Record<string, unknown>> }} */ { configs: given }) => {
+    clientIds.push(given['client.id']);
+    return new StringDeserializer();
+  };
+  const consumer = newConsumer(GROUP_ID, { 'key.deserializer': deserializerForClientId, 'value.deserializer': deserializerForClientId });
+  // Java's package-private clientId(), read through the consumer's metrics.
+  const clientId = [...consumer.metrics().keys()][0].tags().get('client-id');
+  assert.ok(typeof clientId === 'string' && clientId.length !== 0);
+  assert.equal(clientIds.length, 2);
+  for (const id of clientIds) assert.equal(id, clientId);
+  // A client.id given is the one the functions see.
+  clientIds.length = 0;
+  newConsumer(GROUP_ID, { 'client.id': 'mine', 'key.deserializer': deserializerForClientId });
+  assert.deepEqual(clientIds, ['mine']);
+});
+
+test('a deserializer config function runs after the core checked the configuration, and gets it with every key and the generated client.id', () => {
+  /** @type {Array<{ configs: Readonly<Record<string, unknown>>, isKey: boolean }>} */
+  const calls = [];
+  const make = (/** @type {{ configs: Readonly<Record<string, unknown>>, isKey: boolean }} */ options) => {
+    calls.push(options);
+    return new StringDeserializer();
+  };
+  // The core's ConfigError first: no function runs.
+  assert.throws(() => new KafkaConsumer({ configs: configs(GROUP_ID, { 'fetch.min.bytes': 'many', 'key.deserializer': make }) }), {
+    constructor: ConfigError,
+  });
+  assert.equal(calls.length, 0);
+  newConsumer(GROUP_ID, { 'key.deserializer': make, 'value.deserializer': make, 'schema.registry.url': 'http://sr' });
+  assert.deepEqual(
+    calls.map((c) => c.isKey),
+    [true, false],
+  );
+  assert.equal(calls[0].configs['schema.registry.url'], 'http://sr');
+  assert.equal(calls[0].configs['key.deserializer'], make);
+  assert.equal(calls[0].configs['group.id'], GROUP_ID);
+  assert.ok(Object.isFrozen(calls[0].configs));
+});
+
+test("the constructor takes deserializers as arguments, a null one the config key's, and a given one wins over its key", () => {
+  let called = 0;
+  const make = () => {
+    called++;
+    return new StringDeserializer();
+  };
+  opened.push(
+    /** @type {any} */ (
+      new KafkaConsumer({
+        // A string for a serde config key: the argument wins and the run time ignores the key.
+        configs: configs(GROUP_ID, { 'key.deserializer': make, 'value.deserializer': 'not even a function' }),
+        keyDeserializer: new IntegerDeserializer(),
+        valueDeserializer: new StringDeserializer(),
+      })
+    ),
+  );
+  assert.equal(called, 0);
+  opened.push(
+    new KafkaConsumer({ configs: configs(GROUP_ID, { 'key.deserializer': make }), keyDeserializer: null, valueDeserializer: null }),
+  );
+  assert.equal(called, 1);
   // A null or undefined key is no deserializer.
   newConsumer(GROUP_ID, { 'key.deserializer': null, 'value.deserializer': undefined });
+});
+
+test('a deserializer argument that is a function, a class included, throws TypeError "did you forget `new`?"', () => {
+  for (const fn of [StringDeserializer, () => new StringDeserializer()]) {
+    // @ts-expect-error a function for a deserializer: the serde check throws TypeError
+    assert.throws(() => new KafkaConsumer({ configs: configs(), keyDeserializer: fn, valueDeserializer: null }), {
+      constructor: TypeError,
+      message: 'keyDeserializer: pass an instance, not a function — did you forget `new`?',
+    });
+  }
+  for (const bad of [{}, 'string', 1, { deserialize: 'x' }, { serialize: () => null }]) {
+    // @ts-expect-error values that are no deserializer: the serde check throws TypeError
+    assert.throws(() => new KafkaConsumer({ configs: configs(), keyDeserializer: null, valueDeserializer: bad }), {
+      constructor: TypeError,
+      message: 'valueDeserializer must be a Deserializer: an object with a deserialize({ topic, headers, data }) method, or null',
+    });
+  }
+  assert.throws(
+    // @ts-expect-error a close that is no function: the serde check throws TypeError
+    () => new KafkaConsumer({ configs: configs(), keyDeserializer: { deserialize: () => null, close: 1 }, valueDeserializer: null }),
+    {
+      constructor: TypeError,
+      message: 'keyDeserializer.close must be a function when given',
+    },
+  );
+});
+
+test('a serde config key that is no synchronous deserializer function throws ConfigError, saying what to pass', () => {
+  /** @param {string} argument */
+  const pass = (argument) =>
+    `pass a synchronous function ({ configs, isKey }) => deserializer, such as () => new StringDeserializer(), or the deserializer itself as the ${argument} argument of the constructor`;
+  for (const [key, argument] of [
+    ['key.deserializer', 'keyDeserializer'],
+    ['value.deserializer', 'valueDeserializer'],
+  ]) {
+    for (const [value, message] of /** @type {Array<[unknown, string]>} */ ([
+      [
+        'org.apache.kafka.common.serialization.StringDeserializer',
+        `Invalid value org.apache.kafka.common.serialization.StringDeserializer for configuration ${key}: a class name cannot be loaded in JavaScript (did you mean \`() => new StringDeserializer()\`?); ${pass(argument)}`,
+      ],
+      [
+        new StringDeserializer(),
+        `Invalid value a StringDeserializer for configuration ${key}: a deserializer object is not a configuration value (did you mean \`() => new StringDeserializer()\`?); ${pass(argument)}`,
+      ],
+      [
+        { deserialize: () => null },
+        `Invalid value an object for configuration ${key}: a deserializer object is not a configuration value; ${pass(argument)}`,
+      ],
+      [5, `Invalid value a number for configuration ${key}: ${pass(argument)}`],
+      [
+        StringDeserializer,
+        `Invalid value a function for configuration ${key}: a class is not called (did you mean \`() => new StringDeserializer()\`?); ${pass(argument)}`,
+      ],
+      [
+        async () => new StringDeserializer(),
+        `Invalid value a function for configuration ${key}: the function returned a Promise, which the constructor cannot wait for; build the consumer with await KafkaConsumer.create(...), which waits for it`,
+      ],
+      [
+        () => new IntegerDeserializer().deserialize,
+        `Invalid value a function for configuration ${key}: the function returned a function, not a deserializer: an object with a deserialize({ topic, headers, data }) method`,
+      ],
+    ])) {
+      // Values a serde config key's type refuses: the check throws ConfigError.
+      assert.throws(
+        () => new KafkaConsumer({ configs: configs(GROUP_ID, /** @type {any} */ ({ [key]: value })) }),
+        (/** @type {Error} */ e) => {
+          assert.equal(e.constructor, ConfigError, key);
+          assert.equal(e.message, message);
+          return true;
+        },
+      );
+    }
+  }
+});
+
+test('a deserializer config function that throws fails the build with KafkaError "Failed to construct kafka consumer", the thrown value its cause, and closes the deserializers already made', () => {
+  for (const thrown of [new Error('boom'), null, undefined, 'text']) {
+    let closed = 0;
+    const made = () => ({ deserialize: () => null, close: () => void closed++ });
+    assert.throws(
+      () =>
+        new KafkaConsumer({
+          configs: configs(GROUP_ID, {
+            'key.deserializer': made,
+            'value.deserializer': () => {
+              throw thrown;
+            },
+          }),
+        }),
+      (/** @type {KafkaError} */ e) => {
+        assert.equal(e.constructor, KafkaError);
+        assert.equal(e.message, 'Failed to construct kafka consumer');
+        assert.equal(e.cause, thrown);
+        assert.ok(Object.hasOwn(e, 'cause'));
+        return true;
+      },
+    );
+    assert.equal(closed, 1, String(thrown));
+  }
+  // A deserializer given is closed too, as Java's catch closes what it has taken.
+  let closed = 0;
+  assert.throws(
+    () =>
+      new KafkaConsumer({
+        configs: configs(GROUP_ID, {
+          'value.deserializer': () => {
+            throw new Error('boom');
+          },
+        }),
+        keyDeserializer: { deserialize: () => null, close: () => void closed++ },
+        valueDeserializer: null,
+      }),
+    { constructor: KafkaError, message: 'Failed to construct kafka consumer' },
+  );
+  assert.equal(closed, 1);
+});
+
+test('a consumer the core fails to build closes the deserializers the config functions made, and frees its parsed configuration', () => {
+  const native = require('../../../dist/internal/native');
+  const before = native.configStats();
+  let closed = 0;
+  const make = () => ({ deserialize: () => null, close: () => void closed++ });
+  // The classic protocol: the core refuses the consumer once the functions ran.
+  assert.throws(
+    () =>
+      new KafkaConsumer({
+        configs: { 'bootstrap.servers': '127.0.0.1:1', 'group.id': GROUP_ID, 'key.deserializer': make, 'value.deserializer': make },
+      }),
+    { constructor: UnsupportedOperationError, message: CLASSIC },
+  );
+  assert.equal(closed, 2);
+  // A ConfigError of the configuration's check runs no function.
+  assert.throws(
+    () => new KafkaConsumer({ configs: configs(GROUP_ID, { 'fetch.min.bytes': 'many', 'key.deserializer': make }) }),
+    ConfigError,
+  );
+  newConsumer(GROUP_ID, { 'key.deserializer': make });
+  const after = native.configStats();
+  // The rejected configuration was never made; the other two were freed.
+  assert.equal(after.configsMade - before.configsMade, 2);
+  assert.equal(after.configsFreed - before.configsFreed, 2);
+});
+
+test('the deserializers are closed once the core reports the consumer closed, a failure warned, a thrown null or undefined included', async () => {
+  /** @type {string[]} */
+  const warnings = [];
+  const onWarning = (/** @type {Error} */ w) => warnings.push(w.message);
+  process.on('warning', onWarning);
+  try {
+    let closes = 0;
+    const thrower = (/** @type {unknown} */ value) => ({
+      deserialize: () => null,
+      close: () => {
+        closes++;
+        throw value;
+      },
+    });
+    for (const value of [new Error('cannot close'), null, undefined]) {
+      const consumer = new KafkaConsumer({ configs: configs(), keyDeserializer: thrower(value), valueDeserializer: thrower(value) });
+      await consumer.close({ option: CloseOptions.timeout({ timeout: 0 }) });
+      // A second close closes nothing again.
+      await consumer.close({ option: CloseOptions.timeout({ timeout: 0 }) });
+    }
+    assert.equal(closes, 6);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(warnings, [
+      'Failed to close consumer keyDeserializer: Error: cannot close',
+      'Failed to close consumer valueDeserializer: Error: cannot close',
+      'Failed to close consumer keyDeserializer: null',
+      'Failed to close consumer valueDeserializer: null',
+      'Failed to close consumer keyDeserializer: undefined',
+      'Failed to close consumer valueDeserializer: undefined',
+    ]);
+  } finally {
+    process.off('warning', onWarning);
+  }
+});
+
+test("create() awaits each deserializer config function in turn, the key's first, and builds the consumer", async () => {
+  /** @type {string[]} */
+  const order = [];
+  const consumer = await KafkaConsumer.create({
+    configs: configs(GROUP_ID, {
+      'key.deserializer': async ({ configs: given }) => {
+        order.push(`key ${String(given['client.id'] !== undefined)}`);
+        await new Promise((resolve) => setImmediate(resolve));
+        order.push('key done');
+        return new StringDeserializer();
+      },
+      'value.deserializer': () => {
+        order.push('value');
+        return new IntegerDeserializer();
+      },
+    }),
+  });
+  opened.push(consumer);
+  assert.deepEqual(order, ['key true', 'key done', 'value']);
+  assert.ok(consumer instanceof KafkaConsumer);
+  // Its forms are the constructor's.
+  await assert.rejects(
+    // @ts-expect-error no argument
+    KafkaConsumer.create(),
+    {
+      constructor: IllegalArgumentError,
+      message: 'create() takes one of (configs), (configs, keyDeserializer, valueDeserializer); got ()',
+    },
+  );
+  await assert.rejects(
+    // @ts-expect-error a class for a deserializer
+    KafkaConsumer.create({ configs: configs(), keyDeserializer: StringDeserializer, valueDeserializer: null }),
+    { constructor: TypeError, message: 'keyDeserializer: pass an instance, not a function — did you forget `new`?' },
+  );
+  opened.push(await KafkaConsumer.create(configs()));
+});
+
+test('create() rejects with "Failed to construct kafka consumer" for a function that rejects, closes what was made, and frees the parsed configuration', async () => {
+  const native = require('../../../dist/internal/native');
+  for (const rejected of [new Error('no schema'), null, undefined]) {
+    const before = native.configStats();
+    let closed = 0;
+    await assert.rejects(
+      KafkaConsumer.create({
+        configs: configs(GROUP_ID, {
+          'key.deserializer': async () => ({ deserialize: () => null, close: () => void closed++ }),
+          'value.deserializer': () => Promise.reject(rejected),
+        }),
+      }),
+      (/** @type {KafkaError} */ e) => {
+        assert.equal(e.constructor, KafkaError);
+        assert.equal(e.message, 'Failed to construct kafka consumer');
+        assert.equal(e.cause, rejected);
+        return true;
+      },
+    );
+    assert.equal(closed, 1);
+    const after = native.configStats();
+    assert.equal(after.configsMade - before.configsMade, 1);
+    assert.equal(after.configsFreed - before.configsFreed, 1);
+  }
+  // A serde config key's ConfigError is not wrapped, and the core's
+  // ConfigError comes before any function runs.
+  await assert.rejects(KafkaConsumer.create({ configs: configs(GROUP_ID, { 'key.deserializer': 'x.Y' }) }), {
+    constructor: ConfigError,
+    message:
+      'Invalid value x.Y for configuration key.deserializer: a class name cannot be loaded in JavaScript (did you mean `() => new Y()`?); pass a function ({ configs, isKey }) => deserializer, or one returning a Promise of it, such as () => new StringDeserializer(), or the deserializer itself as the keyDeserializer argument',
+  });
+  let ran = false;
+  await assert.rejects(
+    KafkaConsumer.create({
+      configs: configs(GROUP_ID, {
+        'fetch.min.bytes': 'many',
+        'key.deserializer': async () => {
+          ran = true;
+          return new StringDeserializer();
+        },
+      }),
+    }),
+    ConfigError,
+  );
+  assert.equal(ran, false);
+  // The core refuses the consumer after the functions ran: what they made is closed.
+  let closed = 0;
+  await assert.rejects(
+    KafkaConsumer.create({
+      configs: {
+        'bootstrap.servers': '127.0.0.1:1',
+        'group.id': GROUP_ID,
+        'key.deserializer': async () => ({ deserialize: () => null, close: () => void closed++ }),
+      },
+    }),
+    { constructor: UnsupportedOperationError, message: CLASSIC },
+  );
+  assert.equal(closed, 1);
 });
 
 test('the constructor takes {configs} or the configs bare, and nothing else', () => {
@@ -1642,4 +1973,43 @@ test('the preview warning is emitted once per process', () => {
   const warnings = r.stderr.split('\n').filter((line) => line.includes('ExperimentalWarning'));
   assert.equal(warnings.length, 1, r.stderr);
   assert.match(warnings[0], /The JavaScript client is in preview and not yet recommended for production use\./);
+});
+
+test('the keys a deserializer config function reads reach the core, which lists the ones it does not use; the serde keys do not', () => {
+  // The core lists the keys it does not use in one INFO line, at the RUST_LOG
+  // level read when its first client is built, so a fresh process builds it.
+  // The deviation: Java's originals() marks schema.registry.url used, and the
+  // core, which gets no such mark (copy_for_client), lists it.
+  const r = spawnSync(
+    process.execPath,
+    [
+      '-e',
+      `
+      const { KafkaConsumer, CloseOptions } = require('@confluentinc/kafka-javascript/consumer');
+      const { StringDeserializer } = require('@confluentinc/kafka-javascript/common/serialization');
+      const c = new KafkaConsumer({
+        'bootstrap.servers': '127.0.0.1:1',
+        'group.id': 'g',
+        'group.protocol': 'consumer',
+        'schema.registry.url': 'http://sr',
+        'key.serializer': 'org.example.Serializer',
+        'key.deserializer': ({ configs }) => {
+          if (configs['schema.registry.url'] !== 'http://sr') throw new Error('not read');
+          return new StringDeserializer();
+        },
+        'value.deserializer': () => new StringDeserializer(),
+        // No charset key is read: the String serdes are UTF-8 only.
+        'value.deserializer.encoding': 'UTF-8',
+      });
+      c.close(CloseOptions.timeout(0)).then(() => console.log('closed'));
+      `,
+    ],
+    { cwd: path.join(__dirname, '..', '..', '..'), encoding: 'utf8', timeout: 120000, env: { ...process.env, RUST_LOG: 'info' } },
+  );
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, 'closed\n');
+  // The core lists them in its own order.
+  const unused = /These configurations '\[([^\]]*)\]' were supplied but are not used yet\./.exec(r.stderr);
+  assert.ok(unused, r.stderr);
+  assert.deepEqual(unused[1].split(', ').sort(), ['key.serializer', 'schema.registry.url', 'value.deserializer.encoding']);
 });

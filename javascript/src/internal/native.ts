@@ -89,6 +89,15 @@ interface RecordMetadataFields {
 /** A native producer handle (native/producer.c), opaque to JavaScript. */
 type ProducerHandle = object;
 
+/** A client's parsed configuration (native/config.c), opaque to JavaScript. */
+type ConfigHandle = object;
+
+/** The counts of native/config.c, for the memory tests: the parsed configurations made, and freed. */
+interface ConfigStats {
+  configsMade: number;
+  configsFreed: number;
+}
+
 /** The counts of native/headers.c, for the memory tests: the native RecordHeaders the sends made, and destroyed. */
 interface HeaderStats {
   made: number;
@@ -227,8 +236,17 @@ interface Native {
   ): void;
   // True the first time any environment of the process asks.
   previewNoticeDue(): boolean;
-  // The configuration's [key, value] pairs, encodeLikeJava's bytes of each.
-  producerCreate(entries: Array<[Uint8Array, Uint8Array]>): ProducerHandle;
+  // A consumer's (or a producer's) configuration, parsed from its [key,
+  // value] pairs, encodeLikeJava's bytes of each.
+  configCreate(consumer: boolean, entries: Array<[Uint8Array, Uint8Array]>): ConfigHandle;
+  // The STRING configuration `key`, null for none: `client.id` is the
+  // resolved id, generated when it was unset.
+  configGetString(handle: ConfigHandle, key: string): string | null;
+  // Frees the parsed configuration now; a second call does nothing.
+  configFree(handle: ConfigHandle): void;
+  // KafkaProducer(config) with NULL serializers, over a producer's parsed
+  // configuration, which it borrows.
+  producerCreate(config: ConfigHandle): ProducerHandle;
   producerSend(
     handle: ProducerHandle,
     topic: string,
@@ -336,9 +354,9 @@ interface Native {
     timeoutMs: number | null,
     done: (metadata: RecordMetadata | null, error: unknown, timedOut: boolean, failed: boolean) => void,
   ): void;
-  // The configuration's [key, value] pairs, encodeLikeJava's bytes of each:
-  // KafkaConsumer(configs) with NULL deserializers.
-  consumerCreate(entries: Array<[Uint8Array, Uint8Array]>): ConsumerHandle;
+  // KafkaConsumer(config) with NULL deserializers, over a consumer's parsed
+  // configuration, which it borrows.
+  consumerCreate(config: ConfigHandle): ConsumerHandle;
   // Java's poll(Duration) through poll_cb; each record built by `factory`.
   // timeoutMs as it was given, a negative one included.
   consumerPoll(
@@ -558,6 +576,8 @@ interface Native {
   metricsStats(): MetricsStats;
   // The counts of native/headers.c. Test-only.
   headerStats(): HeaderStats;
+  // The counts of native/config.c. Test-only.
+  configStats(): ConfigStats;
   // The counts of native/producer.c. Test-only.
   producerStats(): ProducerStats;
   // The counts of native/error.c. Test-only.

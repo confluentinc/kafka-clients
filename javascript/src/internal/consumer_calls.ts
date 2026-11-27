@@ -36,6 +36,7 @@ import {
   topicPartitionLongMap,
   topicPartitionOffsetMap,
 } from './payload';
+import { deserializeBatch, type Deserialized, type PartitionRecords, recordsOf } from './deserialize_batch';
 import { create } from './throwable';
 import { KafkaError } from '../common/kafka_error';
 import type { Metric } from '../common/metric';
@@ -54,6 +55,7 @@ import { OffsetAndTimestamp } from '../consumer/offset_and_timestamp';
 import type { ConsumerRebalanceListener } from '../consumer/consumer_rebalance_listener';
 import type { OffsetCommitCallback } from '../consumer/offset_commit_callback';
 import { SubscriptionPattern } from '../consumer/subscription_pattern';
+import type { Deserializer } from '../common/serialization/deserializer';
 
 /** The native consumer handle (`internal/native.ts`). */
 export type ConsumerHandle = ReturnType<typeof native.consumerCreate>;
@@ -537,14 +539,24 @@ export function unsubscribe(handle: ConsumerHandle, count: number): Promise<void
 }
 
 /**
- * The body of `Consumer#poll`, over a native consumer handle.
+ * The body of `Consumer#poll`, over a native consumer handle: the records the
+ * core returns, through the consumer's deserializers when it has any
+ * (src/internal/deserialize_batch.ts).
  *
  * @param handle - the native consumer handle
  * @param options - the argument given
  * @param count - the number of arguments given
+ * @param keyDeserializer - the key's deserializer, or null: Buffers
+ * @param valueDeserializer - the value's deserializer, or null: Buffers
  * @returns what the method returns
  */
-export function poll<K, V>(handle: ConsumerHandle, options: unknown, count: number): Promise<ConsumerRecords<K, V>> {
+export function poll<K, V>(
+  handle: ConsumerHandle,
+  options: unknown,
+  count: number,
+  keyDeserializer: Deserializer<K> | null = null,
+  valueDeserializer: Deserializer<V> | null = null,
+): Promise<ConsumerRecords<K, V>> {
   return rejecting(() => {
     POLL_FORMS.match(options, count);
     // A negative timeout goes to the FFI, which rejects it with the core's
@@ -554,21 +566,39 @@ export function poll<K, V>(handle: ConsumerHandle, options: unknown, count: numb
       native.consumerPoll(handle, timeoutMs, RECORD_FACTORY, (error, partitions, nextOffsets) => {
         // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with the error the core reported, a client Error src/internal/errors.ts built (typed unknown at the native boundary)
         if (error !== null || partitions === null || nextOffsets === null) return reject(callbackError(error, false));
-        const records = new TopicPartitionMap<ConsumerRecord<K, V>[]>();
-        for (const [topic, partition, list] of partitions) {
-          records.set(new TopicPartition({ topic, partition }), list as ConsumerRecord<K, V>[]);
-        }
-        const next = new TopicPartitionMap<OffsetAndMetadata>();
-        for (const [topic, partition, offset, leaderEpoch, metadata] of nextOffsets) {
-          next.set(
-            new TopicPartition({ topic, partition }),
-            new OffsetAndMetadata({ offset, leaderEpoch: leaderEpoch < 0 ? null : leaderEpoch, metadata }),
-          );
-        }
-        resolve(new ConsumerRecords<K, V>({ records, nextOffsets: next }));
+        const fetched = partitions as unknown as PartitionRecords[];
+        if (keyDeserializer === null && valueDeserializer === null) return resolve(recordsOf<K, V>(fetched, nextOffsets));
+        const settle = (outcome: Deserialized<K, V>): void => {
+          if (outcome.error === null) return resolve(outcome.records);
+          const failure = outcome.error;
+          // The positions are back before poll() settles.
+          void rewind(handle, outcome.rewind).then(() => (outcome.records.isEmpty() ? reject(failure) : resolve(outcome.records)));
+        };
+        const outcome = deserializeBatch<K, V>(fetched, nextOffsets, keyDeserializer, valueDeserializer);
+        if (outcome instanceof Promise) outcome.then(settle, reject);
+        else settle(outcome);
       });
     });
   });
+}
+
+/**
+ * Seeks each partition back to its position, one after another, for the
+ * records a poll does not return, whose positions the core has moved past. A
+ * seek that fails is warned, and the next one still runs.
+ *
+ * @param handle - the native consumer handle
+ * @param positions - each partition and its offset
+ * @returns settling once every seek has ended; it never rejects
+ */
+async function rewind(handle: ConsumerHandle, positions: ReadonlyArray<readonly [TopicPartition, bigint]>): Promise<void> {
+  for (const [tp, offset] of positions) {
+    try {
+      await completion((done) => native.consumerSeek(handle, [tp.topic, tp.partition], false, offset, done));
+    } catch (error) {
+      process.emitWarning(`Could not seek ${String(tp)} back to offset ${offset}: ${String(error)}`);
+    }
+  }
 }
 
 /** The offsets of a commit as the addon takes them: `[[topic, partition], [offset, leaderEpoch, metadata]]` entries. */
@@ -953,9 +983,10 @@ export function groupMetadata(handle: ConsumerHandle, count: number, groupIdDefi
  * @param options - the argument given
  * @param count - the number of arguments given
  * @param client - the client's class name, for the debug lines
+ * @param onClosed - run once the core reports the consumer closed by this call
  * @returns what the method returns
  */
-export function close(handle: ConsumerHandle, options: unknown, count: number, client: string): Promise<void> {
+export function close(handle: ConsumerHandle, options: unknown, count: number, client: string, onClosed?: () => void): Promise<void> {
   return rejecting(() => {
     // Java's close() is close(CloseOptions.timeout(DEFAULT_CLOSE_TIMEOUT));
     // the FFI's close_cb does that. close(option) builds the C options as
@@ -977,7 +1008,10 @@ export function close(handle: ConsumerHandle, options: unknown, count: number, c
     debug('%s closing', client);
     return new Promise<void>((resolve, reject) => {
       native.consumerClose(handle, withOptions, timeoutMs, operation, (error, closedNow) => {
-        if (closedNow) debug('%s closed', client);
+        if (closedNow) {
+          debug('%s closed', client);
+          onClosed?.();
+        }
         // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with the error the core reported, a client Error src/internal/errors.ts built (typed unknown at the native boundary)
         if (error !== null) reject(callbackError(error, true));
         else resolve();

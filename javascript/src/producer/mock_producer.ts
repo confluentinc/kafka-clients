@@ -40,7 +40,7 @@ import { JavaForms } from '../internal/args';
 import { isErrorOrNull } from '../internal/throwable';
 import { durationToMillis, isDurationOrNull } from '../internal/duration';
 import { partitionInfoOf } from '../internal/metadata';
-import { checkSerializer, isThenable } from '../internal/serde';
+import { checkSerde, isThenable, SERIALIZER } from '../internal/serde';
 import { KafkaFuture } from '../common/kafka_future';
 import type { Metric } from '../common/metric';
 import { MetricName } from '../common/metric_name';
@@ -269,8 +269,16 @@ export class MockProducer<K, V> implements Producer<K, V> {
       const given = CONSTRUCTOR_FORMS.value(options, 'autoComplete');
       if (typeof given !== 'boolean') throw new TypeError('autoComplete must be a boolean');
       autoComplete = given;
-      keySerializer = checkSerializer(CONSTRUCTOR_FORMS.value(options, 'keySerializer'), 'keySerializer');
-      valueSerializer = checkSerializer(CONSTRUCTOR_FORMS.value(options, 'valueSerializer'), 'valueSerializer');
+      keySerializer = checkSerde(
+        SERIALIZER,
+        CONSTRUCTOR_FORMS.value(options, 'keySerializer'),
+        'keySerializer',
+      ) as Serializer<unknown> | null;
+      valueSerializer = checkSerde(
+        SERIALIZER,
+        CONSTRUCTOR_FORMS.value(options, 'valueSerializer'),
+        'valueSerializer',
+      ) as Serializer<unknown> | null;
     }
     this.#keySerializer = keySerializer;
     this.#valueSerializer = valueSerializer;

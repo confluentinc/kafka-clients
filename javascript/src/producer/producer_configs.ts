@@ -25,8 +25,8 @@ import type { Headers } from '../common/header/headers';
  * `,`, anything else by `String()`); `null` and `undefined` leave the key
  * out. The core checks every key and value, with Java's messages.
  * `key.serializer` and `value.serializer` take a function
- * `({ configs, isKey }) => serializer`, such as `stringSerializer`, and
- * never reach the core. The constructor takes only a synchronous one;
+ * `({ configs, isKey }) => serializer`, such as `() => new StringSerializer()`,
+ * and never reach the core. The constructor takes only a synchronous one;
  * `KafkaProducer.create()` also waits for one that returns a Promise.
  *
  * @remarks *(js-only)* The type of the configuration the constructor and

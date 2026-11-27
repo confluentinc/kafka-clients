@@ -13,15 +13,35 @@
 // limitations under the License.
 
 // The package of Java's org.apache.kafka.common.serialization: the
-// Serializer interface, and StringSerializer as the built-in factory
-// stringSerializer().
+// Serializer and Deserializer interfaces, and Java's built-in serializer and
+// deserializer classes of String, ByteArray, Short, Integer, Long, Float,
+// Double, Boolean, UUID and Void, built with `new`.
 //
-// Not translated: the Deserializer interface, which waits for the consumer;
-// Serde and Serdes; and the other built-in serializers, whose JavaScript
-// factories wait for the list of serde factories (not decided yet).
+// Not translated (javascript/CLAUDE.md, JavaScript Binding Conventions,
+// Serialization): the ByteBuffer, Bytes and List serdes, and Serde and Serdes.
 
+export type { Deserializer } from './deserializer';
 export type { Serializer } from './serializer';
-export { stringSerializer } from './string_serializer';
+export { BooleanDeserializer } from './boolean_deserializer';
+export { BooleanSerializer } from './boolean_serializer';
+export { ByteArrayDeserializer } from './byte_array_deserializer';
+export { ByteArraySerializer } from './byte_array_serializer';
+export { DoubleDeserializer } from './double_deserializer';
+export { DoubleSerializer } from './double_serializer';
+export { FloatDeserializer } from './float_deserializer';
+export { FloatSerializer } from './float_serializer';
+export { IntegerDeserializer } from './integer_deserializer';
+export { IntegerSerializer } from './integer_serializer';
+export { LongDeserializer } from './long_deserializer';
+export { LongSerializer } from './long_serializer';
+export { ShortDeserializer } from './short_deserializer';
+export { ShortSerializer } from './short_serializer';
+export { StringDeserializer } from './string_deserializer';
+export { StringSerializer } from './string_serializer';
+export { UUIDDeserializer } from './uuid_deserializer';
+export { UUIDSerializer } from './uuid_serializer';
+export { VoidDeserializer } from './void_deserializer';
+export { VoidSerializer } from './void_serializer';
 
 // tsc's CommonJS output sets `exports.__esModule`: declared, a default import
 // under `esModuleInterop` is a compile error rather than `undefined` (import by

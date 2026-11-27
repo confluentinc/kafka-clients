@@ -73,7 +73,7 @@ function freshTopic(what) {
   async () => {
     const topic = freshTopic('headers');
     await createTopic(BOOTSTRAP, topic);
-    const { stringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
+    const { StringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
     const built = await runBlock(jsBlock('README.md', 'Headers', 'new RecordHeader'), {
       scope: { ProducerRecord },
       replace: [["topic: 'demo'", `topic: ${JSON.stringify(topic)}`]],
@@ -82,8 +82,8 @@ function freshTopic(what) {
     assert.equal(built.error, undefined);
     const producer = new KafkaProducer({
       configs: { 'bootstrap.servers': BOOTSTRAP },
-      keySerializer: stringSerializer(),
-      valueSerializer: stringSerializer(),
+      keySerializer: new StringSerializer(),
+      valueSerializer: new StringSerializer(),
     });
     try {
       const record = /** @type {import('@confluentinc/kafka-javascript/producer').ProducerRecord<string, string>} */ (built.value);

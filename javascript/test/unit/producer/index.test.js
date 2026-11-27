@@ -44,16 +44,16 @@ test("README's Example: the producer is built and hands the record over; with no
   assert.deepEqual(run.printed, []);
 });
 
-test("README's Serializers: both ways of giving stringSerializer() build a producer", async () => {
-  const { stringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
+test("README's Serializers: both ways of giving a StringSerializer build a producer", async () => {
+  const { StringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
   const { run, error, value } = await runBlock(jsBlock('README.md', 'Serializers', 'key.serializer'), {
     producerClasses: true,
     scope: { configs: { 'bootstrap.servers': '127.0.0.1:9' } },
-    result: '[producer, same, stringSerializer]',
+    result: '[producer, same, StringSerializer]',
   });
   assert.equal(error, undefined);
   assert.equal(run.created.length, 2);
-  assert.deepEqual(value, [...run.created, stringSerializer]);
+  assert.deepEqual(value, [...run.created, StringSerializer]);
 });
 
 test("README's Headers: the record built there holds the headers given, a pair among them, and the one added", async () => {

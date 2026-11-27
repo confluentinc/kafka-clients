@@ -147,6 +147,16 @@ const PROBES = {
     name: 'every metrics view and metric handle is destroyed once',
   },
   metricsKept: { file: 'test/memory/metrics.test.js', project: 'memory', name: 'a map kept after its producer is closed' },
+  configsFreed: {
+    file: 'test/memory/serdes.test.js',
+    project: 'memory',
+    name: "a client's parsed configuration is freed once it is built",
+  },
+  serdesLetGo: {
+    file: 'test/memory/serdes.test.js',
+    project: 'memory',
+    name: 'serdes and serde config functions that reference their own client are let go with it',
+  },
   handOver: {
     file: 'test/integration/memory_probes.test.js',
     project: 'integration',
@@ -382,6 +392,37 @@ const MUTANTS = [
       ],
     ],
     probes: [PROBES.headersModel, PROBES.headersUnderStress],
+  },
+  {
+    // configFree() is how a client lets go of its parsed configuration once built.
+    name: 'a configFree() that frees nothing: a parsed configuration waits for a collection',
+    native: true,
+    edits: [
+      [
+        'native/config.c',
+        '    if (h == NULL) return NULL;\n    config_destroy(env, h, 1);\n    return NULL;\n',
+        '    if (h == NULL) return NULL;\n    return NULL;\n',
+      ],
+    ],
+    probes: [PROBES.configsFreed],
+  },
+  {
+    // What create() made is handed to the constructor through a module variable, cleared once taken.
+    name: "create()'s hand-over never cleared: the consumer's module keeps the deserializers it made",
+    native: false,
+    edits: [
+      [
+        'dist/consumer/kafka_consumer.js',
+        '        const prepared = awaited;\n        awaited = null;\n',
+        '        const prepared = awaited;\n',
+      ],
+      [
+        'dist/consumer/kafka_consumer.js',
+        '                finally {\n                    awaited = null;\n                }\n',
+        '                finally {\n                }\n',
+      ],
+    ],
+    probes: [PROBES.serdesLetGo],
   },
 ];
 

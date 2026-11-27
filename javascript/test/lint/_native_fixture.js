@@ -63,6 +63,10 @@ static napi_value js_consumer_refuse_external_buffers(napi_env env, napi_callbac
     return NULL;
 }
 
+static napi_value js_config_stats(napi_env env, napi_callback_info info) {
+    return NULL;
+}
+
 napi_value addon_init(napi_env env, napi_value exports) {
     napi_property_descriptor props[] = {
         {"probe", NULL, js_probe, NULL, NULL, NULL, napi_default, NULL},
@@ -74,6 +78,7 @@ napi_value addon_init(napi_env env, napi_value exports) {
         {"faultNext", NULL, js_fault_next, NULL, NULL, NULL, napi_default, NULL},
         {"consumerStats", NULL, js_consumer_stats, NULL, NULL, NULL, napi_default, NULL},
         {"consumerRefuseExternalBuffers", NULL, js_consumer_refuse_external_buffers, NULL, NULL, NULL, napi_default, NULL},
+        {"configStats", NULL, js_config_stats, NULL, NULL, NULL, napi_default, NULL},
         {"flush", NULL, js_flush, NULL, NULL, NULL, napi_default, NULL},
         {"pump", NULL, js_pump, NULL, NULL, NULL, napi_default, NULL},
         {"setFactories", NULL, js_setup, NULL, NULL, NULL, napi_default, NULL},
@@ -113,6 +118,7 @@ const NATIVE_TS = `interface Native {
   faultNext(step: string | null): string | null;
   consumerStats(): object;
   consumerRefuseExternalBuffers(on: boolean): void;
+  configStats(): object;
   flush(done: () => void): void;
   pump(): void;
   setFactories(): void;
@@ -144,7 +150,7 @@ const FILES = {
   'native/producer.c': PRODUCER_C,
   'src/internal/native.ts': NATIVE_TS,
   'src/producer/producer.ts': PRODUCER_TS,
-  'test/unit/internal/native.test.js': "const native = require('../../../dist/internal/native');\nnative.probe();\n",
+  'test/unit/internal/native.test.js': "const native = require('../../../dist/internal/native');\nnative.probe();\nnative.configStats();\n",
   'test/memory/native_counts.test.js':
     "const native = require('../../dist/internal/native');\nnative.producerStats();\nnative.errorStats();\nnative.headerStats();\n",
   'test/memory/record_read_back.test.js': "const native = require('../../dist/internal/native');\nnative.recordSpy(false);\n",

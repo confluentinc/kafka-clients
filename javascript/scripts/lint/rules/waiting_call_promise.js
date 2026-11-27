@@ -54,13 +54,17 @@ const DEPENDANTS = [{ key: 'KafkaFuture.allOf', reason: "allOf's future, complet
 /**
  * The static `create()`s that return a Promise with no `_cb` twin on their
  * path: the JS conventions allow `KafkaProducer.create()` and
- * `KafkaConsumer.create()`, and only those; the consumer's joins this list
- * with the consumer. An entry that matches nothing is a finding.
+ * `KafkaConsumer.create()`, and only those. An entry that matches nothing
+ * is a finding.
  */
 const CREATES = [
   {
     key: 'KafkaProducer.create',
     reason: "the producer's create(), which waits for the serde config functions before the constructor runs",
+  },
+  {
+    key: 'KafkaConsumer.create',
+    reason: "the consumer's create(), which waits for the serde config functions before the constructor runs",
   },
 ];
 

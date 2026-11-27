@@ -533,6 +533,16 @@ napi_value js_set_factories(napi_env env, napi_callback_info info);
 napi_value js_error_stats(napi_env env, napi_callback_info info);
 
 // producer.c: the KafkaProducer handle.
+// config.c
+napi_value js_config_create(napi_env env, napi_callback_info info);
+napi_value js_config_get_string(napi_env env, napi_callback_info info);
+napi_value js_config_free(napi_env env, napi_callback_info info);
+napi_value js_config_stats(napi_env env, napi_callback_info info);
+// The configuration a config handle object holds (a ConsumerConfig when
+// `consumer`, else a ProducerConfig), still the handle's, or NULL with a
+// TypeError pending for another value, a freed one or the other client's.
+void* config_handle_config(napi_env env, napi_value handle, int consumer);
+
 napi_value js_producer_create(napi_env env, napi_callback_info info);
 napi_value js_mock_producer_create(napi_env env, napi_callback_info info);
 napi_value js_mock_producer_send(napi_env env, napi_callback_info info);

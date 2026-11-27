@@ -32,11 +32,21 @@
 // An interface the user implements is an exported TypeScript interface or
 // function type translating a Java interface that no exported class of src/
 // implements: `Callback`, the user's, and not `Producer`, which
-// `KafkaProducer` implements. Not checked: that the helper's bodies are
-// Java's, and that the binding calls them for a method the user's object
-// lacks.
+// `KafkaProducer` implements. The serde interfaces are the user's although
+// Java's built-in serde classes implement them too (`USER_IMPLEMENTED`). Not
+// checked: that the helper's bodies are Java's, and that the binding calls
+// them for a method the user's object lacks.
 
 const { javaIndexOf, mappedItems, exportedItems, snakeCase } = require('../java_ts');
+
+/**
+ * The interfaces the user implements although a class of src/ implements
+ * them too, by TypeScript name, with the reason.
+ */
+const USER_IMPLEMENTED = new Map([
+  ['Serializer', "the user's serializers implement it, and so do Java's built-in serializer classes"],
+  ['Deserializer', "the user's deserializers implement it, and so do Java's built-in deserializer classes"],
+]);
 
 /**
  * The names of the optional members (`name?`) of interface or object type
@@ -91,7 +101,8 @@ module.exports = {
     let checked = 0;
     for (const { item, java } of mappedItems(ctx)) {
       if (item.kind !== 'interface' && item.kind !== 'type') continue;
-      if (java === null || !java.cls || java.cls.kind !== 'interface' || implemented.has(item.name)) continue;
+      if (java === null || !java.cls || java.cls.kind !== 'interface') continue;
+      if (implemented.has(item.name) && !USER_IMPLEMENTED.has(item.name)) continue;
       checked++;
       const optional = optionalMembers(ts, item.node);
       const defaults = [

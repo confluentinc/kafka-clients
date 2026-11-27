@@ -15,8 +15,9 @@
 'use strict';
 
 // check-encode-callers (javascript/CLAUDE.md, JavaScript Binding Conventions,
-// Types: "`stringSerializer()` calls it for keys and values, the
-// headers code for header keys, and the config code once per client";
+// Types: "`StringSerializer` and `UUIDSerializer` call it for keys and
+// values, the headers code for header keys, and the config code once per
+// client";
 // Class family: a string key or value given without a serializer
 // throws `TypeError`): `encodeLikeJava` of src/internal/encode.ts is used
 // only by the modules of `CALLERS` (`encode-caller`), each reference found
@@ -27,7 +28,7 @@ const { ENCODER, ENCODE_FUNCTION } = require('./string_encoding');
 
 /** The modules, or folders (ending `/`), that turn strings into bytes, with what they encode. */
 const CALLERS = [
-  ['src/common/serialization/', "the string serializer's keys and values"],
+  ['src/common/serialization/', "the String and UUID serdes' keys and values"],
   ['src/common/header/', 'header keys'],
   ['src/internal/config.ts', 'config keys and values, group IDs among them'],
 ];

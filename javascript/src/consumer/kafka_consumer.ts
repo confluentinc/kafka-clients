@@ -13,25 +13,29 @@
 // limitations under the License.
 
 // Java's KafkaConsumer over the C FFI's KafkaConsumer with NULL
-// deserializers: keys and values cross as bytes and come back as Buffers over
-// the fetched memory (javascript/CLAUDE.md, JavaScript Binding Conventions,
-// Serialization). The method bodies are src/internal/consumer_calls.ts's.
+// deserializers: keys and values cross as bytes, as Buffers over the fetched
+// memory, and the deserializers the consumer is given run here, in
+// JavaScript, inside poll() (javascript/CLAUDE.md, JavaScript Binding
+// Conventions, Serialization). The method bodies are
+// src/internal/consumer_calls.ts's.
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports -- src/internal/native.ts is an `export =` module, which TypeScript imports this way (the addon is loaded there alone, javascript/CLAUDE.md "Files and layout")
 import native = require('../internal/native');
 import { JavaForms } from '../internal/args';
-import { checkConfigs, configEntries } from '../internal/config';
+import { construct, prepare, type Prepared } from '../internal/client_construction';
+import { checkConfigs } from '../internal/config';
 import * as calls from '../internal/consumer_calls';
 import { debug } from '../internal/debug';
 import { warnPreview } from '../internal/lifecycle';
+import { checkSerde, closeSerde, DESERIALIZER } from '../internal/serde';
 import type { Metric } from '../common/metric';
 import type { MetricNameMap } from '../common/metric_name_map';
 import type { PartitionInfo } from '../common/partition_info';
 import type { TopicPartition } from '../common/topic_partition';
 import type { TopicPartitionMap } from '../common/topic_partition_map';
 import type { TopicPartitionSet } from '../common/topic_partition_set';
+import type { Deserializer } from '../common/serialization/deserializer';
 import type { Duration } from '../duration';
-import { UnsupportedOperationError } from '../unsupported_operation_error';
 import type { CloseOptions } from './close_options';
 import type { Consumer } from './consumer';
 import type { ConsumerRebalanceListener } from './consumer_rebalance_listener';
@@ -44,21 +48,43 @@ import type { OffsetAndTimestamp } from './offset_and_timestamp';
 import type { SubscriptionPattern } from './subscription_pattern';
 
 // The constructor's Map and Properties forms are the one `configs`, also taken
-// bare (src/internal/args.ts).
+// bare (src/internal/args.ts), and so are its two forms taking deserializers.
 const CONSTRUCTOR_FORMS = new JavaForms('KafkaConsumer', [['configs'], ['configs', 'keyDeserializer', 'valueDeserializer']], {
   bareIsPlainObject: true,
   bareTypes: { configs: (value) => typeof value === 'object' },
 });
+// create() takes the constructor's forms.
+const CREATE_FORMS = new JavaForms('create', [['configs'], ['configs', 'keyDeserializer', 'valueDeserializer']], {
+  bareIsPlainObject: true,
+  bareTypes: { configs: (value) => typeof value === 'object' },
+});
 
-// Until the client has deserializers, a consumer takes none: keys and values
-// are Buffers, and a deserializer is refused rather than ignored.
-const NO_DESERIALIZERS = 'KafkaConsumer takes no deserializer yet: keys and values are Buffers';
+/**
+ * The serde config keys of a consumer's configuration, typed by the
+ * deserializers their functions return, so that a consumer built through them
+ * infers its type arguments as one built with deserializer arguments does.
+ * The constructor and `create()` share it: a function returning a Promise is
+ * typed for both, and only `create()` waits for one.
+ */
+type SerdeConfigs<K, V> = {
+  'key.deserializer'?:
+    ((options: { configs: Readonly<Record<string, unknown>>; isKey: boolean }) => Deserializer<K> | PromiseLike<Deserializer<K>>) | null;
+  'value.deserializer'?:
+    ((options: { configs: Readonly<Record<string, unknown>>; isKey: boolean }) => Deserializer<V> | PromiseLike<Deserializer<V>>) | null;
+};
+
+/**
+ * What `create()` made, handed to the constructor it calls next: the parsed
+ * configuration and the deserializers its functions made; null outside that
+ * call.
+ */
+let awaited: Prepared | null = null;
 
 /**
  * A Kafka client that consumes records from a Kafka cluster.
  *
- * @typeParam K - the type of the keys: `Buffer`
- * @typeParam V - the type of the values: `Buffer`
+ * @typeParam K - the type of the keys, `Buffer` without a key deserializer
+ * @typeParam V - the type of the values, `Buffer` without a value deserializer
  *
  * @remarks Every waiting method returns a Promise, and the consumer takes one
  * call at a time, as Java's does: a call made while another is pending
@@ -74,6 +100,9 @@ const NO_DESERIALIZERS = 'KafkaConsumer takes no deserializer yet: keys and valu
  */
 export class KafkaConsumer<K = Buffer, V = Buffer> implements Consumer<K, V> {
   #handle: calls.ConsumerHandle;
+  // The deserializers given, or null: the records' Buffers come back as they are.
+  readonly #keyDeserializer: Deserializer<K> | null;
+  readonly #valueDeserializer: Deserializer<V> | null;
   // Whether group.id was given, for the temporary group.id check
   // (javascript/CLAUDE.md, JavaScript Binding Conventions, Errors).
   readonly #groupIdDefined: boolean;
@@ -85,23 +114,64 @@ export class KafkaConsumer<K = Buffer, V = Buffer> implements Consumer<K, V> {
    *
    * @param options - The consumer configs
    * @throws `KafkaError` when the configuration is invalid (`ConfigError`,
-   *   the core's, with Java's message naming the key) or the consumer cannot
-   *   be built
+   *   the core's, with Java's message naming the key; the client's own for
+   *   a `key.deserializer` or `value.deserializer` that is no deserializer
+   *   function) or the consumer cannot be built ("Failed to construct kafka
+   *   consumer", also when a deserializer function throws)
    * @throws `UnsupportedOperationError` when `group.protocol` is `classic`,
-   *   the core's error, or deserializers are given, as arguments or through
-   *   `key.deserializer` or `value.deserializer`
+   *   the core's error
    * @throws `IllegalArgumentError` when the given parameters are not
-   *   `{configs}`
+   *   `{configs}` or `{configs, keyDeserializer, valueDeserializer}`
    * @throws `TypeError` when `configs` is null, `undefined` or not a plain
-   *   object (a `Map` included), or a config key or value holds a null byte
+   *   object (a `Map` included), a config key or value holds a null byte, or
+   *   a deserializer is a function ("did you forget `new`?") or neither null
+   *   nor an object with a `deserialize` method
    *
-   * @remarks Java's `Map` and `Properties` forms are `configs`. The forms
-   * taking deserializers are not in this release: keys and values are
-   * Buffers. Once per process it emits an `ExperimentalWarning`.
+   * @remarks Java's `Map` and `Properties` forms are `configs`.
+   * `key.deserializer` and `value.deserializer` take a synchronous function
+   * `({ configs, isKey }) => deserializer`, such as `() => new
+   * StringDeserializer()` *(deviation: Java takes a class)*, or, through
+   * `create()`, one returning a Promise; these keys don't reach the core. The
+   * function gets the configuration with the `client.id` the core generated,
+   * once the core has checked it, as Java configures a deserializer. Without
+   * deserializers, keys and values are Buffers *(deviation)*. Once per process
+   * it emits an `ExperimentalWarning`.
    */
   constructor(options: {
     /** The consumer configs: a plain object of Java's ConsumerConfig keys. */
-    configs: ConsumerConfigs;
+    configs: ConsumerConfigs & SerdeConfigs<K, V>;
+    keyDeserializer?: never;
+    valueDeserializer?: never;
+  });
+  /**
+   * A consumer is instantiated by providing a set of key-value pairs as
+   * configuration, and a key and a value `Deserializer`. Valid configuration
+   * strings are documented in Java's ConsumerConfig.
+   *
+   * @param options - The consumer configs and the deserializers
+   *
+   * @remarks The deserializers run in JavaScript, inside `poll()`; one whose
+   * `deserialize` returns a Promise is awaited. A null deserializer is the one
+   * its config key makes, as in Java, or, with no such key, leaves the
+   * record's bytes as a `Buffer`, binding `Buffer`; a deserializer given wins,
+   * and its config key is then ignored. The consumer closes both
+   * deserializers when it closes.
+   */
+  constructor(options: {
+    /** The consumer configs: a plain object of Java's ConsumerConfig keys. */
+    configs: ConsumerConfigs & SerdeConfigs<K, V>;
+    /**
+     * The deserializer for key that implements `Deserializer`, or null. The
+     * configure() method won't be called in the consumer when the
+     * deserializer is passed in directly.
+     */
+    keyDeserializer: Deserializer<K> | null;
+    /**
+     * The deserializer for value that implements `Deserializer`, or null.
+     * The configure() method won't be called in the consumer when the
+     * deserializer is passed in directly.
+     */
+    valueDeserializer: Deserializer<V> | null;
   });
   /**
    * A consumer is instantiated by providing a set of key-value pairs as
@@ -110,17 +180,114 @@ export class KafkaConsumer<K = Buffer, V = Buffer> implements Consumer<K, V> {
    *
    * @param configs - The consumer configs
    */
-  constructor(configs: ConsumerConfigs);
+  constructor(configs: ConsumerConfigs & SerdeConfigs<K, V>);
   constructor(options: unknown) {
-    const form = CONSTRUCTOR_FORMS.match(options, arguments.length);
-    const configs = checkConfigs(CONSTRUCTOR_FORMS.value(options, 'configs'));
-    const keyed = configs['key.deserializer'] !== undefined && configs['key.deserializer'] !== null;
-    const valued = configs['value.deserializer'] !== undefined && configs['value.deserializer'] !== null;
-    if (form === 1 || keyed || valued) throw new UnsupportedOperationError(NO_DESERIALIZERS);
+    // What create() made for this construction, taken before anything else
+    // runs: the constructor frees its parsed configuration.
+    const prepared = awaited;
+    awaited = null;
+    let built;
+    let configs;
+    try {
+      const form = CONSTRUCTOR_FORMS.match(options, arguments.length);
+      configs = checkConfigs(CONSTRUCTOR_FORMS.value(options, 'configs'));
+      const keyArgument =
+        form === 0 ? null : checkSerde(DESERIALIZER, CONSTRUCTOR_FORMS.value(options, 'keyDeserializer'), 'keyDeserializer');
+      const valueArgument =
+        form === 0 ? null : checkSerde(DESERIALIZER, CONSTRUCTOR_FORMS.value(options, 'valueDeserializer'), 'valueDeserializer');
+      built = construct(DESERIALIZER, configs, [keyArgument, valueArgument], prepared, (config) => native.consumerCreate(config));
+    } catch (error) {
+      // A check that failed before construct() took the parsed configuration.
+      if (prepared !== null) native.configFree(prepared.config);
+      throw error;
+    }
+    this.#keyDeserializer = built.key as Deserializer<K> | null;
+    this.#valueDeserializer = built.value as Deserializer<V> | null;
     this.#groupIdDefined = configs['group.id'] !== undefined && configs['group.id'] !== null;
-    this.#handle = native.consumerCreate(configEntries(configs));
+    this.#handle = built.handle;
     warnPreview();
     debug('KafkaConsumer created');
+  }
+
+  /**
+   * Builds a consumer as the constructor does, once the functions of its
+   * serde config keys have returned: each may return a Promise, which is
+   * awaited, the key's first, then the value's. It makes no network call of
+   * its own.
+   *
+   * @param options - the consumer configs
+   * @returns a Promise of the consumer
+   * @throws `KafkaError` (a rejection) as the constructor, and "Failed to
+   *   construct kafka consumer", with the failure as its `cause`, when a
+   *   serde config function throws or its Promise rejects; a deserializer
+   *   already made is then closed
+   * @throws `ConfigError` (a rejection) when a serde config key holds no
+   *   function, or its function gives no deserializer
+   * @throws `IllegalArgumentError` (a rejection) when the given parameters
+   *   are not `{configs}` or `{configs, keyDeserializer, valueDeserializer}`
+   * @throws `TypeError` (a rejection) as the constructor
+   *
+   * @remarks *(js-only)* A constructor cannot wait, so a serde config
+   * function returning a Promise, as a Schema Registry deserializer's may,
+   * needs `create()`; `new KafkaConsumer(...)` refuses one with a
+   * `ConfigError`.
+   */
+  static create<K = Buffer, V = Buffer>(options: {
+    /** The consumer configs: a plain object of Java's ConsumerConfig keys. */
+    configs: ConsumerConfigs & SerdeConfigs<K, V>;
+    keyDeserializer?: never;
+    valueDeserializer?: never;
+  }): Promise<KafkaConsumer<K, V>>;
+  /**
+   * Builds a consumer with a key and a value `Deserializer`, as the
+   * constructor does, once the functions of the serde config keys whose
+   * deserializer is null have returned.
+   *
+   * @param options - the consumer configs and the deserializers
+   * @returns a Promise of the consumer
+   */
+  static create<K = Buffer, V = Buffer>(options: {
+    /** The consumer configs: a plain object of Java's ConsumerConfig keys. */
+    configs: ConsumerConfigs & SerdeConfigs<K, V>;
+    /** The deserializer for key that implements `Deserializer`, or null. */
+    keyDeserializer: Deserializer<K> | null;
+    /** The deserializer for value that implements `Deserializer`, or null. */
+    valueDeserializer: Deserializer<V> | null;
+  }): Promise<KafkaConsumer<K, V>>;
+  /**
+   * Builds a consumer from the configs on their own, the same as
+   * `create({configs})`.
+   *
+   * @param configs - The consumer configs
+   * @returns a Promise of the consumer
+   */
+  static create<K = Buffer, V = Buffer>(configs: ConsumerConfigs & SerdeConfigs<K, V>): Promise<KafkaConsumer<K, V>>;
+  static create(options: unknown): Promise<KafkaConsumer<unknown, unknown>> {
+    try {
+      const form = CREATE_FORMS.match(options, arguments.length);
+      // The arguments as checked now, so that the constructor gets the same
+      // ones once the functions have returned.
+      const configs = { ...checkConfigs(CREATE_FORMS.value(options, 'configs')) };
+      const keyDeserializer =
+        form === 0 ? null : checkSerde(DESERIALIZER, CREATE_FORMS.value(options, 'keyDeserializer'), 'keyDeserializer');
+      const valueDeserializer =
+        form === 0 ? null : checkSerde(DESERIALIZER, CREATE_FORMS.value(options, 'valueDeserializer'), 'valueDeserializer');
+      return prepare(DESERIALIZER, configs, [keyDeserializer, valueDeserializer]).then((made) => {
+        awaited = made;
+        try {
+          return new KafkaConsumer<unknown, unknown>({
+            configs: configs as ConsumerConfigs,
+            keyDeserializer: keyDeserializer as Deserializer<unknown> | null,
+            valueDeserializer: valueDeserializer as Deserializer<unknown> | null,
+          });
+        } finally {
+          awaited = null;
+        }
+      });
+    } catch (error) {
+      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with what the checks threw: an Error of the client's or JavaScript's (typed unknown by catch)
+      return Promise.reject(error);
+    }
   }
 
   assignment(): TopicPartitionSet {
@@ -188,7 +355,7 @@ export class KafkaConsumer<K = Buffer, V = Buffer> implements Consumer<K, V> {
   }): Promise<ConsumerRecords<K, V>>;
   poll(timeout: Duration): Promise<ConsumerRecords<K, V>>;
   poll(options: unknown): Promise<ConsumerRecords<K, V>> {
-    return calls.poll<K, V>(this.#handle, options, arguments.length);
+    return calls.poll<K, V>(this.#handle, options, arguments.length, this.#keyDeserializer, this.#valueDeserializer);
   }
 
   commitSync(): Promise<void>;
@@ -419,7 +586,11 @@ export class KafkaConsumer<K = Buffer, V = Buffer> implements Consumer<K, V> {
   }): Promise<void>;
   close(option: CloseOptions): Promise<void>;
   close(options?: unknown): Promise<void> {
-    return calls.close(this.#handle, options, arguments.length, 'KafkaConsumer');
+    // Java's close closes both deserializers; a failure is a process warning.
+    return calls.close(this.#handle, options, arguments.length, 'KafkaConsumer', () => {
+      closeSerde(DESERIALIZER, this.#keyDeserializer, 'keyDeserializer');
+      closeSerde(DESERIALIZER, this.#valueDeserializer, 'valueDeserializer');
+    });
   }
 
   wakeup(): void {

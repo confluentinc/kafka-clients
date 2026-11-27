@@ -44,8 +44,8 @@ const BODY = `
 async function run(): Promise<void> {
   const producer = new KafkaProducer({
     configs: { 'bootstrap.servers': '127.0.0.1:9', 'linger.ms': 5 },
-    keySerializer: stringSerializer(),
-    valueSerializer: stringSerializer(),
+    keySerializer: new StringSerializer(),
+    valueSerializer: new StringSerializer(),
   });
   const record = new ProducerRecord({
     topic: 'typescript-smoke',
@@ -81,7 +81,7 @@ const ESM_IMPORTS = `import { ExecutionError } from '@confluentinc/kafka-javascr
 import { KafkaFuture } from '@confluentinc/kafka-javascript/common';
 import { RetriableError } from '@confluentinc/kafka-javascript/common/errors';
 import { RecordHeader } from '@confluentinc/kafka-javascript/common/header';
-import { stringSerializer } from '@confluentinc/kafka-javascript/common/serialization';
+import { StringSerializer } from '@confluentinc/kafka-javascript/common/serialization';
 import { KafkaProducer, ProducerRecord, RecordMetadata } from '@confluentinc/kafka-javascript/producer';
 `;
 
@@ -95,7 +95,7 @@ const { ExecutionError } = kafka;
 type KafkaFuture<T> = common.KafkaFuture<T>;
 const { RetriableError } = errors;
 const { RecordHeader } = header;
-const { stringSerializer } = serialization;
+const { StringSerializer } = serialization;
 const { KafkaProducer, ProducerRecord } = producerPackage;
 type RecordMetadata = producerPackage.RecordMetadata;
 `;

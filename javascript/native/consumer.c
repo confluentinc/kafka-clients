@@ -2594,29 +2594,24 @@ static napi_value consumer_handle_new(napi_env env, kafka_consumer_KafkaConsumer
     return result;
 }
 
-// consumerCreate(entries): a native consumer handle over
-// KafkaConsumer(configs) with NULL deserializers, `entries` an array of
-// [key, value] byte pairs. Throws the core's error when the configuration is
-// rejected or the consumer cannot be built.
+// consumerCreate(config): a native consumer handle over
+// KafkaConsumer(config) with NULL deserializers, `config` a consumer's parsed
+// configuration (configCreate), which it borrows: JS frees it after. Throws the
+// core's error when the consumer cannot be built.
 napi_value js_consumer_create(napi_env env, napi_callback_info info) {
     size_t argc = 1;
     napi_value argv[1];
     NAPI_CHECK(env, napi_get_cb_info(env, info, &argc, argv, NULL, NULL), NULL);
-    bool is_array = false;
-    if (argc != 1 || napi_is_array(env, argv[0], &is_array) != napi_ok || !is_array) {
-        napi_throw_type_error(env, NULL, "create(entries)");
+    if (argc != 1) {
+        napi_throw_type_error(env, NULL, "consumerCreate(config)");
         return NULL;
     }
-    ConfigMap props;
-    if (config_map_build(env, argv[0], &props) != 0) return NULL;
+    const kafka_consumer_ConsumerConfig_t* config = (const kafka_consumer_ConsumerConfig_t*)config_handle_config(env, argv[0], 1);
+    if (config == NULL) return NULL;
     kafka_common_Error_t* ffi_err = NULL;
-    kafka_consumer_ConsumerConfig_t* config = NULL;
     kafka_consumer_KafkaConsumer_t* kc = NULL;
-    // ConsumerConfig_new and KafkaConsumer_new take an out_err of their own.
-    kafka_common_Error_t* err = FFI_SET(config, kafka_consumer_ConsumerConfig_new(props.map, &ffi_err));
-    config_map_free(env, &props);
-    if (err == NULL) err = FFI_SET(kc, kafka_consumer_KafkaConsumer_new(config, NULL, NULL, &ffi_err));
-    if (config != NULL) error_warn(env, 1, FFI_ERR(kafka_consumer_ConsumerConfig_destroy_err(config, &ffi_err)));
+    // KafkaConsumer_new takes an out_err of its own.
+    kafka_common_Error_t* err = FFI_SET(kc, kafka_consumer_KafkaConsumer_new(config, NULL, NULL, &ffi_err));
     if (err != NULL) {
         error_throw_owned(env, err);
         return NULL;

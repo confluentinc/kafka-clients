@@ -27,7 +27,7 @@ const { NO_LEAKS, CRASH_TEXT, runProbe, lastJson } = require('./_probe');
 test('a send hands the core the caller’s own key and value memory, and the record holds every field as given', () => {
   const r = runProbe(`
     const { RecordHeader } = require(D + '/common/header');
-    const { stringSerializer } = require(D + '/common/serialization');
+    const { StringSerializer } = require(D + '/common/serialization');
     const { KafkaProducer, ProducerRecord } = require(D + '/producer');
     const hex = (b) => (b === null ? null : Buffer.from(b.buffer, b.byteOffset, b.byteLength).toString('hex'));
     const spied = (s, key, value) => ({
@@ -104,7 +104,7 @@ test('a send hands the core the caller’s own key and value memory, and the rec
         await s.close();
 
         // A string the client encodes itself: its own bytes, still not copied again.
-        const t = new KafkaProducer({ configs, keySerializer: stringSerializer(), valueSerializer: stringSerializer() });
+        const t = new KafkaProducer({ configs, keySerializer: new StringSerializer(), valueSerializer: new StringSerializer() });
         native.recordSpy(true);
         await t.send({ record: new ProducerRecord({ topic: 'read-back', key: 'é', value: 'ü' }), callback: () => {} });
         const [own] = native.recordSpy(false);

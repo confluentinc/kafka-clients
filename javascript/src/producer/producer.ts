@@ -63,7 +63,7 @@ export interface Producer<K = Uint8Array, V = Uint8Array> {
    *   ProducerRecord, `callback` not a function, a parameter is `undefined`,
    *   a serializer returns neither a Uint8Array nor null, a key or value
    *   sent without a serializer is neither bytes nor null (a string
-   *   included: it needs `stringSerializer()`), or the
+   *   included: it needs `new StringSerializer()`), or the
    *   topic or a header key holds a null byte, which the C ABI would
    *   read as the end of the string
    * @throws `InterruptError` rejects with it if the thread is interrupted while
@@ -124,12 +124,12 @@ export interface Producer<K = Uint8Array, V = Uint8Array> {
    * timestamp and sizes), and the Promise resolves to a done future failed
    * with it, whose `get()` rejects with an `ExecutionError` around it. What
    * that callback throws, or its Promise rejects with, rejects the send
-   * instead, as Java's `onCompletion` throws out of `send()`. A `TypeError`
-   * rejects as a `SerializationError` (above); any other error rejects as
+   * instead, as Java's `onCompletion` throws out of `send()`. A `TypeError`,
+   * or a built-in serializer's `SerializationError` for a value of another
+   * type, rejects as a `SerializationError` (above); any other error rejects as
    * it is. The message names classes as JavaScript does: a value's
    * constructor (`Buffer`), a primitive's wrapper (`String`), `null` for
-   * null, a serializer's class, or a built-in's factory
-   * (`stringSerializer`). *(deviation: Java writes fully qualified Java
+   * null, or a serializer's class (`StringSerializer`). *(deviation: Java writes fully qualified Java
    * names, and a null key there throws NullPointerException. Why: JavaScript
    * has no class names of that form.)* *(deviation: no failure `send()`
    * reports, a serializer's included, is counted in the producer's
@@ -150,7 +150,7 @@ export interface Producer<K = Uint8Array, V = Uint8Array> {
    * memory copy of each Buffer, as the Python binding does.)* Header values
    * are copied during the call. Without a serializer, a key or value is
    * bytes or null: a string rejects with a `TypeError` pointing to
-   * `stringSerializer()`. The record's
+   * `new StringSerializer()`. The record's
    * headers become read-only once the serializers have run: a later `add` or
    * `remove` throws `IllegalStateError` "RecordHeaders has been closed.".
    * *(deviation, as in Python: Java's `send()` makes them read-only only

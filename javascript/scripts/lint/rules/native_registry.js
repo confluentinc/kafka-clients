@@ -66,6 +66,13 @@ const TEST_ONLY = new Map([
     },
   ],
   [
+    'configStats',
+    {
+      test: 'test/unit/internal/native.test.js',
+      reason: "a test-only registration: the counts of native/config.c, which prove each client's parsed configuration is freed once",
+    },
+  ],
+  [
     'headerStats',
     {
       test: 'test/memory/native_counts.test.js',

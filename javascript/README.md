@@ -241,13 +241,13 @@ first and falls back to that development build; installing the package runs no b
 ## Example
 
 ```js
-const { stringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
+const { StringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
 const { KafkaProducer, ProducerRecord } = require('@confluentinc/kafka-javascript/producer');
 
 const producer = new KafkaProducer({
   configs: { 'bootstrap.servers': 'localhost:9092' },
-  keySerializer: stringSerializer(),     // string keys and values; without serializers they are bytes
-  valueSerializer: stringSerializer(),
+  keySerializer: new StringSerializer(), // string keys and values; without serializers they are bytes
+  valueSerializer: new StringSerializer(),
 });
 const future = await producer.send({                   // resolves at hand-over
   record: new ProducerRecord({ topic: 'demo', key: 'k1', value: 'hello' }),
@@ -364,22 +364,25 @@ is an object `{ serialize({ topic, headers, data }), close?() }` (Java's two
 `serialize` methods as one), given as a constructor argument, or made by a
 synchronous function `({ configs, isKey }) => serializer` in
 `key.serializer` / `value.serializer`, which the producer calls once with the
-whole configuration, in place of Java's class and its `configure()`. A key the
-function reads that the client's core doesn't know, such as
-`schema.registry.url`, doesn't reach the core, as Java marks it used; the
-producer's own keys always do. The function gets the configuration as given,
-without Java's computed `client.id`, and runs before the core checks it. A
-constructor argument wins, and its config key is then ignored.
-`stringSerializer()` writes a string as Java's `StringSerializer` does, and
-goes in a config key without `()`:
+whole configuration, in place of Java's class and its `configure()`. The
+function gets the configuration with the `client.id` the core generated, once
+the core has checked the configuration, as Java configures a serializer. The
+keys a serde config function reads reach the core, which lists the ones it
+doesn't use, such as `schema.registry.url` *(deviation: Java marks them used,
+so Java doesn't list them)*. A constructor argument wins, and its config key
+is then ignored. Java's built-in serializers are classes, built with `new`:
+`StringSerializer`, `ByteArraySerializer`, `ShortSerializer`,
+`IntegerSerializer`, `LongSerializer`, `FloatSerializer`, `DoubleSerializer`,
+`BooleanSerializer`, `UUIDSerializer` and `VoidSerializer`, in
+`common/serialization`, which write what Java's write, byte for byte:
 
 <!-- snippet: fragment -->
 ```js
-const { stringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
+const { StringSerializer } = require('@confluentinc/kafka-javascript/common/serialization');
 
-const producer = new KafkaProducer({ configs, keySerializer: stringSerializer(), valueSerializer: stringSerializer() });
+const producer = new KafkaProducer({ configs, keySerializer: new StringSerializer(), valueSerializer: new StringSerializer() });
 // or, the same through the configuration (both are a KafkaProducer<string, string> in TypeScript):
-const same = new KafkaProducer({ ...configs, 'key.serializer': stringSerializer, 'value.serializer': stringSerializer });
+const same = new KafkaProducer({ ...configs, 'key.serializer': () => new StringSerializer(), 'value.serializer': () => new StringSerializer() });
 ```
 
 A function in a config key may also return a Promise of the serializer, as a
@@ -403,19 +406,21 @@ const producer = await KafkaProducer.create({
     // A Schema Registry serializer would fetch its schema from
     // given['schema.registry.url'] here, before the producer is built.
     await Promise.resolve(given['schema.registry.url']);
-    return stringSerializer();
+    return new StringSerializer();
   },
 });
 ```
 
-`stringSerializer()` writes Java's six standard charsets (`US-ASCII`,
-`ISO-8859-1`, `UTF-8`, `UTF-16BE`, `UTF-16LE` and `UTF-16`, under Java's names
-and aliases) byte for byte as Java does, UTF-8 by default: a
+`StringSerializer` and `UUIDSerializer` write UTF-8 only, with no
+`configure()` *(deviation: Java's read a charset from
 `key.serializer.encoding`, `value.serializer.encoding` or
-`serializer.encoding` naming another charset throws `SerializationError`
-"Unsupported encoding <name>", as Node has no Java charset providers. A class name, a
-serializer object or a class in a config key throws `ConfigError`, a class
-with the hint "did you mean `() => new X()`?" naming it.
+`serializer.encoding`)*, so those keys are unknown keys, which the core lists.
+A built-in serializer given a value of another type throws
+`SerializationError`, and a number beyond its Java type `RangeError`. A
+function given as a serializer argument throws `TypeError` "did you forget
+`new`?". A class name, a serializer object or a class in a config key throws
+`ConfigError`, with the hint "did you mean `() => new X()`?" naming the
+class.
 
 What a serializer throws, or its Promise rejects with, is answered as Java's
 `KafkaProducer` answers it. An `ApiError` (any class from `common/errors`
@@ -423,10 +428,11 @@ whose Java class extends `ApiException`) does not reject `send()`: the
 callback runs once, with the error and metadata whose topic is the record's,
 whose partition is the record's or -1, and whose other fields are -1, and
 `send()` resolves to a done, failed `KafkaFuture`, whose `get()` rejects with
-an `ExecutionError` around the error. A `TypeError` rejects `send()` as a
-`SerializationError`, "Can't convert key of class Buffer to class
-stringSerializer specified in key.serializer" (or `value`), the `TypeError`
-its `cause`; the classes are JavaScript's names, not Java's. Anything else
+an `ExecutionError` around the error. A `TypeError`, or a built-in
+serializer's `SerializationError` for a value of another type, rejects
+`send()` as a `SerializationError`, "Can't convert key of class Buffer to
+class StringSerializer specified in key.serializer" (or `value`), what was
+thrown its `cause`; the classes are JavaScript's names, not Java's. Anything else
 rejects `send()` as it is. `MockProducer` passes every serializer error out
 as it is, as Java's mock does.
 
@@ -664,7 +670,7 @@ the Buffer's memory, they mustn't write to it until then either. Header
 values are copied during `send()`.
 
 **Strings are encoded as Java encodes them.** A string key or value needs a
-serializer: `stringSerializer()` encodes it to UTF-8 as Java's
+serializer: `new StringSerializer()` encodes it to UTF-8 as Java's
 `StringSerializer` does (`String.getBytes(UTF_8)`), and without one a string
 key or value throws `TypeError` pointing to it. A lone surrogate, which UTF-8
 cannot hold, becomes `?`, where Node's own `Buffer.from` writes U+FFFD.
@@ -753,7 +759,7 @@ code relying on them keeps running with another meaning: check each.
 | `send()` threw on a closed producer or a bad argument | every method returning a Promise rejects instead, and never throws |
 | an argument to `flush()` | it is refused: Java's `flush()` takes none |
 | a lone surrogate in a string was written as U+FFFD | it is written as `?`, as Java's `StringSerializer` writes it |
-| a string key or value was sent as UTF-8 without a serializer | it throws `TypeError` pointing to `stringSerializer()`: pass `keySerializer: stringSerializer()` / `valueSerializer: stringSerializer()`, or bytes |
+| a string key or value was sent as UTF-8 without a serializer | it throws `TypeError` pointing to `StringSerializer`: pass `keySerializer: new StringSerializer()` / `valueSerializer: new StringSerializer()`, or bytes |
 | an idle producer let the process exit | a producer keeps Node running until `close()` closes it, and no garbage collection closes one: close every producer (or `await using` it) |
 | `KafkaFuture` had `get()`, `isDone()`, `isCompletedExceptionally()`, `isCancelled()`, `cancel()` | Java's whole `KafkaFuture`: also `get(timeout)`, `getNow`, `thenApply`, `whenComplete`, `toCompletionStage()`, `completedFuture` and `allOf`; `cancel(mayInterruptIfRunning)` takes a boolean |
 | the enums guarded their constructors with a run-time token (`RecordMetadata`'s was TypeScript `private` only) | their constructors are TypeScript `private`, with no run-time guard |

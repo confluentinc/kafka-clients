@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// A producer's configuration object -> the `[key, value]` strings the C FFI's
+// A client's configuration object -> the `[key, value]` strings the C FFI's
 // kafka_Map_t carries (private). The binding has no `ConfigDef` table and
 // checks no value (javascript/CLAUDE.md, JavaScript Binding Conventions,
 // Configuration): the core checks types, ranges, enums, unknown keys and
@@ -29,22 +29,22 @@
 //   above 2^53 goes as its exact digits), anything else by `String()` (an
 //   object as `[object Object]`), for the core to check.
 // - Unknown keys pass, and the core lists the ones it does not use.
-// - The producer's own serde keys, `key.serializer` and `value.serializer`,
-//   never reach the core, and neither does a key a serde config function read
-//   (src/internal/serde.ts) that is no producer key, Java's or the core's (a
-//   `schema.registry.url`), so the core does not list it as unused, as Java's
-//   `originals()` marks it used (javascript/CLAUDE.md, JavaScript Binding
-//   Conventions, Serialization). A producer key the function read still
-//   reaches the core, since Java only marks it (javascript/CLAUDE.md, the
-//   serde config keys, a conventions conflict). The consumer's serde keys
-//   (`key.deserializer`, ...) pass, and the core lists them as unused.
+// - The client's own serde keys (`key.serializer` and `value.serializer` for
+//   the producer, `key.deserializer` and `value.deserializer` for the
+//   consumer) never reach the core. Every other key does, the other role's
+//   serde keys and the keys a serde config function reads included, and the
+//   core lists the ones it does not use (javascript/CLAUDE.md, JavaScript
+//   Binding Conventions, Serialization) *(deviation: Java's `originals()`
+//   marks the keys a serde reads as used, so Java does not list them. Why: a
+//   client copies its config handle (`copy_for_client`) without the handle's
+//   record of the keys used, so an `ignore()` on the handle can't reach the
+//   client's unused-keys line)*.
 // - Keys and values cross as bytes, encoded once per client by
 //   `encodeLikeJava` (src/internal/encode.ts): a lone surrogate becomes `?`,
 //   as Java's UTF-8 encoding writes it.
 
 import { ConfigError } from '../common/config/config_error';
 import { encodeLikeJava } from './encode';
-import { isProducerConfigKey } from './producer_config_keys';
 
 function typeName(value: unknown): string {
   if (value === null) return 'null';
@@ -66,19 +66,6 @@ function shown(value: unknown): string {
     return typeName(value);
   }
 }
-
-/**
- * Whether `key` is one of the producer's own serde keys, which never reach the core.
- *
- * @param key - the config key
- * @returns whether it is a serde key
- */
-function isSerializerKey(key: string): boolean {
-  return key === 'key.serializer' || key === 'value.serializer';
-}
-
-/** No key left out. */
-const NONE: ReadonlySet<string> = new Set();
 
 /**
  * `n` written in decimal, never in exponent form (`1e21` is
@@ -175,21 +162,18 @@ export function checkConfigs(configs: unknown): Readonly<Record<string, unknown>
  * The `[key, value]` byte pairs of `configs` (`encodeLikeJava`'s bytes of the
  * strings), checked as `checkConfigs` checks them, each value written as a
  * string. `null` and `undefined` values are dropped, as an absent key, and so
- * are the producer's own serde keys and the keys in `leftOut`, those a serde
- * config function read, except the producer keys of Java's, which the core
- * uses.
+ * are the client's own serde keys, `serdeKeys`.
  *
  * @param configs - the configuration given
- * @param leftOut - the keys not to send to the core
+ * @param serdeKeys - the client's own serde keys, the key's and the value's
  * @returns the keys and values to send, encoded
  */
-export function configEntries(configs: unknown, leftOut: ReadonlySet<string> = NONE): Array<[Buffer, Buffer]> {
+export function configEntries(configs: unknown, serdeKeys: readonly [string, string]): Array<[Buffer, Buffer]> {
   const checked = checkConfigs(configs);
   const out: Array<[Buffer, Buffer]> = [];
   for (const key of Object.keys(checked)) {
     const value = checked[key];
-    if (value === null || value === undefined || isSerializerKey(key)) continue;
-    if (leftOut.has(key) && !isProducerConfigKey(key)) continue;
+    if (value === null || value === undefined || key === serdeKeys[0] || key === serdeKeys[1]) continue;
     // Encoded once per client, as Java encodes a string (src/internal/encode.ts).
     out.push([encodeLikeJava(key), encodeLikeJava(configValue(value))]);
   }

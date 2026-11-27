@@ -28,8 +28,8 @@
 //! consumer's configuration: every key Java's `ConsumerConfig` defines, the
 //! same way, and `src/internal/consumer_config_keys.ts`, the consumer's key
 //! list. The consumer's serde keys, `key.deserializer` and
-//! `value.deserializer`, are typed as the other keys are until the client has
-//! its `Deserializer` interface.
+//! `value.deserializer`, take a function `({ configs, isKey }) => deserializer`,
+//! as the producer's take serializers.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -237,8 +237,8 @@ fn configs_type(repo_root: &Path, keys: &[String]) -> (PathBuf, String) {
          * `,`, anything else by `String()`); `null` and `undefined` leave the key\n \
          * out. The core checks every key and value, with Java's messages.\n \
          * `key.serializer` and `value.serializer` take a function\n \
-         * `({ configs, isKey }) => serializer`, such as `stringSerializer`, and\n \
-         * never reach the core. The constructor takes only a synchronous one;\n \
+         * `({ configs, isKey }) => serializer`, such as `() => new StringSerializer()`,\n \
+         * and never reach the core. The constructor takes only a synchronous one;\n \
          * `KafkaProducer.create()` also waits for one that returns a Promise.\n \
          *\n \
          * @remarks *(js-only)* The type of the configuration the constructor and\n \
@@ -323,11 +323,11 @@ fn consumer_known_keys(repo_root: &Path, keys: &[String], core_only: &[String]) 
 }
 
 /// `src/consumer/consumer_configs.ts` and its content: the consumer's keys, as
-/// `configs_type` writes the producer's. `key.deserializer` and
-/// `value.deserializer` are plain keys until the client has its
-/// `Deserializer` interface.
+/// `configs_type` writes the producer's, `key.deserializer` and
+/// `value.deserializer` taking the function that makes a deserializer.
 fn consumer_configs_type(repo_root: &Path, keys: &[String]) -> (PathBuf, String) {
     let mut text = header("Java's `ConsumerConfig` (with `SslConfigs` / `SaslConfigs`)");
+    text.push_str("\nimport type { Headers } from '../common/header/headers';\n");
     text.push_str(
         "\n/**\n \
          * A consumer's configuration: Java's `ConsumerConfig` keys, as a plain object\n \
@@ -335,27 +335,56 @@ fn consumer_configs_type(repo_root: &Path, keys: &[String]) -> (PathBuf, String)
          * (`true` as `\"true\"`, numbers and bigints in decimal, arrays joined with\n \
          * `,`, anything else by `String()`); `null` and `undefined` leave the key\n \
          * out. The core checks every key and value, with Java's messages.\n \
+         * `key.deserializer` and `value.deserializer` take a function\n \
+         * `({ configs, isKey }) => deserializer`, such as\n \
+         * `() => new StringDeserializer()`, and never reach the core. The\n \
+         * constructor takes only a synchronous one; `KafkaConsumer.create()` also\n \
+         * waits for one that returns a Promise.\n \
          *\n \
-         * @remarks *(js-only)* The type of the configuration the consumer takes,\n \
-         * Java's `Map<String, Object>` and `Properties` as one. It lists the keys\n \
-         * Java's `ConsumerConfig` defines, for autocompletion, and takes any other\n \
-         * string too, through `(string & {})`, since an unknown key goes to the\n \
-         * core.\n \
+         * @remarks *(js-only)* The type of the configuration the constructor and\n \
+         * `create()` take, Java's `Map<String, Object>` and `Properties` as one. It\n \
+         * lists the keys Java's `ConsumerConfig` defines, for autocompletion, and\n \
+         * takes any other string too, through `(string & {})`, since an unknown key\n \
+         * goes to the core.\n \
          */\n\
          export type ConsumerConfigs = {\n  \
          [key in\n",
     );
-    for k in keys {
+    // The serde keys are left out of the list: what a configuration typed
+    // `ConsumerConfigs` holds there would bind the consumer's type arguments
+    // to `unknown`, the deserializers' type here, where an omitted one binds
+    // `Buffer`. The consumer's own types list them, typed by the
+    // deserializers their functions return.
+    for k in keys.iter().filter(|k| *k != "key.deserializer" && *k != "value.deserializer") {
         text.push_str(&format!("    | {}\n", js_str(k)));
     }
     text.push_str(
         "    // Any other key, keeping the known keys' autocompletion: the core\n    \
-         // lists the keys it does not use.\n    \
-         | (string & {})]?: ConfigValue;\n\
+         // lists the keys it does not use. `key.deserializer` and\n    \
+         // `value.deserializer` are among them, typed by the consumer's\n    \
+         // constructor, so that a configuration of this type binds none of its\n    \
+         // type arguments.\n    \
+         | (string & {})]?: string extends key ? ConfigValue | DeserializerConfig : ConfigValue;\n\
          };\n\
          \n\
          // A value the core parses.\n\
-         type ConfigValue = string | number | boolean | bigint | ReadonlyArray<string | number | bigint> | null | undefined;\n",
+         type ConfigValue = string | number | boolean | bigint | ReadonlyArray<string | number | bigint> | null | undefined;\n\
+         \n\
+         // A serde config key's value: the function that makes the deserializer,\n\
+         // or a Promise of it, which only `create()` waits for.\n\
+         type DeserializerConfig =\n  \
+         | ((options: { configs: Readonly<Record<string, unknown>>; isKey: boolean }) => AnyDeserializer | PromiseLike<AnyDeserializer>)\n  \
+         | null\n  \
+         | undefined;\n\
+         \n\
+         // A deserializer of any data: what it returns is left unknown, so that a\n\
+         // configuration typed `ConsumerConfigs` binds no type argument of the\n\
+         // consumer, which infers them only from the functions an object literal\n\
+         // holds.\n\
+         type AnyDeserializer = {\n  \
+         deserialize(options: { topic: string; headers: Headers; data: Buffer }): unknown;\n  \
+         close?(): void;\n\
+         };\n",
     );
     (repo_root.join(JS_SRC).join("consumer").join("consumer_configs.ts"), text)
 }
@@ -420,15 +449,19 @@ mod tests {
             "    | 'bootstrap.servers'\n",
             "    | 'group.id'\n",
             "    | 'group.protocol'\n",
-            "    | 'key.deserializer'\n",
             "    | 'ssl.keystore.password'\n",
             "    | 'sasl.jaas.config'\n",
-            "    | (string & {})]?: ConfigValue;\n",
+            "    | (string & {})]?: string extends key ? ConfigValue | DeserializerConfig : ConfigValue;\n",
+            "=> AnyDeserializer | PromiseLike<AnyDeserializer>)",
+            "`KafkaConsumer.create()` also\n * waits for one that returns a Promise.",
+            "deserialize(options: { topic: string; headers: Headers; data: Buffer }): unknown;",
         ] {
             assert!(text.contains(line), "missing {line}");
         }
-        // The producer's keys are not the consumer's, and no serde key takes a function yet.
+        // The producer's keys are not the consumer's, and the serde keys are
+        // the constructor's to type.
         assert!(!text.contains("'linger.ms'"));
+        assert!(!text.contains("    | 'key.deserializer'\n"));
         assert!(!text.contains("Serializer"));
         let text = output(&outputs, "javascript/src/internal/consumer_config_keys.ts");
         assert!(text.contains("  'group.id',\n"));

@@ -123,6 +123,34 @@ test('the consumer uses the functions of the plan', () => {
   }
 });
 
+test('both clients parse their configuration first and read the client.id it generated, and mark no key as used', () => {
+  // Java's order: parse, read client.id, configure the serdes, build the
+  // client from the same configuration (native/config.c). A key a serde
+  // config function reads is not marked with ignore(): the client's copy of
+  // its configuration would not keep the mark (the binding's notes).
+  const called = new Set(sources.flatMap((s) => [...calledFunctions(path.join(NATIVE, s))]));
+  for (const name of [
+    'kafka_producer_ProducerConfig_new',
+    'kafka_producer_ProducerConfig_get_string',
+    'kafka_producer_ProducerConfig_destroy_err',
+    'kafka_producer_KafkaProducer_new',
+    'kafka_consumer_ConsumerConfig_new',
+    'kafka_consumer_ConsumerConfig_get_string',
+    'kafka_consumer_ConsumerConfig_destroy_err',
+    'kafka_consumer_KafkaConsumer_new',
+  ]) {
+    assert.ok(called.has(name), `${name} is not called`);
+  }
+  for (const name of [
+    'kafka_producer_ProducerConfig_ignore',
+    'kafka_producer_ProducerConfig_ignore_err',
+    'kafka_consumer_ConsumerConfig_ignore',
+    'kafka_consumer_ConsumerConfig_ignore_err',
+  ]) {
+    assert.ok(!called.has(name), `${name} is called`);
+  }
+});
+
 test("the consumer's commits, seeks, positions, offset and metadata queries use their entry points", () => {
   const called = new Set(sources.flatMap((s) => [...calledFunctions(path.join(NATIVE, s))]));
   for (const name of [

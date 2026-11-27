@@ -199,3 +199,12 @@ test('no class to complete fails: 0 items checked', () => {
   assert.equal(r.status, 1);
   assert.ok(r.err.includes('❌ check-java-completeness: 0 item(s) checked; a rule that checks nothing cannot pass'), r.text);
 });
+
+test("the String and UUID serdes' configure() and the serde interfaces' are the baseline's, each class declaring its constructor", () => {
+  const baseline = require('node:fs').readFileSync(require('node:path').join(__dirname, '..', '..', 'eslint-baseline.txt'), 'utf8');
+  for (const cls of ['Serializer', 'Deserializer', 'StringSerializer', 'StringDeserializer', 'UUIDSerializer', 'UUIDDeserializer']) {
+    assert.ok(baseline.includes(`\nmissing common.serialization.${cls}#configure\n`), cls);
+  }
+  // No other class's configure is left out: the other serdes have none in Java.
+  assert.equal((baseline.match(/^missing common\.serialization\.\w+#configure$/gm) || []).length, 6);
+});
