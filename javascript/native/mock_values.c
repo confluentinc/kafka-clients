@@ -75,20 +75,32 @@ MockRecord* mock_record_of(const void* key) {
 // struct: an error JS gave a mock (setSendException, errorNext,
 // setPollException, ...), or what a consumer's listener method or commit
 // callback threw or rejected with, which may be any value. error.c hands the
-// very same JS value back (JS conventions, Errors). Two owners: the core's error, which releases it from
-// any thread once its last copy is dropped (injected_error_release), and the
-// client's list, which deletes the reference on the JS thread once the core's
-// copies are gone (injected_errors_sweep, run by every mock call and every
-// callback run) or at the destroy (injected_errors_release); the struct is
-// freed by the last of them, and a value read after the destroy is the core's
-// plain error.
+// very same JS value back (JS conventions, Errors). Two owners: the core's
+// error, which releases it from any thread once its last copy is dropped
+// (injected_error_release), and the client's list, which lets go of the value
+// on the JS thread once the core's copies are gone (injected_errors_sweep, run
+// by every mock call and every callback run) or at the destroy
+// (injected_errors_release); the struct is freed by the last of them, and a
+// value read after the destroy is the core's plain error.
+//
+// The value is held by a strong reference, a GC root, or, when the client
+// gives a `keeper` (the consumer's handle object's `carried` object), as one
+// of the keeper's elements, read through a weak reference: a value that
+// reaches its consumer (an Error made in a callback that closes over it) then
+// keeps no closed consumer alive, and the GC collects it with the handle
+// object.
 struct InjectedError {
     uint32_t magic;
     atomic_int owners;
     napi_env env;
-    napi_ref value;
+    napi_ref value;                            // the one-element array holding the value
+    napi_ref keeper;                           // weak, NULL when `value` is strong
+    uint32_t key;                              // the array's index in the keeper
     InjectedError* next;
 };
+
+// The keys of the values held through a keeper, one per value.
+static atomic_uint next_key;
 
 #define INJECTED_ERROR_MAGIC 0x4a53494eu
 
@@ -100,11 +112,23 @@ static void injected_error_release(void* opaque) {
     }
 }
 
+// Lets go of the value: its references, and, on a live JS thread (`js`), its
+// element of the keeper. A destroy, run from the handle object's finalizer,
+// leaves the element to the collection.
+static void injected_value_drop(napi_env env, InjectedError* e, int js) {
+    napi_value keeper = NULL;
+    bool deleted = false;
+    if (js && e->keeper != NULL && napi_get_reference_value(env, e->keeper, &keeper) == napi_ok && keeper != NULL)
+        napi_delete_element(env, keeper, e->key, &deleted);
+    delete_ref(env, &e->keeper);
+    delete_ref(env, &e->value);
+}
+
 void injected_errors_release(napi_env env, InjectedError** list) {
     while (*list != NULL) {
         InjectedError* e = *list;
         *list = e->next;
-        delete_ref(env, &e->value);
+        injected_value_drop(env, e, 0);
         injected_error_release(e);
     }
 }
@@ -118,7 +142,7 @@ void injected_errors_sweep(napi_env env, InjectedError** list) {
         InjectedError* e = *link;
         if (atomic_load(&e->owners) == 1) {
             *link = e->next;
-            delete_ref(env, &e->value);
+            injected_value_drop(env, e, 1);
             injected_error_release(e);
         } else {
             link = &e->next;
@@ -136,16 +160,16 @@ napi_value injected_error_value(napi_env env, void* opaque) {
     return value;
 }
 
-int injected_error_new(napi_env env, InjectedError** list, napi_value value, kafka_common_Error_t** out) {
+int injected_error_new(napi_env env, InjectedError** list, napi_value value, napi_value keeper, kafka_common_Error_t** out) {
     *out = NULL;
     napi_valuetype type;
     NAPI_CHECK(env, napi_typeof(env, value, &type), -1);
     // A mock's setter clears its error with null.
     if (type == napi_null) return 0;
-    return injected_error_carry(env, list, value, out);
+    return injected_error_carry(env, list, value, keeper, out);
 }
 
-int injected_error_carry(napi_env env, InjectedError** list, napi_value value, kafka_common_Error_t** out) {
+int injected_error_carry(napi_env env, InjectedError** list, napi_value value, napi_value keeper, kafka_common_Error_t** out) {
     *out = NULL;
     InjectedError* e = (InjectedError*)calloc(1, sizeof(InjectedError));
     if (e == NULL) {
@@ -158,8 +182,12 @@ int injected_error_carry(napi_env env, InjectedError** list, napi_value value, k
     // The value is held in a one-element array, as Node-API 9 references
     // objects only and a callback may throw any value.
     napi_value holder;
+    e->key = atomic_fetch_add(&next_key, 1);
     if (napi_create_array_with_length(env, 1, &holder) != napi_ok || napi_set_element(env, holder, 0, value) != napi_ok
-        || napi_create_reference(env, holder, 1, &e->value) != napi_ok) {
+        || (keeper != NULL
+            && (napi_set_element(env, keeper, e->key, holder) != napi_ok || napi_create_reference(env, keeper, 0, &e->keeper) != napi_ok))
+        || napi_create_reference(env, holder, keeper != NULL ? 0 : 1, &e->value) != napi_ok) {
+        injected_value_drop(env, e, 1);
         free(e);
         js_throw_last_napi_error(env, "napi_create_reference");
         return -1;
@@ -177,7 +205,7 @@ int injected_error_carry(napi_env env, InjectedError** list, napi_value value, k
         FFI_SET(*out, kafka_common_Error_local_callback_err(message, e, injected_error_release, &ffi_err));
     free(message);
     if (err != NULL) {
-        delete_ref(env, &e->value);
+        injected_value_drop(env, e, 1);
         free(e);
         error_throw_owned(env, err);
         return -1;

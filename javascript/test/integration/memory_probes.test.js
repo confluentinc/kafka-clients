@@ -276,3 +276,50 @@ function batchProbe({ count, headers, refuse, body }) {
   },
   180000,
 );
+
+// A value a rebalance listener throws is held through the consumer's handle
+// object, as its functions are: a closed KafkaConsumer whose listener threw
+// an Error made inside it (whose stack holds the listener, which closes over
+// the consumer) is collected.
+(SKIP ? test.skip : test)(
+  'a closed KafkaConsumer whose listener threw a value that reaches it is collected',
+  () => {
+    const topic = `js-it-carried-${process.pid}-${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
+    const out = probeResult(
+      `
+    const { CloseOptions, KafkaConsumer } = require(D + '/consumer');
+    const { createTopic } = require(${JSON.stringify(path.join(__dirname, '_fetch_records'))});
+    const BOOTSTRAP = ${JSON.stringify(BOOTSTRAP)};
+    const TOPIC = ${JSON.stringify(topic)};
+    (async () => {
+      const hold = setInterval(() => {}, 1000);
+      await createTopic(BOOTSTRAP, TOPIC);
+      const out = {};
+      await (async () => {
+        const consumer = new KafkaConsumer({ configs: { 'bootstrap.servers': BOOTSTRAP, 'group.protocol': 'consumer', 'group.id': TOPIC + '-group' } });
+        await consumer.subscribe({ topics: [TOPIC], callback: {
+          onPartitionsRevoked() {},
+          onPartitionsAssigned({ partitions }) {
+            if (partitions.size() > 0) throw new Error('could not take ' + partitions.size() + ' partitions for ' + consumer.groupMetadata().groupId());
+          },
+        } });
+        const deadline = Date.now() + 30000;
+        while (out.rejected === undefined && Date.now() < deadline) await consumer.poll({ timeout: 200 }).catch((e) => (out.rejected = e.name));
+        await consumer.close({ option: CloseOptions.timeout({ timeout: 0 }) }).catch(() => {});
+      })();
+      await settle();
+      out.stats = native.consumerStats();
+      out.leaks = leaks();
+      console.log(JSON.stringify(out));
+      clearInterval(hold);
+    })();
+  `,
+      { timeout: 120000 },
+    );
+    assert.equal(out.rejected, 'KafkaError');
+    assert.equal(out.stats.consumersMade, 1);
+    assert.equal(out.stats.consumersFreed, 1);
+    assert.deepEqual(out.leaks, NO_LEAKS);
+  },
+  180000,
+);

@@ -398,12 +398,17 @@ does as Java's does (PLAN §6, asks 8 to 13).
   reported, or until the destroy, as the FFI's doc of the callback requires, and by its commit's call until its
   answer (`Consumer.commits`); its function goes once it reported, or once its commit failed, which the core never
   runs it for (it registers the callback only once the commit is under way), so a refused commit holds no JS.
-- **How the JS functions are held** (`Held`): every listener's and commit callback's function is an element of the
-  handle object's `callbacks` object, read through a weak reference. A strong native reference is a GC root: a
-  callback that reaches its consumer, as one that commits does, would keep a closed consumer, or a mock whose
-  listener calls it, alive for good. Held through the handle object, the functions live while the consumer is open
-  (the queue holds the handle object strongly until the close) or while anything else reaches it, and the GC
-  collects them with it; the destroy, from the handle object's finalizer, runs no JS. Each
+- **How the JS values are held** (`Held`): every listener's and commit callback's function is an element of the
+  handle object's `callbacks` object, and every value the core carries for the consumer (what a callback threw or
+  rejected with, an error given to the mock's `setPollException()` or `setOffsetsException()`) an element of its
+  `carried` object (`native/mock_values.c`, the carrier's `keeper`), each read through a weak reference. A strong
+  native reference is a GC root: a callback that reaches its consumer, as one that commits does, or a value that
+  does, as an `Error` made inside a callback that closes over it does (its captured stack holds the callback),
+  would keep a closed consumer, or a mock whose listener calls it, alive for good. Held through the handle object,
+  they live while the consumer is open (the queue holds the handle object strongly until the close) or while
+  anything else reaches it, and the GC collects them with it; the destroy, from the handle object's finalizer, runs
+  no JS, and a value the core reads after it is its plain error. The producer's mock keeps its injected errors by a
+  strong reference, as before. Each
   pending report holds the listener and the consumer's handle object, so the finalizer cannot run until it is made.
   The destroy runs the callbacks still pending and waits for their reports: one it runs reports at once, running no
   JS, and before it the addon reports, as fulfilled, those still waiting for a Promise, which no JS will settle

@@ -505,12 +505,13 @@ typedef struct InjectedError InjectedError;
 // The core's error for JS value `value`: NULL for `null`, else a
 // LocalCallbackError carrying it (injected_error_carry). Throws and returns
 // -1 on failure.
-int injected_error_new(napi_env env, InjectedError** list, napi_value value, kafka_common_Error_t** out);
+int injected_error_new(napi_env env, InjectedError** list, napi_value value, napi_value keeper, kafka_common_Error_t** out);
 // The core's error for JS value `value`, whatever it is (`null` and
 // `undefined` included, a callback's failure): a LocalCallbackError carrying
-// it, held on the client's `list` until the core holds no copy of it. Throws
-// and returns -1 on failure.
-int injected_error_carry(napi_env env, InjectedError** list, napi_value value, kafka_common_Error_t** out);
+// it, held on the client's `list` until the core holds no copy of it, by a
+// strong reference, or through `keeper`, an object the client's handle object
+// holds, when it is not NULL. Throws and returns -1 on failure.
+int injected_error_carry(napi_env env, InjectedError** list, napi_value value, napi_value keeper, kafka_common_Error_t** out);
 // Lets go of every error of `list`, at the client's destroy.
 void injected_errors_release(napi_env env, InjectedError** list);
 // Lets go of the errors of `list` the core holds no copy of any more: run by

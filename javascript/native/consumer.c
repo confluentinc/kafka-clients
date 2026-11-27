@@ -257,17 +257,23 @@ static kafka_consumer_MockConsumer_t* mock_of(napi_env env, Consumer* c) {
 
 // ---- the listeners' and commit callbacks' reports ---------------------------
 
-// The `callbacks` object of the consumer's handle object, made on first use,
-// or NULL when the handle object is gone or being finalized.
-static napi_value held_callbacks(napi_env env, Consumer* c) {
+// The object `name` of the consumer's handle object, made on first use, or
+// NULL when the handle object is gone or being finalized: `callbacks` holds
+// the listeners' and commit callbacks' functions (Held), `carried` the values
+// they threw (native/mock_values.c).
+static napi_value handle_object_part(napi_env env, Consumer* c, const char* name) {
     napi_value obj = NULL, held = NULL;
     napi_valuetype type = napi_undefined;
     if (c->queue.finalizing || c->queue.self_ref == NULL || napi_get_reference_value(env, c->queue.self_ref, &obj) != napi_ok
-        || obj == NULL || napi_get_named_property(env, obj, "callbacks", &held) != napi_ok || napi_typeof(env, held, &type) != napi_ok)
+        || obj == NULL || napi_get_named_property(env, obj, name, &held) != napi_ok || napi_typeof(env, held, &type) != napi_ok)
         return NULL;
     if (type == napi_object) return held;
-    if (napi_create_object(env, &held) != napi_ok || napi_set_named_property(env, obj, "callbacks", held) != napi_ok) return NULL;
+    if (napi_create_object(env, &held) != napi_ok || napi_set_named_property(env, obj, name, held) != napi_ok) return NULL;
     return held;
+}
+
+static napi_value held_callbacks(napi_env env, Consumer* c) {
+    return handle_object_part(env, c, "callbacks");
 }
 
 // Holds `fn` through the handle object (Held). 0, or -1 with a JS exception
@@ -353,7 +359,7 @@ static kafka_common_Error_t* callback_failure(const char* text) {
 // back as the same object wherever the core reports it.
 static kafka_common_Error_t* callback_value_error(napi_env env, Consumer* c, napi_value value) {
     kafka_common_Error_t* report = NULL;
-    if (injected_error_carry(env, &c->injected, value, &report) == 0) return report;
+    if (injected_error_carry(env, &c->injected, value, handle_object_part(env, c, "carried"), &report) == 0) return report;
     js_warn_thrown(env);
     return callback_failure("the callback's error could not be kept");
 }
@@ -2738,7 +2744,7 @@ napi_value js_mock_consumer_set_error(napi_env env, napi_callback_info info) {
     Consumer* c = unwrap_consumer(env, argv[0]);
     kafka_consumer_MockConsumer_t* mock = mock_of(env, c);
     kafka_common_Error_t* error = NULL;
-    if (mock == NULL || injected_error_new(env, &c->injected, argv[2], &error) != 0) {
+    if (mock == NULL || injected_error_new(env, &c->injected, argv[2], handle_object_part(env, c, "carried"), &error) != 0) {
         free(which);
         return NULL;
     }

@@ -288,3 +288,41 @@ test("a refused commit's callback lets go of its function at once, and a closed 
   assert.equal(out.stats.consumersFreed, 3);
   assert.deepEqual(out.leaks, NO_LEAKS);
 });
+
+test('a closed consumer is collected when its last callback threw a value that reaches it: the value is held through its handle object', () => {
+  const out = probe(`
+    const { CloseOptions, KafkaConsumer, MockConsumer, OffsetAndMetadata } = require(D + '/consumer');
+    const { TopicPartition, TopicPartitionMap } = require(D + '/common');
+    const configs = { 'bootstrap.servers': '127.0.0.1:1', 'group.id': 'g', 'group.protocol': 'consumer' };
+    (async () => {
+      const hold = setInterval(() => {}, 1000);
+      const counts = { thrown: 0 };
+      const tp = new TopicPartition({ topic: 't', partition: 0 });
+      await (async () => {
+        // A mock's listener and commit callback: an Error made inside one, whose stack holds it and so its
+        // closure, and a value that references the mock.
+        for (const throwing of ['listener-error', 'listener-object', 'callback-error', 'callback-object']) {
+          const m = new MockConsumer('earliest');
+          const value = () => (throwing.endsWith('error') ? new Error('failed on ' + m.closed()) : { m });
+          await m.subscribe({ topics: ['t'], callback: { onPartitionsRevoked() {}, onPartitionsAssigned() { if (throwing.startsWith('listener')) throw value(); } } });
+          await m.rebalance([tp]).catch(() => counts.thrown++);
+          if (throwing.startsWith('callback')) await m.commitAsync({ offsets: new TopicPartitionMap([[tp, new OffsetAndMetadata(1)]]), callback: () => { throw value(); } }).catch(() => counts.thrown++);
+          await m.close();
+        }
+        // A KafkaConsumer's commit callback, run by the next commitSync().
+        const kc = new KafkaConsumer(configs);
+        await kc.assign([tp]);
+        await kc.commitAsync({ offsets: new TopicPartitionMap(), callback: ({ exception }) => { if (exception === null) throw new Error('could not record the commit of ' + kc.groupMetadata().groupId()); } });
+        await kc.commitSync({ offsets: new TopicPartitionMap() }).catch(() => counts.thrown++);
+        await kc.close({ option: CloseOptions.timeout({ timeout: 0 }) }).catch(() => {});
+      })();
+      await settle();
+      console.log(JSON.stringify({ counts, stats: native.consumerStats(), leaks: leaks() }));
+      clearInterval(hold);
+    })();
+  `);
+  assert.equal(out.counts.thrown, 5);
+  assert.equal(out.stats.consumersMade, 5);
+  assert.equal(out.stats.consumersFreed, 5);
+  assert.deepEqual(out.leaks, NO_LEAKS);
+});

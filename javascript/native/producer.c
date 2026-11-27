@@ -1956,7 +1956,7 @@ napi_value js_mock_producer_set_error(napi_env env, napi_callback_info info) {
     }
     Producer* p = unwrap_mock(env, argv[0]);
     kafka_common_Error_t* error = NULL;
-    if (p == NULL || injected_error_new(env, &p->injected, argv[2], &error) != 0) {
+    if (p == NULL || injected_error_new(env, &p->injected, argv[2], NULL, &error) != 0) {
         free(field);
         return NULL;
     }
@@ -1995,7 +1995,7 @@ napi_value js_mock_producer_complete_next(napi_env env, napi_callback_info info)
     }
     Producer* p = unwrap_mock(env, argv[0]);
     kafka_common_Error_t* error = NULL;
-    if (p == NULL || injected_error_new(env, &p->injected, argv[1], &error) != 0) return NULL;
+    if (p == NULL || injected_error_new(env, &p->injected, argv[1], NULL, &error) != 0) return NULL;
     kafka_common_Error_t* ffi_err = NULL;
     int8_t completed = 0;
     error_stat_given(error);
