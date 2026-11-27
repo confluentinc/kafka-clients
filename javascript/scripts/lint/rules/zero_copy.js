@@ -53,11 +53,37 @@
 //     `x.copy(...)`, or `target.set(x)` (so `Buffer.alloc(n)` filled with
 //     `.set` or `.copy` is caught at the fill). Encoding a `string`
 //     (src/internal/encode.ts) is no copy of the caller's bytes.
+//
+// And on the receive path (native/consumer.c; the JS conventions,
+// Serialization: a consumed key or value is a Buffer over the record's own
+// bytes, a copy only where the runtime refuses external buffers), once the
+// bindings header declares a consumed record's key and value readers:
+//   - each of a record's key and value, read with
+//     `kafka_consumer_ConsumerRecord_key_err` / `_value_err` into a variable,
+//     is handed (in the reading function) to a function of native/ that makes
+//     an external Buffer over its bytes (`napi_create_external_buffer` or
+//     `napi_create_external_arraybuffer` of a `->data` / `.data`), or the
+//     reading function makes it itself (`not-external`);
+//   - a `napi_create_buffer_copy` there is made only after the refusal:
+//     in a function that makes an external Buffer, after a test of
+//     `napi_no_external_buffers_allowed` (`copy`), which the addon's test
+//     switch stands for too;
+//   - no other copy (`memcpy`, `memmove`, `strdup`) is made there, and no
+//     allocation but those listed with what they hold (a call's context, the
+//     consumer struct, the batch's count), none of which is a key's or a
+//     value's bytes. Header values stay copies, by design (native/headers.c).
 
 const { cModel, applyAllowlist, siteKey } = require('../c_model');
 const { scan } = require('../c_source');
 
 const SEND_PATH = ['native/record.c', 'native/producer.c', 'native/mock_values.c'];
+/** The receive path: the file that turns a consumed record's key and value into Buffers. */
+const RECEIVE_PATH = ['native/consumer.c'];
+/** A consumed record's key and value readers of the bindings header, by part. */
+const RECORD_BYTES = { key: 'kafka_consumer_ConsumerRecord_key_err', value: 'kafka_consumer_ConsumerRecord_value_err' };
+const EXTERNAL = new Set(['napi_create_external_buffer', 'napi_create_external_arraybuffer']);
+/** Node-API's answer where external buffers are refused (Electron). */
+const REFUSED = 'napi_no_external_buffers_allowed';
 
 /** The mark of a file `cargo xtask generate-error-codes` writes. */
 const GENERATED = /GENERATED, DO NOT EDIT/;
@@ -161,6 +187,22 @@ const ALLOWED = [
     key: 'native/mock_values.c:injected_error_carry:calloc#1',
     reason: "an error JS gives a mock, or a callback's thrown value: a reference to it, no record",
   },
+  {
+    key: 'native/consumer.c:mock_record_to_js:kafka_consumer_ConsumerRecord_key_err#1',
+    reason: "a mock's record, whose key is the address of the MockRecord holding the app's own record, not fetched bytes",
+  },
+  { key: 'native/consumer.c:deferred_new:calloc#1', reason: "a callback's pending report, waiting for its Promise" },
+  { key: 'native/consumer.c:listener_new:calloc#1', reason: "a rebalance listener's registration" },
+  { key: 'native/consumer.c:commit_callback_new:calloc#1', reason: "a commit callback's registration" },
+  { key: 'native/consumer.c:batch_to_js:calloc#1', reason: "a poll's batch, which counts what still needs the records" },
+  { key: 'native/consumer.c:batch_to_js:calloc#2', reason: "the batch's header sources, one per record: a pointer and a count, no bytes" },
+  { key: 'native/consumer.c:js_consumer_poll:calloc#1', reason: "a poll's context" },
+  { key: 'native/consumer.c:call_ctx_new:calloc#1', reason: "a waiting call's context" },
+  { key: 'native/consumer.c:string_list_from_js:calloc#1', reason: "the array of a subscription's topic strings, no record's bytes" },
+  { key: 'native/consumer.c:subscribe_ctx_new:calloc#1', reason: "a subscribe's context" },
+  { key: 'native/consumer.c:js_consumer_commit_async:calloc#1', reason: "a commit's context, holding its callback" },
+  { key: 'native/consumer.c:js_consumer_close:calloc#1', reason: "the close's context" },
+  { key: 'native/consumer.c:consumer_handle_new:calloc#1', reason: 'the consumer struct' },
 ];
 
 /** The text of each argument naming `field` (`&ctx->key_ref`) among the calls of `names` in `fns`. */
@@ -226,13 +268,112 @@ function reached(model, start, depth) {
   return out;
 }
 
+/**
+ * The variable call `c` (a record's key or value reader) is read into: the
+ * first argument of the `FFI_SET` around it, or the target of an assignment
+ * the statement makes. `null` when it is read into neither.
+ */
+function readInto(model, c) {
+  const around = model.calls.find((d) => d.name === 'FFI_SET' && d.file === c.file && d.start < c.start && d.end > c.end);
+  if (around && around.args && around.args[0]) return around.args[0].trim();
+  const body = model.bodies.get(`${c.file}:${c.function}`);
+  if (!body) return null;
+  const before = scan(body.body).code.slice(0, c.start - body.bodyStart);
+  const statement = before.slice(Math.max(before.lastIndexOf(';'), before.lastIndexOf('{'), before.lastIndexOf('}')) + 1);
+  const assigned = /(\w+)\s*=[^=]*$/.exec(statement);
+  return assigned ? assigned[1] : null;
+}
+
+/** Whether the function `b` makes an external Buffer over a `->data` / `.data`. */
+function makesExternal(model, b) {
+  return model.calls.some(
+    (c) => c.file === b.file && c.function === b.name && EXTERNAL.has(c.name) && (c.args || []).some((a) => /(\.|->)data\b/.test(a)),
+  );
+}
+
+/** The receive path's findings and the items checked: `{raw, checked}`. */
+function receivePath(model) {
+  const raw = [];
+  let checked = 0;
+  if (!model.header.has(RECORD_BYTES.key) || !model.header.has(RECORD_BYTES.value)) return { raw, checked };
+  const onPath = model.calls.filter((c) => RECEIVE_PATH.includes(c.file) && !c.directive);
+  for (const [part, reader] of Object.entries(RECORD_BYTES)) {
+    checked += 1;
+    const reads = onPath.filter((c) => c.name === reader && c.function);
+    if (reads.length === 0) {
+      raw.push({
+        kind: 'not-external',
+        subject: RECEIVE_PATH.join(', '),
+        message: `no function reads a consumed record's ${part} (${reader})`,
+      });
+      continue;
+    }
+    for (const c of reads) {
+      const variable = readInto(model, c);
+      const re = variable ? new RegExp(`\\b${variable}\\b`) : null;
+      const own = model.bodies.get(`${c.file}:${c.function}`);
+      const handed =
+        re !== null &&
+        onPath.some((d) => {
+          if (d.file !== c.file || d.function !== c.function || d.name === reader || d.name === 'FFI_SET') return false;
+          if (!(d.args || []).some((a) => re.test(a))) return false;
+          if (EXTERNAL.has(d.name)) return true;
+          const callee = model.resolve(d.name, d.file);
+          return callee !== undefined && makesExternal(model, callee);
+        });
+      if (!handed && !(own && makesExternal(model, own) && re !== null)) {
+        raw.push({
+          kind: 'not-external',
+          subject: `${c.file}:${c.line}`,
+          message: `${c.function} reads a consumed record's ${part}${variable ? ` into ${variable}` : ''} but hands it to no function that makes an external Buffer over its bytes: a fetched ${part} is not copied`,
+          allow: siteKey(c),
+        });
+      }
+    }
+  }
+  for (const c of onPath) {
+    if (!COPIES.has(c.name) && !ALLOCATIONS.has(c.name)) continue;
+    checked += 1;
+    if (c.name === 'napi_create_buffer_copy') {
+      const b = model.bodies.get(`${c.file}:${c.function}`);
+      const refusedAt = b ? scan(b.body).code.indexOf(REFUSED) : -1;
+      if (b && makesExternal(model, b) && refusedAt >= 0 && refusedAt < c.start - b.bodyStart) continue;
+      raw.push({
+        kind: 'copy',
+        subject: `${c.file}:${c.line}`,
+        message: `${c.function} calls napi_create_buffer_copy on the receive path, where no external Buffer was refused: a fetched key or value is copied only where the runtime refuses external buffers (${REFUSED})`,
+      });
+      continue;
+    }
+    const copy = COPIES.has(c.name);
+    raw.push({
+      kind: copy ? 'copy' : 'allocation',
+      subject: `${c.file}:${c.line}`,
+      message: `${c.function} calls ${c.name} on the receive path${copy ? ': no fetched key or value is copied' : ', which no entry lists'}`,
+      allow: copy && c.name !== 'memcpy' ? undefined : siteKey(c),
+    });
+  }
+  return { raw, checked };
+}
+
 module.exports = {
   name: 'check-zero-copy',
-  kinds: ['bytes-not-borrowed', 'copy', 'allocation', 'not-held', 'not-released', 'released-at-delivery', 'copy-unused-allowance'],
+  kinds: [
+    'bytes-not-borrowed',
+    'copy',
+    'allocation',
+    'not-held',
+    'not-released',
+    'released-at-delivery',
+    'not-external',
+    'copy-unused-allowance',
+  ],
   needs: ['program', 'native', 'header'],
   hint:
     "Borrow the app's key and value, never copy them: read each as a kafka_Bytes_t over its own memory, hold " +
-    'a napi_ref on its Buffer and drop it in the hand-over completion (javascript/CLAUDE.md boundary rule 8).',
+    'a napi_ref on its Buffer and drop it in the hand-over completion (javascript/CLAUDE.md boundary rule 8); ' +
+    "hand a consumed key or value to JavaScript as an external Buffer over the batch's bytes, a copy only where " +
+    'external buffers are refused (JS conventions, Serialization).',
   ALLOWED,
   check(ctx) {
     const model = cModel(ctx);
@@ -309,6 +450,9 @@ module.exports = {
         }
       });
     }
+    const receive = receivePath(model);
+    checked += receive.checked;
+    raw.push(...receive.raw);
     const js = jsCopies(ctx);
     checked += js.checked;
     raw.push(...js.findings);

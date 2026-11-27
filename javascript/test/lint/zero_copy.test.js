@@ -19,7 +19,7 @@
 const assert = require('node:assert/strict');
 
 const { findings } = require('./_project');
-const { RECORD_C, PRODUCER_C } = require('./_c_fixture');
+const { HEADER, LISTS, RECORD_C, PRODUCER_C } = require('./_c_fixture');
 const { runN } = require('./_n_harness');
 
 const RULE = 'check-zero-copy';
@@ -205,4 +205,130 @@ test("src/ copies none of the caller's bytes; encoding a string is no copy", () 
     `src/producer/record.ts:21: Buffer.concat([key]) ${why}`,
     `src/producer/record.ts:21: Buffer.concat(keys) ${why}`,
   ]);
+});
+
+// The receive path: a header with a consumed record's key and value readers,
+// and a consumer that hands each to an external Buffer over the batch's
+// bytes, copying only after the runtime refused one.
+const RECEIVE_HEADER = `${HEADER}
+const void *kafka_consumer_ConsumerRecord_key_err(const kafka_consumer_ConsumerRecord_t *self_, kafka_common_Error_t **out_err);
+
+const void *kafka_consumer_ConsumerRecord_value_err(const kafka_consumer_ConsumerRecord_t *self_, kafka_common_Error_t **out_err);
+`;
+const CONSUMER_C = `#include "util.h"
+
+static napi_value bytes_to_js(napi_env env, Batch* b, const kafka_Bytes_t* bytes, int* copied) {
+    napi_value v = NULL;
+    if (!*copied) {
+        napi_status status = napi_create_external_buffer(env, bytes->len, (void*)bytes->data, finalize, b, &v);
+        if (status == napi_ok) return v;
+        if (status != napi_no_external_buffers_allowed) return NULL;
+        *copied = 1;
+    }
+    napi_create_buffer_copy(env, bytes->len, bytes->data, NULL, &v);
+    return v;
+}
+
+static napi_value record_to_js(napi_env env, Batch* b, const kafka_consumer_ConsumerRecord_t* r, int* copied) {
+    kafka_common_Error_t* ffi_err = NULL;
+    const kafka_Bytes_t* key = NULL;
+    const kafka_Bytes_t* value = NULL;
+    kafka_common_Error_t* err = FFI_SET(key, kafka_consumer_ConsumerRecord_key_err(r, &ffi_err));
+    if (err == NULL) err = FFI_SET(value, kafka_consumer_ConsumerRecord_value_err(r, &ffi_err));
+    napi_value k = bytes_to_js(env, b, key, copied);
+    napi_value v = bytes_to_js(env, b, value, copied);
+    return k != NULL ? v : NULL;
+}
+
+static Batch* batch_new(void) {
+    return calloc(1, 8);
+}
+`;
+const RECEIVE_LISTS = {
+  ALLOWED: [...LISTS['check-zero-copy'].ALLOWED, { key: 'native/consumer.c:batch_new:calloc#1', reason: "a poll's batch" }],
+};
+/**
+ * The rule over the fixture with the receive path, `consumer` in place of its
+ * native/consumer.c.
+ *
+ * @param {string} [consumer]
+ * @param {Record<string, unknown>} [lists]
+ */
+function runReceive(consumer = CONSUMER_C, lists = RECEIVE_LISTS) {
+  return runN(RULE, { 'confluent_kafka_bindings.h': RECEIVE_HEADER, 'native/consumer.c': consumer }, lists);
+}
+
+test('the receive path: each consumed key and value an external Buffer, a copy only after the refusal, the listed allocations only', () => {
+  const r = runReceive();
+  assert.equal(r.status, 0, r.text);
+  // The send path's 7, the key's and the value's reads, the refused copy and the batch's allocation.
+  assert.ok(r.out.includes('✅ check-zero-copy: 11 item(s) checked'), r.text);
+  // Without the readers in the header, there is no receive path to check.
+  const without = runN(RULE, { 'native/consumer.c': CONSUMER_C }, RECEIVE_LISTS);
+  assert.deepEqual(findings(without), [
+    "native/consumer.c:batch_new:calloc#1: is allowed as a poll's batch, but nothing matches it any more: delete the entry",
+  ]);
+});
+
+test('a consumed key or value handed to no external Buffer, or never read, is a finding', () => {
+  // The external Buffer turned off: every key and value copied.
+  let r = runReceive(
+    CONSUMER_C.replace(
+      'napi_status status = napi_create_external_buffer(env, bytes->len, (void*)bytes->data, finalize, b, &v);',
+      'napi_status status = napi_no_external_buffers_allowed;',
+    ),
+  );
+  assert.deepEqual(findings(r), [
+    "native/consumer.c:19: record_to_js reads a consumed record's key into key but hands it to no function that makes an external Buffer over its bytes: a fetched key is not copied",
+    "native/consumer.c:20: record_to_js reads a consumed record's value into value but hands it to no function that makes an external Buffer over its bytes: a fetched value is not copied",
+    'native/consumer.c:11: bytes_to_js calls napi_create_buffer_copy on the receive path, where no external Buffer was refused: a fetched key or value is copied only where the runtime refuses external buffers (napi_no_external_buffers_allowed)',
+  ]);
+  // The value built by another function, which copies it.
+  r = runReceive(
+    CONSUMER_C.replace('    napi_value v = bytes_to_js(env, b, value, copied);\n', '    napi_value v = copy_to_js(env, value);\n').replace(
+      'static napi_value record_to_js(',
+      'static napi_value copy_to_js(napi_env env, const kafka_Bytes_t* bytes) {\n    napi_value v = NULL;\n    napi_create_buffer_copy(env, bytes->len, bytes->data, NULL, &v);\n    return v;\n}\n\nstatic napi_value record_to_js(',
+    ),
+  );
+  assert.deepEqual(findings(r), [
+    "native/consumer.c:26: record_to_js reads a consumed record's value into value but hands it to no function that makes an external Buffer over its bytes: a fetched value is not copied",
+    'native/consumer.c:17: copy_to_js calls napi_create_buffer_copy on the receive path, where no external Buffer was refused: a fetched key or value is copied only where the runtime refuses external buffers (napi_no_external_buffers_allowed)',
+  ]);
+  // No function reads the value.
+  r = runReceive(
+    CONSUMER_C.replace('    if (err == NULL) err = FFI_SET(value, kafka_consumer_ConsumerRecord_value_err(r, &ffi_err));\n', ''),
+  );
+  assert.deepEqual(findings(r), [
+    "native/consumer.c: no function reads a consumed record's value (kafka_consumer_ConsumerRecord_value_err)",
+  ]);
+});
+
+test("a copy before the refusal, a memcpy or an unlisted allocation of a key's bytes is a finding", () => {
+  let r = runReceive(
+    CONSUMER_C.replace(
+      '    napi_value v = NULL;\n    if (!*copied) {',
+      '    napi_value v = NULL;\n    napi_create_buffer_copy(env, bytes->len, bytes->data, NULL, &v);\n    if (!*copied) {',
+    ),
+  );
+  assert.deepEqual(findings(r), [
+    'native/consumer.c:5: bytes_to_js calls napi_create_buffer_copy on the receive path, where no external Buffer was refused: a fetched key or value is copied only where the runtime refuses external buffers (napi_no_external_buffers_allowed)',
+  ]);
+  r = runReceive(
+    CONSUMER_C.replace(
+      '    napi_value v = NULL;\n    if (!*copied) {',
+      '    napi_value v = NULL;\n    void* dup = malloc(bytes->len);\n    memcpy(dup, bytes->data, bytes->len);\n    if (!*copied) {',
+    ),
+  );
+  assert.deepEqual(findings(r), [
+    'native/consumer.c:5: bytes_to_js calls malloc on the receive path, which no entry lists',
+    'native/consumer.c:6: bytes_to_js calls memcpy on the receive path: no fetched key or value is copied',
+  ]);
+  // A reader listed by its call site (a mock's record, whose key is no bytes) is allowed.
+  r = runReceive(CONSUMER_C.replace('    napi_value k = bytes_to_js(env, b, key, copied);\n', '    napi_value k = NULL;\n'), {
+    ALLOWED: [
+      ...RECEIVE_LISTS.ALLOWED,
+      { key: 'native/consumer.c:record_to_js:kafka_consumer_ConsumerRecord_key_err#1', reason: "a mock's key" },
+    ],
+  });
+  assert.equal(r.status, 0, r.text);
 });
