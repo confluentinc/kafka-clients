@@ -141,18 +141,13 @@ pub(super) fn edits(
     let mut edits = Vec::new();
     for (changelog, body) in changelogs.iter().zip(bodies) {
         let Changelog { release, path, text, unreleased, renamed, .. } = changelog;
+        // An empty section is released too, so every version the package
+        // moves to has its section.
         if body.trim().is_empty() {
-            match agent {
-                Some(_) => bail!(
-                    "{}: no change to release in {}; add an entry by hand, or pass --no-agent",
-                    release.file,
-                    release.version
-                ),
-                None => {
-                    println!("   {} has no [Unreleased] section to release: it is not changed", release.file);
-                    continue;
-                },
-            }
+            println!(
+                "⚠️  {}: [{}] has no entries: add them by hand if the release has changes",
+                release.file, release.version
+            );
         }
         let released = match renamed {
             Some(section) => rename_section(text, section, unreleased.as_ref(), &release.version, &date, &body),
@@ -271,7 +266,8 @@ fn prompt(root: &Path, changelogs: &[Changelog], ranges: &[(String, String)], da
          their own.\n\n\
          Rules for the section you return:\n\
          - Keep every line the section has exactly as it is, in its order: add entries, never reword, \
-         reorder, merge or remove one.\n\
+         reorder, merge or remove one. Keep each entry whole and in its subsection: add a new entry only \
+         between two entries, and a new subsection only between two subsections.\n\
          - Put a new entry under the `###` subsection it belongs to, reusing the subsections the changelog \
          already uses (read the file); add a subsection only when none fits.\n\
          - Write entries as the changelog writes them: a `- ` bullet, lines wrapped at 79 columns with a \
@@ -348,19 +344,87 @@ fn answer_body(answer: &str, file: &str) -> anyhow::Result<String> {
     Ok(after[..stop].trim_matches('\n').to_string())
 }
 
-/// Refuses a section that drops, rewords or reorders a line the section had,
-/// or that holds a heading above `###`.
+/// Refuses a section that holds a heading above `###`, or that does not keep
+/// every entry the section had: each entry whole (its first line and its
+/// continuation lines, nothing added between them), in the subsection it was
+/// in, in its order, and the subsections in their order. New entries and
+/// subsections may go only between whole entries and subsections.
 fn check_body(old: &str, new: &str) -> anyhow::Result<()> {
     if let Some(heading) = new.lines().find(|line| line.starts_with("# ") || line.starts_with("## ")) {
         bail!("the section holds the heading `{heading}`");
     }
-    let mut kept = new.lines().map(str::trim_end);
-    for line in old.lines().map(str::trim_end).filter(|line| !line.is_empty()) {
-        if !kept.any(|new_line| new_line == line) {
-            bail!("the section no longer has the line `{line}` where it was");
+    let new_groups = entry_groups(new);
+    for (at, (heading, _)) in new_groups.iter().enumerate() {
+        if heading.is_some() && new_groups[..at].iter().any(|(other, _)| other == heading) {
+            bail!("the section has the subsection `{}` twice", heading.unwrap_or_default());
+        }
+    }
+    let mut next_group = 0;
+    for (heading, entries) in entry_groups(old) {
+        let name = heading.unwrap_or("before the first subsection");
+        let Some(at) = new_groups.iter().position(|(other, _)| *other == heading) else {
+            bail!("the section no longer has the subsection `{name}`");
+        };
+        if at < next_group {
+            bail!("the subsection `{name}` moved before one that came before it");
+        }
+        next_group = at + 1;
+        let mut kept = new_groups[at].1.iter();
+        for entry in entries {
+            if !kept.any(|new_entry| *new_entry == entry) {
+                bail!(
+                    "the subsection `{name}` no longer has, whole and where it was, the entry:\n{}",
+                    entry.join("\n")
+                );
+            }
         }
     }
     Ok(())
+}
+
+/// A section body's subsections, the lines before the first `### ` heading
+/// under `None`, each as its entries: an entry is a line at the left margin
+/// and the lines that continue it, indented ones (after a blank line too) and,
+/// for a paragraph that is not a list item, the lines that follow it with no
+/// blank line between. Lines are compared without trailing blanks. A group
+/// with no entry is kept only when it has a heading.
+fn entry_groups(body: &str) -> Vec<(Option<&str>, Vec<Vec<&str>>)> {
+    let is_item = |line: &str| {
+        line.starts_with("- ")
+            || line.starts_with("* ")
+            || line
+                .split_once(". ")
+                .is_some_and(|(n, _)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    };
+    let mut groups: Vec<(Option<&str>, Vec<Vec<&str>>)> = vec![(None, Vec::new())];
+    let mut after_blank = false;
+    for line in body.lines().map(str::trim_end) {
+        if let Some(heading) = line.strip_prefix("### ").map(|_| line) {
+            groups.push((Some(heading), Vec::new()));
+            after_blank = false;
+            continue;
+        }
+        if line.is_empty() {
+            after_blank = true;
+            continue;
+        }
+        let Some((_, entries)) = groups.last_mut() else {
+            continue;
+        };
+        let indented = line.starts_with(' ') || line.starts_with('\t');
+        let continues = match entries.last() {
+            Some(entry) if indented => !entry.is_empty(),
+            Some(entry) => !after_blank && !is_item(line) && !entry.first().is_some_and(|first| is_item(first)),
+            None => false,
+        };
+        match entries.last_mut() {
+            Some(entry) if continues => entry.push(line),
+            _ => entries.push(vec![line]),
+        }
+        after_blank = false;
+    }
+    groups.retain(|(heading, entries)| heading.is_some() || !entries.is_empty());
+    groups
 }
 
 /// The first section of `text` whose heading line `is_heading` accepts, up
@@ -451,7 +515,7 @@ fn rename_section(
     date: &str,
     body: &str,
 ) -> String {
-    let mut section = format!("## [{version}] - {date}\n\n{}\n", body.trim_matches('\n'));
+    let mut section = section_text(version, date, body);
     if renamed.end < text.len() {
         section.push('\n');
     }
@@ -482,8 +546,7 @@ fn previous_version(text: &str) -> Option<String> {
 /// `text` with `unreleased` (or, when there is none, a new section before the
 /// first release) released as `## [<version>] - <date>` holding `body`.
 fn release_section(text: &str, unreleased: Option<&Section>, version: &str, date: &str, body: &str) -> String {
-    let body = body.trim_matches('\n');
-    let mut section = format!("## [{version}] - {date}\n\n{body}\n");
+    let mut section = section_text(version, date, body);
     let (start, end) = match unreleased {
         Some(Section { start, end, .. }) => (*start, *end),
         None => {
@@ -508,6 +571,14 @@ fn release_section(text: &str, unreleased: Option<&Section>, version: &str, date
         _ => "",
     };
     format!("{before}{gap}{section}{}", &text[end..])
+}
+
+/// A released section: its heading and, when it has one, its body.
+fn section_text(version: &str, date: &str, body: &str) -> String {
+    match body.trim_matches('\n') {
+        "" => format!("## [{version}] - {date}\n"),
+        body => format!("## [{version}] - {date}\n\n{body}\n"),
+    }
 }
 
 /// Today's date, `YYYY-MM-DD`, in Pacific Standard Time (UTC-8).
@@ -686,20 +757,70 @@ mod tests {
 
     #[test]
     fn the_agent_may_only_add_lines() {
-        let old = "\n### Common\n\n- One,\n  wrapped.\n\n- Two.\n";
-        check_body(
-            old,
-            "### Common\n\n- One,\n  wrapped.\n- New.\n\n- Two.\n\n### C FFI\n\n- Three.",
-        )
-        .unwrap();
+        let old = "Intro,\non two lines.\n\n### Common\n\n- One,\n  wrapped.\n\n- Two.\n\n### C FFI\n\n- Three.\n";
+        for good in [
+            "Intro,\non two lines.\n\n### Common\n\n- One,\n  wrapped.\n- New.\n\n- Two.\n\n### C FFI\n\n- Three.",
+            // A new subsection between two, or before the first.
+            "Intro,\non two lines.\n\n### New\n\n- New.\n\n### Common\n\n- One,\n  wrapped.\n- Two.\n\n\
+             ### Producer\n\n- New.\n\n### C FFI\n\n- Three.\n- New.",
+        ] {
+            check_body(old, good).unwrap();
+        }
         for bad in [
-            "### Common\n\n- Two.\n- One,\n  wrapped.",
-            "### Common\n\n- One, wrapped.\n- Two.",
-            "### Common\n\n- One,\n  wrapped.",
-            "## [1.1.0]\n\n### Common\n\n- One,\n  wrapped.\n- Two.",
+            // A line or an entry dropped, reworded or reordered.
+            "Intro,\non two lines.\n\n### Common\n\n- Two.\n- One,\n  wrapped.\n\n### C FFI\n\n- Three.",
+            "Intro,\non two lines.\n\n### Common\n\n- One, wrapped.\n- Two.\n\n### C FFI\n\n- Three.",
+            "Intro,\non two lines.\n\n### Common\n\n- One,\n  wrapped.\n\n### C FFI\n\n- Three.",
+            "Intro.\n\n### Common\n\n- One,\n  wrapped.\n- Two.\n\n### C FFI\n\n- Three.",
+            // A new entry between an entry and its continuation.
+            "Intro,\non two lines.\n\n### Common\n\n- One,\n- New,\n  wrapped.\n- Two.\n\n### C FFI\n\n- Three.",
+            "Intro,\n- New.\non two lines.\n\n### Common\n\n- One,\n  wrapped.\n- Two.\n\n### C FFI\n\n- Three.",
+            // A new subsection taking an entry out of its own.
+            "Intro,\non two lines.\n\n### Common\n\n- One,\n  wrapped.\n\n### Producer\n\n- Two.\n\n### C FFI\n\n- Three.",
+            // Subsections reordered, dropped or repeated.
+            "Intro,\non two lines.\n\n### C FFI\n\n- Three.\n\n### Common\n\n- One,\n  wrapped.\n- Two.",
+            "Intro,\non two lines.\n\n### Common\n\n- One,\n  wrapped.\n- Two.\n- Three.",
+            "Intro,\non two lines.\n\n### Common\n\n- One,\n  wrapped.\n- Two.\n\n### C FFI\n\n- Three.\n\n\
+             ### Common\n\n- New.",
+            "## [1.1.0]\n\nIntro,\non two lines.\n\n### Common\n\n- One,\n  wrapped.\n- Two.\n\n### C FFI\n\n- Three.",
         ] {
             assert!(check_body(old, bad).is_err(), "{bad:?}");
         }
         check_body("", "### Common\n\n- New.").unwrap();
+    }
+
+    #[test]
+    fn entries_are_items_with_their_continuations() {
+        assert_eq!(
+            entry_groups(
+                "Intro,\nmore.\n\n- Loose.\n\n### A\n\n- One,\n  two.\n\n  More of one.\n- Two.\n1. Three.\n\n### B\n"
+            ),
+            [
+                (None, vec![vec!["Intro,", "more."], vec!["- Loose."]]),
+                (
+                    Some("### A"),
+                    vec![
+                        vec!["- One,", "  two.", "  More of one."],
+                        vec!["- Two."],
+                        vec!["1. Three."]
+                    ]
+                ),
+                (Some("### B"), vec![]),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_empty_section_is_a_bare_heading() {
+        let text = "# C\n\n## [Unreleased]\n\n## [1.0.0] - 2026-10-30\n\n- Old.\n";
+        assert_eq!(
+            release_section(text, unreleased(text).as_ref(), "1.1.0-rc.1", "2026-11-27", "\n"),
+            "# C\n\n## [1.1.0-rc.1] - 2026-11-27\n\n## [1.0.0] - 2026-10-30\n\n- Old.\n"
+        );
+        let text = "# C\n\n## [1.0.0] - 2026-10-30\n\n- Old.\n";
+        assert_eq!(
+            release_section(text, None, "1.1.0-rc.1", "2026-11-27", ""),
+            "# C\n\n## [1.1.0-rc.1] - 2026-11-27\n\n## [1.0.0] - 2026-10-30\n\n- Old.\n"
+        );
     }
 }
