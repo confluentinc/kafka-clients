@@ -76,7 +76,10 @@ blocks:
             # Installs rustup, which installs the toolchain rust/rust-toolchain.toml pins.
             - ./.semaphore/dependencies.sh
             - export VERSION PYTHON_VERSION="${PYTHON_VERSION:-}" DOTNET_VERSION="${DOTNET_VERSION:-}"
-            - make bump-version
+            # The changelogs' [Unreleased] sections are released as they are:
+            # this machine has no agent to fill in missing entries (run
+            # `make bump-version` locally for that).
+            - make bump-version BUMP_VERSION_FLAGS=--no-agent
             - |
               if git diff --quiet; then
                 echo "Nothing to bump: ${BASE_BRANCH} already has these versions" >&2
