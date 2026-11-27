@@ -709,8 +709,8 @@ listenerTest(
   120000,
 );
 
-/** A listener's error: a KafkaError, and another value. */
-const LISTENER_ERRORS = () => [new KafkaError('the listener failed'), new TypeError('boom')];
+/** A listener's error: a KafkaError, and other values, null included. */
+const LISTENER_ERRORS = () => [new KafkaError('the listener failed'), new TypeError('boom'), null];
 
 listenerTest(
   "a listener's error from poll(): a KafkaError as itself, another value inside KafkaError('User rebalance callback throws an error')",
@@ -788,7 +788,7 @@ listenerTest(
           // value alone, its message the value's toString().
           const middle = fromClose.cause;
           assert.ok(middle instanceof KafkaError);
-          assert.equal(middle.message, 'TypeError: boom');
+          assert.equal(middle.message, String(value));
           assert.equal(middle.cause, value);
         }
       } finally {

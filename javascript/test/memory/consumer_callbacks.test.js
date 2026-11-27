@@ -43,7 +43,7 @@ test("a listener's context lives as the FFI's subscribe docs give it, on a Kafka
         counts.subscribed = live();
         await kc.subscribe({ topics: ['u'], callback: listener() });
         counts.replaced = live();
-        // A failed subscribe keeps the earlier listener.
+        // A failed subscribe keeps the earlier listener, and its own, which the core may hold.
         await kc.subscribe({ topics: [''], callback: listener() }).catch(() => {});
         counts.failed = live();
         // An empty topic list is unsubscribe(): it registers none.
@@ -74,15 +74,93 @@ test("a listener's context lives as the FFI's subscribe docs give it, on a Kafka
   assert.deepEqual(out.counts, {
     subscribed: 1,
     replaced: 1,
-    failed: 1,
-    empty: 1,
-    unsubscribed: 1,
+    failed: 2,
+    empty: 2,
+    unsubscribed: 2,
     withoutListener: 0,
     closed: 0,
     mockKept: 1,
     mockClosed: 1,
     collected: 0,
   });
+  assert.deepEqual(out.leaks, NO_LEAKS);
+});
+
+test("a failed subscribe's listener, which the mock may hold, is kept until a later successful subscribe", () => {
+  const out = probe(`
+    const { MockConsumer, SubscriptionPattern } = require(D + '/consumer');
+    const { TopicPartition } = require(D + '/common');
+    const live = () => { const s = native.consumerStats(); return s.listenersMade - s.listenersFreed; };
+    (async () => {
+      const hold = setInterval(() => {}, 1000);
+      const counts = {};
+      const tp = new TopicPartition({ topic: 't', partition: 0 });
+      await (async () => {
+        // After assign(): the mock registers the listener before it refuses the subscribe.
+        const m = new MockConsumer('earliest');
+        const calls = [];
+        const listener = (name) => ({ onPartitionsRevoked: () => { calls.push(name + ' revoked'); }, onPartitionsAssigned: () => { calls.push(name + ' assigned'); } });
+        await m.assign([tp]);
+        await m.subscribe({ topics: ['t'], callback: listener('L1') }).catch((e) => calls.push(e.name));
+        counts.afterAssign = live();
+        await m.rebalance([]).catch((e) => calls.push(e.name));
+        await m.losePartitions([tp]).catch((e) => calls.push(e.name));
+        await m.unsubscribe();
+        // Topics, then a refused pattern.
+        await m.subscribe({ topics: ['t'], callback: listener('L2') });
+        await m.rebalance([tp]);
+        await m.subscribe({ pattern: new SubscriptionPattern('t.*'), callback: listener('L3') }).catch((e) => calls.push(e.name));
+        counts.afterPattern = live();
+        await m.rebalance([]).catch((e) => calls.push(e.name));
+        await m.losePartitions([tp]).catch((e) => calls.push(e.name));
+        // A later successful subscribe releases them all but its own.
+        await m.unsubscribe();
+        await m.subscribe({ topics: ['t'], callback: listener('L4') });
+        counts.replaced = live();
+        counts.calls = calls;
+        await m.close();
+      })();
+      await settle();
+      counts.collected = live();
+      console.log(JSON.stringify({ counts, leaks: leaks() }));
+      clearInterval(hold);
+    })();
+  `);
+  assert.equal(out.counts.afterAssign, 1);
+  assert.equal(out.counts.afterPattern, 2);
+  assert.equal(out.counts.replaced, 1);
+  assert.equal(out.counts.collected, 0);
+  assert.equal(out.counts.calls[0], 'IllegalStateError');
+  assert.deepEqual(out.leaks, NO_LEAKS);
+});
+
+test('a closed consumer whose listener references it is collected: the listener is held through its handle object', () => {
+  const out = probe(`
+    const { CloseOptions, KafkaConsumer, MockConsumer } = require(D + '/consumer');
+    const { TopicPartition } = require(D + '/common');
+    (async () => {
+      const hold = setInterval(() => {}, 1000);
+      const tp = new TopicPartition({ topic: 't', partition: 0 });
+      await (async () => {
+        for (let i = 0; i < 3; i++) {
+          const m = new MockConsumer('earliest');
+          // consumer-threading.md's pattern: a commit in onPartitionsRevoked.
+          await m.subscribe({ topics: ['t'], callback: { onPartitionsRevoked: async () => { await m.commitSync(); }, onPartitionsAssigned() {} } });
+          await m.rebalance([tp]);
+          await m.rebalance([]);
+          await m.close();
+        }
+        const kc = new KafkaConsumer({ 'bootstrap.servers': '127.0.0.1:1', 'group.id': 'g', 'group.protocol': 'consumer' });
+        await kc.subscribe({ topics: ['t'], callback: { onPartitionsRevoked: () => kc.commitSync(), onPartitionsAssigned() {} } });
+        await kc.close({ option: CloseOptions.timeout({ timeout: 0 }) }).catch(() => {});
+      })();
+      await settle();
+      console.log(JSON.stringify({ stats: native.consumerStats(), leaks: leaks() }));
+      clearInterval(hold);
+    })();
+  `);
+  assert.equal(out.stats.consumersMade, 4);
+  assert.equal(out.stats.consumersFreed, 4);
   assert.deepEqual(out.leaks, NO_LEAKS);
 });
 

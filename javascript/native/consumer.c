@@ -82,19 +82,33 @@ typedef struct {
     Deferred* deferred;                        // the reports waiting for a callback's Promise
     int reports;                               // the listener and commit callback reports not made yet
     int destroyed;                             // the class handle's destroy returned: no report from now on
+    uint32_t held_next;                        // the key of the next function held through the handle object
     CallbackQueue queue;                       // notify hook, tsfn, drain, liveness
     int owners;                                // the handle object, the tsfn and each Deferred
 } Consumer;
+
+// A JS function a context holds through the consumer's handle object, as an
+// element of its `callbacks` object, and reads through a weak reference: a
+// strong native reference is a GC root, so a function that reaches its
+// consumer would keep a closed one alive for good. Through the handle object,
+// the GC collects them together once nothing else reaches either.
+typedef struct {
+    napi_ref ref;                              // weak, NULL for none
+    uint32_t key;
+} Held;
 
 // A rebalance listener's context, the `self_` of its FFI registration: the
 // functions src/ built for its three methods (src/internal/consumer_calls.ts,
 // listenerRuns), null for a missing required one, which the FFI refused.
 // Held by its subscribe until the core answered it, then by the consumer
-// while the core holds it (Consumer.listener), and by each report pending.
+// while the core may hold it (Consumer.listener, with the listeners of the
+// subscribes that failed since, chained by `next`), and by each report
+// pending.
 struct Listener {
     Consumer* c;
-    napi_ref runs[3];                          // onPartitionsRevoked's, onPartitionsAssigned's, onPartitionsLost's
+    Held runs[3];                              // onPartitionsRevoked's, onPartitionsAssigned's, onPartitionsLost's
     int refs;
+    Listener* next;                            // released with this one
 };
 
 // An OffsetCommitCallback's context, the `self_` of its FFI registration: the
@@ -240,11 +254,51 @@ static kafka_consumer_MockConsumer_t* mock_of(napi_env env, Consumer* c) {
 
 // ---- the listeners' and commit callbacks' reports ---------------------------
 
+// The `callbacks` object of the consumer's handle object, made on first use,
+// or NULL when the handle object is gone or being finalized.
+static napi_value held_callbacks(napi_env env, Consumer* c) {
+    napi_value obj = NULL, held = NULL;
+    napi_valuetype type = napi_undefined;
+    if (c->queue.finalizing || c->queue.self_ref == NULL || napi_get_reference_value(env, c->queue.self_ref, &obj) != napi_ok
+        || obj == NULL || napi_get_named_property(env, obj, "callbacks", &held) != napi_ok || napi_typeof(env, held, &type) != napi_ok)
+        return NULL;
+    if (type == napi_object) return held;
+    if (napi_create_object(env, &held) != napi_ok || napi_set_named_property(env, obj, "callbacks", held) != napi_ok) return NULL;
+    return held;
+}
+
+// Holds `fn` through the handle object (Held). 0, or -1 with a JS exception
+// pending.
+static int held_set(napi_env env, Consumer* c, napi_value fn, Held* h) {
+    napi_value held = held_callbacks(env, c);
+    h->key = c->held_next++;
+    if (held == NULL || napi_set_element(env, held, h->key, fn) != napi_ok || napi_create_reference(env, fn, 0, &h->ref) != napi_ok) {
+        h->ref = NULL;
+        js_throw_last_napi_error(env, "holding a callback");
+        return -1;
+    }
+    return 0;
+}
+
+// Lets go of a held function; a no-op for none.
+static void held_drop(napi_env env, Consumer* c, Held* h) {
+    if (h->ref == NULL) return;
+    napi_value held = held_callbacks(env, c);
+    if (held != NULL) {
+        bool deleted = false;
+        napi_delete_element(env, held, h->key, &deleted);
+    }
+    delete_ref(env, &h->ref);
+}
+
 static void listener_release(napi_env env, Listener* l) {
-    if (l == NULL || --l->refs != 0) return;
-    for (int i = 0; i < 3; i++) delete_ref(env, &l->runs[i]);
-    free(l);
-    atomic_fetch_add(&stat_listeners_freed, 1);
+    while (l != NULL && --l->refs == 0) {
+        Listener* next = l->next;
+        for (int i = 0; i < 3; i++) held_drop(env, l->c, &l->runs[i]);
+        free(l);
+        atomic_fetch_add(&stat_listeners_freed, 1);
+        l = next;
+    }
 }
 
 // Frees a commit callback's context: once it reported, or at the destroy.
@@ -462,7 +516,7 @@ static void listener_invoke(Listener* l, int method, const kafka_List_t* partiti
         injected_errors_sweep(env, &c->injected);
         char* thrown = NULL;
         napi_value pairs = tp_list_to_js(env, partitions);
-        napi_value result = pairs != NULL ? call_ref(env, l->runs[method], 1, &pairs, &thrown) : NULL;
+        napi_value result = pairs != NULL ? call_ref(env, l->runs[method].ref, 1, &pairs, &thrown) : NULL;
         if (pairs == NULL) js_warn_thrown(env);
         if (callback_answer(env, c, result, thrown, callback_id, l, NULL, &report) == 1) return;
     }
@@ -505,16 +559,20 @@ static Listener* listener_new(napi_env env, Consumer* c, napi_value runs, kafka_
     atomic_fetch_add(&stat_listeners_made, 1);
     for (uint32_t i = 0; i < 3; i++) {
         napi_value fn;
-        if (napi_get_element(env, runs, i, &fn) != napi_ok || (is_function(env, fn) && napi_create_reference(env, fn, 1, &l->runs[i]) != napi_ok)) {
+        if (napi_get_element(env, runs, i, &fn) != napi_ok) {
             listener_release(env, l);
             js_throw_last_napi_error(env, "reading the listener");
+            return NULL;
+        }
+        if (is_function(env, fn) && held_set(env, c, fn, &l->runs[i]) != 0) {
+            listener_release(env, l);
             return NULL;
         }
     }
     kafka_common_Error_t* ffi_err = NULL;
     kafka_common_Error_t* err = FFI_SET(*handle, kafka_consumer_ConsumerRebalanceListener_new_err(
-                                                     l, l->runs[0] != NULL ? listener_on_revoked : NULL,
-                                                     l->runs[1] != NULL ? listener_on_assigned : NULL, listener_on_lost, &ffi_err));
+                                                     l, l->runs[0].ref != NULL ? listener_on_revoked : NULL,
+                                                     l->runs[1].ref != NULL ? listener_on_assigned : NULL, listener_on_lost, &ffi_err));
     if (err != NULL) {
         listener_release(env, l);
         error_throw_owned(env, err);
@@ -1010,16 +1068,31 @@ static void strings_free(char** strings, uint32_t count) {
 
 // The subscribe completion: a success the core registered replaces the
 // consumer's listener with the subscribe's (none for a subscribe without
-// one); a failure, and a KafkaConsumer's empty topic list (unsubscribe()),
-// keep the consumer's and let go of the subscribe's, as the FFI's subscribe
-// docs give their lifetimes.
+// one); a KafkaConsumer's empty topic list (unsubscribe()) and a call refused
+// before the core ran keep the consumer's and let go of the subscribe's; a
+// failure the core answered keeps both, as the FFI's subscribe docs give
+// their lifetimes.
 static void subscribe_on_complete(kafka_common_Error_t* error, void* opaque) {
     error_stat_owned(error);
     SubscribeCtx* ctx = (SubscribeCtx*)opaque;
     Consumer* c = ctx->c;
     napi_env env = c->env;
+    int refused = 0;
+    if (error != NULL) {
+        kafka_common_Error_t* ffi_err = NULL;
+        int code = 0;
+        error_warn(env, !c->queue.finalizing, FFI_SET(code, (int)kafka_common_Error__enum_err(error, &ffi_err)));
+        refused = code == kafka_common_Error_LOCAL_CONCURRENT_MODIFICATION || code == kafka_common_Error_LOCAL_NULL_POINTER;
+    }
     if (error == NULL && ctx->registers) {
         listener_release(env, c->listener);
+        c->listener = ctx->listener;
+        ctx->listener = NULL;
+    } else if (error != NULL && !refused && ctx->listener != NULL) {
+        // The core may hold a failed subscribe's listener: the mock registers
+        // it before the check that fails, as Java's SubscriptionState does.
+        // It stays, with the consumer's, until a later successful subscribe.
+        ctx->listener->next = c->listener;
         c->listener = ctx->listener;
         ctx->listener = NULL;
     }

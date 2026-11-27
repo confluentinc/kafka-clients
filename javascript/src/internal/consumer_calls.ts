@@ -25,7 +25,7 @@ import { JavaForms } from './args';
 import { ConsumerRebalanceListenerDefaults } from './consumer_rebalance_listener_defaults';
 import { debug } from './debug';
 import { durationToMillis, isDurationOrNull } from './duration';
-import { carriedCause } from './errors';
+import { CARRIED_NULL, carriedCause } from './errors';
 import { liveMetrics } from './live_metrics';
 import { partitionInfoOf } from './metadata';
 import {
@@ -286,12 +286,25 @@ function valueText(value: unknown): string {
  * @returns the error Java's consumer throws
  */
 function unwrapLayer(error: unknown): unknown {
+  if (error === CARRIED_NULL) return null;
   const carried = carriedCause(error);
   if (carried === undefined) return error;
-  const value = (error as Error).cause;
+  const layer = error as Error;
+  const value = layer.cause === CARRIED_NULL ? null : layer.cause;
   if (value instanceof KafkaError) return value;
-  if ((error as Error).message === `LocalCallbackError: ${carried}`) return create(KafkaError, valueText(value), value);
-  return error;
+  if (layer.message === `LocalCallbackError: ${carried}`) return create(KafkaError, valueText(value), value);
+  if (value !== layer.cause) setCause(layer, value);
+  return layer;
+}
+
+/**
+ * Sets the `cause` of an error the core reported, before anything sees it.
+ *
+ * @param error - the error
+ * @param cause - its cause
+ */
+function setCause(error: Error, cause: unknown): void {
+  Object.defineProperty(error, 'cause', { value: cause, writable: true, enumerable: false, configurable: true });
 }
 
 /**
@@ -307,10 +320,13 @@ function unwrapLayer(error: unknown): unknown {
  * @returns the error to reject with
  */
 function callbackError(error: unknown, atClose: boolean): unknown {
-  if (!atClose) return unwrapLayer(error);
-  if (!(error instanceof Error) || carriedCause(error) !== undefined) return error;
+  if (!atClose || !(error instanceof Error)) return unwrapLayer(error);
+  if (carriedCause(error) !== undefined) {
+    if (error.cause === CARRIED_NULL) setCause(error, null);
+    return error;
+  }
   const cause = unwrapLayer(error.cause);
-  if (cause !== error.cause) Object.defineProperty(error, 'cause', { value: cause, writable: true, enumerable: false, configurable: true });
+  if (cause !== error.cause) setCause(error, cause);
   return error;
 }
 

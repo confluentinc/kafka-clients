@@ -89,6 +89,13 @@ export function carriedCause(error: unknown): string | undefined {
   return typeof error === 'object' && error !== null ? carriedCauses.get(error) : undefined;
 }
 
+/**
+ * What `fromNative` gives for a carried `null`, which a callback may throw or
+ * reject with: a caller testing for no error reads `null` as none, so the
+ * consumer puts the `null` back when it rejects (src/internal/consumer_calls.ts).
+ */
+export const CARRIED_NULL: unique symbol = Symbol('a callback threw null');
+
 let classes: ErrorClass[] | null = null;
 let roots: ErrorClass[] | null = null;
 let byId: Map<number, ErrorClass> | null = null;
@@ -167,7 +174,7 @@ export function errorFfiId(error: unknown): number | undefined {
  */
 export function fromNative(fields: unknown): unknown {
   if (fields instanceof Error || fields === null || typeof fields !== 'object') return fields;
-  if (isCarried(fields)) return fields.carried;
+  if (isCarried(fields)) return fields.carried === null ? CARRIED_NULL : fields.carried;
   const reported = fields as NativeError;
   const cause = reported.cause === undefined || reported.cause === null ? undefined : fromNative(reported.cause);
   if (reported.code === LOCAL_NULL_POINTER) {
