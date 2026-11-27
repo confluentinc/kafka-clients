@@ -20,18 +20,15 @@
 // Java blocks and closes its mock, which keeps Node running until close().
 // The messages are Java's, the core's where they differ, each said so.
 //
-// Of Java's 13 tests, 10 are ported here: testSimpleMock,
+// All of Java's 13 tests are ported here: testSimpleMock,
 // testConsumerRecordsIsEmptyWhenReturningNoRecords,
 // shouldNotClearRecordsForPausedPartitions, endOffsetsShouldBeIdempotent,
-// testDurationBasedOffsetReset, testRe2JPatternSubscription,
-// shouldReturnMaxPollRecords, testLosePartitionsRemovesFromAssignment,
-// testLosePartitionsThrowsIfNotAssigned and
-// testLosePartitionsClearsOnlyLostRecords.
-//
-// Not here yet, for want of the rebalance listeners: testRebalanceListener,
-// testLosePartitionsCallsOnPartitionsLost and testLosePartitionsThenRebalance,
-// which register one, and testRe2JPatternSubscription's assertion on
-// subscribe(pattern, null), the form taking a listener.
+// testDurationBasedOffsetReset, testRebalanceListener,
+// testRe2JPatternSubscription, shouldReturnMaxPollRecords,
+// testLosePartitionsCallsOnPartitionsLost,
+// testLosePartitionsRemovesFromAssignment,
+// testLosePartitionsThrowsIfNotAssigned,
+// testLosePartitionsClearsOnlyLostRecords and testLosePartitionsThenRebalance.
 
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
@@ -227,6 +224,11 @@ test('testRe2JPatternSubscription', async () => {
   });
 
   const pattern = new SubscriptionPattern('t.*');
+  await assert.rejects(consumer.subscribe({ pattern, callback: /** @type {never} */ (null) }), {
+    constructor: IllegalArgumentError,
+    message: 'RebalanceListener cannot be null',
+  });
+
   await consumer.subscribe(pattern);
   assert.equal(consumer.subscription().size, 0);
   // Check that the subscription to pattern was successfully applied in the mock consumer (using a different
@@ -235,6 +237,52 @@ test('testRe2JPatternSubscription', async () => {
     constructor: IllegalStateError,
     message: 'Subscription to topics, partitions and pattern are mutually exclusive',
   });
+});
+
+test('testRebalanceListener', async () => {
+  /** @type {TopicPartition[]} */
+  let revoked = [];
+  /** @type {TopicPartition[]} */
+  let assigned = [];
+  const consumerRebalanceListener = {
+    /** @param {{ partitions: import('@confluentinc/kafka-javascript/common').TopicPartitionSet }} options */
+    onPartitionsRevoked({ partitions }) {
+      revoked = [...partitions];
+    },
+    /** @param {{ partitions: import('@confluentinc/kafka-javascript/common').TopicPartitionSet }} options */
+    onPartitionsAssigned({ partitions }) {
+      if (partitions.size() === 0) {
+        return;
+      }
+      assigned = [...partitions];
+    },
+  };
+  const consumer = newMock();
+
+  await consumer.subscribe({ topics: new Set(['test']), callback: consumerRebalanceListener });
+  assert.equal((await consumer.poll(0)).count(), 0);
+  const topicPartitionList = [TP0, TP1];
+  await consumer.rebalance(topicPartitionList);
+
+  assert.equal(revoked.length, 0);
+  assert.equal(assigned.length, 2);
+  assert.ok(assigned.some((tp) => tp.equals(topicPartitionList[0])));
+  assert.ok(assigned.some((tp) => tp.equals(topicPartitionList[1])));
+
+  await consumer.rebalance([]);
+  assert.equal(assigned.length, 2);
+  assert.ok(revoked.some((tp) => tp.equals(topicPartitionList[0])));
+  assert.ok(revoked.some((tp) => tp.equals(topicPartitionList[1])));
+
+  await consumer.rebalance([topicPartitionList[0]]);
+  assert.equal(assigned.length, 1);
+  assert.ok(assigned.some((tp) => tp.equals(topicPartitionList[0])));
+
+  await consumer.rebalance([topicPartitionList[1]]);
+  assert.equal(assigned.length, 1);
+  assert.ok(assigned.some((tp) => tp.equals(topicPartitionList[1])));
+  assert.equal(revoked.length, 1);
+  assert.ok(revoked.some((tp) => tp.equals(topicPartitionList[0])));
 });
 
 test('shouldReturnMaxPollRecords', async () => {
@@ -259,6 +307,36 @@ test('shouldReturnMaxPollRecords', async () => {
 
   records = await consumer.poll(1);
   assert.ok(records.isEmpty());
+});
+
+test('testLosePartitionsCallsOnPartitionsLost', async () => {
+  const tp0 = TP0;
+  const tp1 = TP1;
+  const assigned = [tp0, tp1];
+
+  /** @type {TopicPartition[]} */
+  const lost = [];
+  /** @type {TopicPartition[]} */
+  const revoked = [];
+  const consumer = newMock();
+  await consumer.subscribe({
+    topics: ['test'],
+    callback: {
+      onPartitionsRevoked({ partitions }) {
+        revoked.push(...partitions);
+      },
+      onPartitionsAssigned() {},
+      onPartitionsLost({ partitions }) {
+        lost.push(...partitions);
+      },
+    },
+  });
+
+  await consumer.rebalance(assigned);
+  await consumer.losePartitions([tp0]);
+
+  assert.deepEqual(lost.map(String), [String(tp0)]);
+  assert.equal(revoked.length, 0);
 });
 
 test('testLosePartitionsRemovesFromAssignment', async () => {
@@ -308,6 +386,34 @@ test('testLosePartitionsClearsOnlyLostRecords', async () => {
 });
 
 // ---- the constructor --------------------------------------------------------
+
+test('testLosePartitionsThenRebalance', async () => {
+  const tp0 = TP0;
+  const tp1 = TP1;
+  const tp2 = new TopicPartition({ topic: 'test', partition: 2 });
+
+  /** @type {TopicPartition[]} */
+  let assigned = [];
+  const consumer = newMock();
+  await consumer.subscribe({
+    topics: ['test'],
+    callback: {
+      onPartitionsRevoked() {},
+      onPartitionsAssigned({ partitions }) {
+        assigned.push(...partitions);
+      },
+    },
+  });
+
+  await consumer.rebalance([tp0, tp1]);
+  assigned = [];
+
+  await consumer.losePartitions([tp0]);
+  await consumer.rebalance([tp1, tp2]);
+
+  assert.deepEqual(assigned.map(String), [String(tp2)]);
+  assert.deepEqual([...consumer.assignment()].map(String).sort(), [String(tp1), String(tp2)]);
+});
 
 test("the constructor takes Java's strategies, with the core's messages for the others", async () => {
   for (const strategy of ['earliest', 'latest', 'none', 'by_duration:PT1H']) {
@@ -1007,4 +1113,201 @@ test('a mock keeps Node running until close(), emits no preview warning, and eve
   assert.equal(closed.status, 0, closed.stderr);
   assert.equal(closed.stdout, `closed true\nafter: ${CLOSED}\nclosed again\n`);
   assert.ok(!closed.stderr.includes('ExperimentalWarning'), closed.stderr);
+});
+
+// ---- the listeners and the commit callbacks ---------------------------------
+
+test("a listener's forms on the mock, and its Promise, which rebalance() and losePartitions() await", async () => {
+  const consumer = newMock();
+  /** @type {string[]} */
+  const seen = [];
+  /** @type {() => void} */
+  let release = () => {};
+  const gate = new Promise((resolve) => (release = () => resolve(undefined)));
+  await consumer.subscribe({
+    pattern: new SubscriptionPattern('te.*'),
+    callback: {
+      onPartitionsRevoked() {},
+      async onPartitionsAssigned({ partitions }) {
+        await gate;
+        seen.push(`assigned ${[...partitions].map(String)}`);
+      },
+    },
+  });
+  const rebalanced = consumer.rebalance([TP0]);
+  let settled = false;
+  void rebalanced.then(() => (settled = true));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(settled, false);
+  release();
+  await rebalanced;
+  assert.deepEqual(seen, ['assigned test-0']);
+  // A listener without onPartitionsLost: Java's default calls onPartitionsRevoked.
+  await consumer.unsubscribe();
+  await consumer.subscribe({
+    topics: ['test'],
+    callback: {
+      onPartitionsRevoked: ({ partitions }) =>
+        new Promise((resolve) => setImmediate(() => resolve(seen.push(`revoked ${[...partitions].map(String)}`)))),
+      onPartitionsAssigned() {},
+    },
+  });
+  await consumer.rebalance([TP0, TP1]);
+  await consumer.losePartitions([TP1]);
+  assert.deepEqual(seen, ['assigned test-0', 'revoked test-1']);
+  // A missing required method, a null listener and one that is no object.
+  await assert.rejects(consumer.subscribe({ topics: ['test'], callback: /** @type {never} */ ({ onPartitionsAssigned() {} }) }), {
+    constructor: TypeError,
+    message: 'on_partitions_revoked must not be null',
+  });
+  await assert.rejects(consumer.subscribe({ topics: ['test'], callback: /** @type {never} */ (null) }), {
+    constructor: IllegalArgumentError,
+    message: 'RebalanceListener cannot be null',
+  });
+  await assert.rejects(consumer.subscribe({ topics: ['test'], callback: /** @type {never} */ (() => {}) }), {
+    constructor: TypeError,
+    message: 'callback must be a ConsumerRebalanceListener',
+  });
+});
+
+test("a listener's error comes back from rebalance() and losePartitions() as itself, as Java's mock calls the listener directly", async () => {
+  for (const value of [new KafkaError('the listener failed'), new TypeError('boom'), 'a string']) {
+    const consumer = newMock();
+    await consumer.subscribe({
+      topics: ['test'],
+      callback: {
+        onPartitionsRevoked() {},
+        onPartitionsAssigned({ partitions }) {
+          if (partitions.size() > 0) throw value;
+        },
+        onPartitionsLost: () => Promise.reject(value),
+      },
+    });
+    await assert.rejects(consumer.rebalance([TP0]), (error) => error === value);
+    await assert.rejects(consumer.losePartitions([TP0]), (error) => error === value);
+  }
+});
+
+test("inside a mock's listener, the handle's commits, currentLag and sync reads work, its other calls are the core's UnsupportedOperationError, and the rest meet the single-owner flag", async () => {
+  const consumer = newMock();
+  await consumer.subscribe({ topics: ['test'], callback: { onPartitionsRevoked() {}, onPartitionsAssigned() {} } });
+  await consumer.rebalance([TP0]);
+  consumer.updateBeginningOffsets(offsets([[TP0, 0n]]));
+  consumer.updateEndOffsets(offsets([[TP0, 4n]]));
+  consumer.addRecord(record(0, 0));
+  await consumer.poll(0);
+  /** @type {Record<string, unknown>} */
+  const out = {};
+  const unsupported = 'ConsumerHandle async operations are not supported on a MockConsumer handle; drive the MockConsumer directly.';
+  await consumer.subscribe({
+    topics: ['test'],
+    callback: {
+      onPartitionsRevoked() {},
+      async onPartitionsAssigned({ partitions }) {
+        if (partitions.size() === 0) return;
+        /**
+         * @param {string} name
+         * @param {() => unknown} call
+         */
+        const attempt = async (name, call) => {
+          try {
+            const value = await call();
+            out[name] = value === undefined ? 'ok' : value;
+          } catch (error) {
+            out[name] = error instanceof Error ? `${error.constructor.name}: ${error.message}` : error;
+          }
+        };
+        const committed = new TopicPartitionMap([[TP0, new OffsetAndMetadata(1)]]);
+        await attempt('commitSync', () => consumer.commitSync());
+        await attempt('commitSync(offsets)', () => consumer.commitSync(committed));
+        await attempt('commitAsync', () => consumer.commitAsync());
+        await attempt('currentLag', () => consumer.currentLag(TP0));
+        await attempt('position', () => consumer.position(TP0));
+        await attempt('seek', () => consumer.seek({ partition: TP0, offset: 0 }));
+        await attempt('committed', () => consumer.committed(new Set([TP0])));
+        await attempt('pause', () => consumer.pause([TP0]));
+        await attempt('poll', () => consumer.poll(0));
+        await attempt('assign', () => consumer.assign([TP0]));
+        await attempt('subscription', () => consumer.subscription().size);
+        // The handle's sync forms answer.
+        await attempt('assignment', () => [...consumer.assignment()].map(String).join());
+        await attempt('groupMetadata', () => consumer.groupMetadata().groupId());
+      },
+    },
+  });
+  await consumer.rebalance([TP0, TP1]);
+  assert.deepEqual(out, {
+    commitSync: 'ok',
+    'commitSync(offsets)': 'ok',
+    commitAsync: 'ok',
+    currentLag: 3n,
+    position: `UnsupportedOperationError: ${unsupported}`,
+    seek: `UnsupportedOperationError: ${unsupported}`,
+    committed: `UnsupportedOperationError: ${unsupported}`,
+    pause: `UnsupportedOperationError: ${unsupported}`,
+    poll: `ConcurrentModificationError: ${CONCURRENT}`,
+    assign: `ConcurrentModificationError: ${CONCURRENT}`,
+    subscription: `ConcurrentModificationError: ${CONCURRENT}`,
+    assignment: 'test-0,test-1',
+    groupMetadata: 'dummy.group.id',
+  });
+});
+
+test("a mock keeps its listener after close(): rebalance() still calls it, as Java's mock does", async () => {
+  const consumer = newMock();
+  /** @type {string[]} */
+  const seen = [];
+  await consumer.subscribe({
+    topics: ['test'],
+    callback: {
+      onPartitionsRevoked() {},
+      onPartitionsAssigned({ partitions }) {
+        seen.push([...partitions].map(String).join());
+      },
+    },
+  });
+  await consumer.close();
+  await consumer.rebalance([TP0]).catch(() => {});
+  assert.deepEqual(seen, ['test-0']);
+});
+
+test("a mock's commit callback gets the map committed, an empty one included, and its error comes back from commitAsync() as itself", async () => {
+  const consumer = newMock();
+  await consumer.assign([TP0]);
+  /** @type {Array<[string | null, string | null]>} */
+  const seen = [];
+  /** @param {{ offsets: TopicPartitionMap<OffsetAndMetadata> | null, exception: Error | null }} answer */
+  const callback = ({ offsets: committed, exception }) => {
+    seen.push([committed === null ? null : String(committed), exception === null ? null : exception.message]);
+  };
+  await consumer.commitAsync({ offsets: new TopicPartitionMap([[TP0, new OffsetAndMetadata(3)]]), callback });
+  await consumer.commitAsync({ offsets: new TopicPartitionMap(), callback });
+  // Java's mock commits allConsumed(), empty here.
+  await consumer.commitAsync(callback);
+  await consumer.commitAsync({ callback: async (answer) => callback(answer) });
+  assert.deepEqual(seen, [
+    ["{test-0=OffsetAndMetadata{offset=3, leaderEpoch=null, metadata=''}}", null],
+    ['{}', null],
+    ['{}', null],
+    ['{}', null],
+  ]);
+  assert.equal((await consumer.committed(new Set([TP0]))).get(TP0)?.offset, 3n);
+  // Java's commitAsync() is commitAsync(null); with offsets the FFI refuses it.
+  await consumer.commitAsync(null);
+  await assert.rejects(consumer.commitAsync({ offsets: new TopicPartitionMap(), callback: /** @type {never} */ (null) }), {
+    constructor: TypeError,
+    message: 'callback must not be null',
+  });
+  for (const value of [new KafkaError('the callback failed'), new TypeError('boom')]) {
+    await assert.rejects(
+      consumer.commitAsync({
+        offsets: new TopicPartitionMap([[TP0, new OffsetAndMetadata(4)]]),
+        callback: () => {
+          throw value;
+        },
+      }),
+      (error) => error === value,
+    );
+    await assert.rejects(consumer.commitAsync({ callback: () => Promise.reject(value) }), (error) => error === value);
+  }
 });
