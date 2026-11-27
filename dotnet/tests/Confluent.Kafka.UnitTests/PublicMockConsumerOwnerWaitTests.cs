@@ -262,7 +262,7 @@ public sealed class PublicMockConsumerOwnerWaitTests
             Task rebalance;
             bool waited;
             bool woken;
-            using (new ConsumerPumpStall(consumer))
+            using (ConsumerPumpStall stall = new ConsumerPumpStall(consumer))
             {
                 subscribed = consumer.Subscribe(new[] { Topic });
                 Thread other = StartThread(() =>
@@ -273,6 +273,9 @@ public sealed class PublicMockConsumerOwnerWaitTests
                 });
                 SpinUntilWaitingOrEnded(other, () => Volatile.Read(ref state[0]) == 1, () => Volatile.Read(ref state[1]) == 1);
                 waited = Volatile.Read(ref state[1]) == 0;
+                // The core mock holds its single-owner flag until the subscribe has queued its completion; a rebalance
+                // that reaches it before then is refused with -2, so wait for the completion to be queued.
+                stall.WaitUntilSignaled();
                 rebalance = consumer.Rebalance(new[] { s_tp0 });
                 woken = other.Join(s_bound);
             }

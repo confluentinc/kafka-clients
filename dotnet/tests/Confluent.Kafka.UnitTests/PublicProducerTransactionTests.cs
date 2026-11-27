@@ -238,8 +238,8 @@ public sealed class PublicProducerTransactionTests
         try
         {
             using CancellationTokenSource cancel = new CancellationTokenSource();
+            // The call submits before it returns, so the cancel ends a wait on an init the core is running.
             Task init = producer.InitTransactions(cancel.Token);
-            await Task.Delay(100);
             cancel.Cancel();
 
             Exception? canceled = await CatchAsync(() => init);
@@ -263,8 +263,8 @@ public sealed class PublicProducerTransactionTests
         try
         {
             using CancellationTokenSource cancel = new CancellationTokenSource();
+            // The call submits before it returns, so the cancel ends a wait on an init the core is running.
             Task init = producer.InitTransactions(cancel.Token);
-            await Task.Delay(100);
             cancel.Cancel();
             Assert.IsAssignableFrom<OperationCanceledException>(await CatchAsync(() => init));
 
@@ -844,15 +844,32 @@ public sealed class PublicProducerTransactionTests
     {
         const int LongMaxBlockMs = 1000;
         object producer = await Transactional(flavor, LongMaxBlockMs);
-        Task call = flavor == SyncFlavor
-            ? Task.Run(() => ((KafkaProducer<byte[], byte[]>)producer).InitTransactions())
-            : ((AsyncKafkaProducer<byte[], byte[]>)producer).InitTransactions();
-        await Task.Delay(100);
-        Assert.False(call.IsCompleted, "InitTransactions ended before the producer was disposed");
+        object? outcome;
+        if (producer is KafkaProducer<byte[], byte[]> sync)
+        {
+            // The call and the dispose each run on a thread of their own, not a pool thread, which a busy runner can
+            // start late: the call after the dispose, or the dispose after the call timed out. The call waits only
+            // after its submit, and AssertBlocked then gives the core's task 100 ms to start the init.
+            BlockingCall call = BlockingCall.StartWait(() => sync.InitTransactions());
+            call.AssertBlocked();
+            Assert.Same(BlockingCall.Returned, BlockingCall.RunWait(sync.Dispose));
+            outcome = call.Join();
+        }
+        else
+        {
+            // The async form only queues the init, and the core's task checks that the producer is open when it
+            // starts it, so a close queued at once can come first. The dispose waits 100 ms, as AssertBlocked does
+            // for the sync call, on this thread rather than in a continuation a busy pool can run after the init
+            // timed out.
+            Task call = ((AsyncKafkaProducer<byte[], byte[]>)producer).InitTransactions();
+            Assert.False(
+                ((IAsyncResult)call).AsyncWaitHandle.WaitOne(BlockingCall.StillBlocked),
+                $"InitTransactions ended before the producer was disposed: {call.Exception}");
+            await Teardown(producer);
+            outcome = await CatchAsync(() => call);
+        }
 
-        await Teardown(producer);
-        KafkaTimeoutException error = Assert.IsType<KafkaTimeoutException>(await CatchAsync(() => call));
-
+        KafkaTimeoutException error = Assert.IsType<KafkaTimeoutException>(outcome);
         Assert.Equal(7, error.Code);
         Assert.Equal($"Timeout expired after {LongMaxBlockMs}ms while awaiting InitProducerId. {InitTimeout}", error.Message);
     }
