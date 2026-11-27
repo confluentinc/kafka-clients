@@ -14,7 +14,7 @@ commits, the review and the gate. P5 is **done** (2026-11-27): its phase plan, `
 (2026-11-27): its phase plan, `P6.md`, was approved with its choices 2(a), done as the merge `34f8de73b` of
 PR #312's `c0adc2cf5`, 3(a) and 4(b), and its "Result" section has the commits, the review and the gate. The
 user accepted its deviation 1b and left 1a, the float's signaling NaN, open for their team. P7's phase plan,
-`P7.md`, waits for the user's approval (decision 18).
+`P7.md`, was approved on 2026-11-28 with its choices 2(a), 3(a) and 4(b), and P7 is in progress.
 
 - Branch `dev/javascript-consumer-bindings`, on PR #312's head `f62d5fec9` (`origin/dev/javascript-producer-bindings`),
   an ancestor of the branch, and since 2026-11-27 merged with its newer `c0adc2cf5` (`34f8de73b`, P6.md, choice
