@@ -91,7 +91,7 @@ rule rather than repeat it. "Line N" is line N of `javascript/CLAUDE.md` at `8a2
   (`ED A0 80`), where Java writes one for the three. `FloatSerializer` and `FloatDeserializer` cannot keep a
   signaling NaN *(deviation: a JavaScript number turns a float's signaling NaN quiet, `0x7f800001` into `0x7fc00001`.
   Why: a number is a double. Goes when: never)*: `floatSerdeShouldPreserveNaNValues` checks the payload and that the
-  value stays a NaN.
+  value stays a NaN. **(waiting for the user's team's decision)**: the code stays as built until they decide.
 
 ## The batch and its count
 
