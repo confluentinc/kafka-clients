@@ -81,10 +81,16 @@ internal sealed class JavaApi
                         JavaMember.Parse(JavaMemberKind.Method, fields[1], fields[2] == "static", fields[3], fields[2] == "default"));
                     break;
                 case "field":
-                    types[fields[1]].Members.Add(JavaMember.Named(JavaMemberKind.Field, fields[1], fields[3], fields[2] == "static"));
+                    string[] modifiers = fields[2].Split(' ');
+                    types[fields[1]].Members.Add(JavaMember.Named(
+                        JavaMemberKind.Field,
+                        fields[1],
+                        fields[3],
+                        modifiers[0] == "static",
+                        isFinal: Array.IndexOf(modifiers, "final") >= 0));
                     break;
                 case "constant":
-                    types[fields[1]].Members.Add(JavaMember.Named(JavaMemberKind.Constant, fields[1], fields[2], true));
+                    types[fields[1]].Members.Add(JavaMember.Named(JavaMemberKind.Constant, fields[1], fields[2], true, isFinal: true));
                     break;
             }
         }
@@ -234,6 +240,7 @@ internal sealed class JavaMember
         string declaringType,
         string name,
         bool isStatic,
+        bool isFinal,
         bool isDefault,
         string[] parameterTypes,
         string[] parameterNames)
@@ -242,6 +249,7 @@ internal sealed class JavaMember
         DeclaringType = declaringType;
         Name = name;
         IsStatic = isStatic;
+        IsFinal = isFinal;
         IsDefault = isDefault;
         ParameterTypes = parameterTypes;
         ParameterNames = parameterNames;
@@ -254,6 +262,9 @@ internal sealed class JavaMember
     internal string Name { get; }
 
     internal bool IsStatic { get; }
+
+    /// <summary>Whether a field or constant is <c>final</c>; one that is not can be assigned from outside its class.</summary>
+    internal bool IsFinal { get; }
 
     /// <summary>Whether it is a <c>default</c> method of an interface.</summary>
     internal bool IsDefault { get; }
@@ -268,8 +279,8 @@ internal sealed class JavaMember
         ? DeclaringType + "#" + Name + "(" + string.Join(",", ParameterTypes) + ")"
         : DeclaringType + "#" + Name;
 
-    internal static JavaMember Named(JavaMemberKind kind, string declaringType, string name, bool isStatic) =>
-        new JavaMember(kind, declaringType, name, isStatic, false, Array.Empty<string>(), Array.Empty<string>());
+    internal static JavaMember Named(JavaMemberKind kind, string declaringType, string name, bool isStatic, bool isFinal) =>
+        new JavaMember(kind, declaringType, name, isStatic, isFinal, false, Array.Empty<string>(), Array.Empty<string>());
 
     /// <summary>Parses a signature as the list writes it: <c>name(Type a, Type b)</c>.</summary>
     internal static JavaMember Parse(JavaMemberKind kind, string declaringType, bool isStatic, string signature, bool isDefault = false)
@@ -286,6 +297,6 @@ internal sealed class JavaMember
             names[i] = parameters[i].Substring(space + 1);
         }
 
-        return new JavaMember(kind, declaringType, signature.Substring(0, open), isStatic, isDefault, types, names);
+        return new JavaMember(kind, declaringType, signature.Substring(0, open), isStatic, false, isDefault, types, names);
     }
 }

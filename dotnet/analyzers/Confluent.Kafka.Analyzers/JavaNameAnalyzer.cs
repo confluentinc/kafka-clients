@@ -440,12 +440,30 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
             HashSet<string> javaFields = new HashSet<string>(
                 visible.Where(m => m.Kind == JavaMemberKind.Field || m.Kind == JavaMemberKind.Constant).Select(m => m.Name),
                 StringComparer.Ordinal);
+            Dictionary<string, JavaMember> fieldSetters = new Dictionary<string, JavaMember>(StringComparer.Ordinal);
+            foreach (JavaMember field in visible.Where(IsAssignable))
+            {
+                fieldSetters[Pascal(field.Name)] = field;
+            }
 
-            CheckNames(type, companions, java, jdk, javaMethods, javaFields, findings);
+            CheckNames(type, companions, java, jdk, javaMethods, javaFields, fieldSetters, findings);
             CheckOverloads(type, companions, replaceable, java, chain, jdk, required, javaMethods, findings);
 
             foreach (JavaMember field in required.Where(m => m.Kind == JavaMemberKind.Field || m.Kind == JavaMemberKind.Constant))
             {
+                if (IsAssignable(field))
+                {
+                    if (!netChain.Any(t => t.GetMembers(Pascal(field.Name)).OfType<IMethodSymbol>().Any(m => IsFieldSetter(m, field))))
+                    {
+                        findings.Add(new Finding(
+                            "missing " + typeId + " " + field.Marker,
+                            "has no setter " + SetterShape(field) + " for Java's public field " + field.Marker,
+                            typeLocation));
+                    }
+
+                    continue;
+                }
+
                 // A Java enum's static field is a static readonly field of its Methods class, as an extension block holds none.
                 bool onCompanion = type.TypeKind == TypeKind.Enum
                     && field.Kind == JavaMemberKind.Field
@@ -541,6 +559,7 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
             HashSet<string> jdk,
             Dictionary<string, string> javaMethods,
             HashSet<string> javaFields,
+            Dictionary<string, JavaMember> fieldSetters,
             List<Finding> findings)
         {
             // A companion class is not checked as a type of its own: every public member of it is the type's.
@@ -575,14 +594,34 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
                     case IMethodSymbol method when method.MethodKind == MethodKind.Ordinary
                         || method.MethodKind == MethodKind.UserDefinedOperator
                         || method.MethodKind == MethodKind.Conversion:
-                        if (!javaMethods.ContainsKey(method.Name))
+                        if (javaMethods.ContainsKey(method.Name))
                         {
-                            findings.Add(new Finding(
-                                "unmatched " + DocId(method),
-                                "Java's " + java.SimpleName + " has no method of this name",
-                                LocationOf(method)));
+                            break;
                         }
 
+                        if (fieldSetters.TryGetValue(method.Name, out JavaMember? assigned))
+                        {
+                            if (!IsFieldSetter(method, assigned))
+                            {
+                                findings.Add(new Finding(
+                                    "unmatched " + DocId(method),
+                                    "Java's " + java.SimpleName + "." + assigned.Name + " is a field: its setter is "
+                                        + SetterShape(assigned) + ", with one parameter named after the field",
+                                    LocationOf(method)));
+                            }
+
+                            break;
+                        }
+
+                        // A field's setter has no Set prefix (IsAssignable).
+                        findings.Add(new Finding(
+                            "unmatched " + DocId(method),
+                            method.Name.StartsWith("Set", StringComparison.Ordinal)
+                                && fieldSetters.TryGetValue(method.Name.Substring(3), out JavaMember? prefixed)
+                                ? "Java's " + java.SimpleName + "." + prefixed.Name + " is a field: its setter is "
+                                    + SetterShape(prefixed) + ", without Set"
+                                : "Java's " + java.SimpleName + " has no method of this name",
+                            LocationOf(method)));
                         break;
                     case IPropertySymbol property:
                         if (javaMethods.TryGetValue(property.Name, out string? javaName))
@@ -1277,6 +1316,20 @@ public sealed class JavaNameAnalyzer : DiagnosticAnalyzer
 
         private static Finding Missing(string typeId, string javaMarker, Location location) =>
             new Finding("missing " + typeId + " " + javaMarker, "has no counterpart of Java's " + javaMarker, location);
+
+        // A Java field that is not final can be assigned from outside its class. Its .NET form is a setter named after the
+        // field, as Java names a setter after its field (timeoutMs(Integer)): one parameter, named after the field.
+        private static bool IsAssignable(JavaMember member) => member.Kind == JavaMemberKind.Field && !member.IsFinal;
+
+        private static bool IsFieldSetter(IMethodSymbol method, JavaMember field) =>
+            method.MethodKind == MethodKind.Ordinary
+            && method.DeclaredAccessibility == Accessibility.Public
+            && method.Name == Pascal(field.Name)
+            && method.IsStatic == field.IsStatic
+            && method.Parameters.Length == 1
+            && method.Parameters[0].Name == field.Name;
+
+        private static string SetterShape(JavaMember field) => Pascal(field.Name) + "(" + field.Name + ")";
 
         // The members .NET itself requires once a type takes the .NET form of a Java supertype: the overrides of
         // object and Exception, and the members of the .NET interfaces that stand for Iterable, Closeable or

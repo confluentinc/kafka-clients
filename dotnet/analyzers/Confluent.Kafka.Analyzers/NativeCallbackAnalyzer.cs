@@ -418,10 +418,11 @@ public sealed class NativeCallbackAnalyzer : DiagnosticAnalyzer
         private static IOperation[] Statements(IBlockOperation block) =>
             block.Operations.Where(operation => operation is not IEmptyOperation and not IReturnOperation { ReturnedValue: null }).ToArray();
 
-        // A constant or a type's default value, through any conversion that runs no user code.
+        // A constant or a type's default value, through conversions that cannot throw: an unboxing or a checked
+        // conversion of a constant can, as (int)(object)0L does.
         private static bool IsConstant(IOperation value)
         {
-            while (value is IConversionOperation { Conversion.IsUserDefined: false } conversion)
+            while (value is IConversionOperation conversion && ConversionCannotThrow(conversion))
             {
                 value = conversion.Operand;
             }
@@ -488,7 +489,9 @@ public sealed class NativeCallbackAnalyzer : DiagnosticAnalyzer
             }
 
             Conversion kind = conversion.GetConversion();
-            if (kind.IsUserDefined)
+            // A conversion from dynamic runs the runtime binder, which throws RuntimeBinderException when the value does
+            // not convert, implicit as it is: (dynamic)0L to int.
+            if (kind.IsUserDefined || kind.IsDynamic)
             {
                 return false;
             }

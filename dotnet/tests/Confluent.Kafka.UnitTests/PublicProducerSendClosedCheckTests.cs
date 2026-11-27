@@ -197,8 +197,8 @@ public sealed class PublicProducerSendClosedCheckTests
         using IDisposable mockDisposal = TestTimeout.Disposal(mock);
         using IDisposable asyncMockDisposal = TestTimeout.Disposal(asyncMock);
         KafkaException injected = new KafkaException("injected");
-        mock.SetSendException(injected);
-        asyncMock.SetSendException(injected);
+        mock.SendException(injected);
+        asyncMock.SendException(injected);
 
         Assert.Same(injected, Assert.Throws<KafkaException>(() => mock.Send(null!)));
         Assert.Same(injected, Assert.Throws<KafkaException>(() => mock.Send(null!, null!)));

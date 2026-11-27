@@ -73,7 +73,15 @@ public sealed class EnumMemberValueAnalyzer : DiagnosticAnalyzer
         string name = field.ContainingType.ToDisplayString(s_enumName) + "." + field.Name;
         List<(EnumMemberDeclarationSyntax Syntax, string Name, decimal Number)> members =
             Members(context, declaration);
-        decimal own = members.First(other => other.Syntax == member).Number;
+        // A member whose number the compiler cannot compute (CS0543, or a member before it that does not compile)
+        // has no constant value; the compiler's error is the finding.
+        int at = members.FindIndex(other => other.Syntax == member);
+        if (at < 0)
+        {
+            return;
+        }
+
+        decimal own = members[at].Number;
         string? owner = Owner(members, member, own);
         if (owner is null)
         {
