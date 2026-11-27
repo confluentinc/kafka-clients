@@ -489,7 +489,9 @@ public sealed class NativeCallbackAnalyzer : DiagnosticAnalyzer
             }
 
             Conversion kind = conversion.GetConversion();
-            if (kind.IsUserDefined)
+            // A conversion from dynamic runs the runtime binder, which throws RuntimeBinderException when the value does
+            // not convert, implicit as it is: (dynamic)0L to int.
+            if (kind.IsUserDefined || kind.IsDynamic)
             {
                 return false;
             }
