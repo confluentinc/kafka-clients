@@ -6,7 +6,7 @@ are documented in this file.
 Before GA the public API is not stable, and an interface may change even in a
 minor release.
 
-## [4.4.0-beta.1.dev.1] - 2026-11-27
+## [4.4.0-beta.0.dev.1] - 2026-11-27
 
 ### Security
 
@@ -41,9 +41,9 @@ minor release.
 
 ### Producer
 
-- **Breaking:** `MockProducer` and `AsyncMockProducer` take their injected
-  errors through setters named after Java's public fields (`SendException`,
-  `FlushException`, `CloseException`, ...), without the `Set` prefix.
+- `MockProducer` and `AsyncMockProducer` take their injected errors through
+  setters named after Java's public fields (`SendException`, `FlushException`,
+  `CloseException`, ...), without the `Set` prefix.
 - **Breaking:** the mock producers' optional `autoComplete` parameter is gone:
   they have a two-argument constructor, and a three-argument one that takes
   `autoComplete` first, in Java's order (`new MockProducer<K, V>(autoComplete,
