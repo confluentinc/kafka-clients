@@ -286,6 +286,15 @@ const CONSUME_DEADLINE: Duration = Duration::from_secs(30);
 /// rather than a deadline: too short and the test passes vacuously.
 const NEGATIVE_POLL_BUDGET: Duration = Duration::from_secs(8);
 
+/// How long `test_fencing_on_transaction_expiration` waits for the coordinator
+/// to list the expired transaction in COMPLETE_ABORT. The abort's marker write
+/// waits for every in-sync replica of the partition for up to the broker's
+/// `request.timeout.ms` (30 s) before the coordinator sends it again, and on a
+/// loaded CI host a starved follower stays in the ISR for up to
+/// `replica.lag.time.max.ms` (30 s). 60 s fits one such attempt plus its retry;
+/// the wait still ends as soon as the abort completes.
+const EXPIRED_TRANSACTION_ABORT_WAIT: Duration = Duration::from_secs(60);
+
 fn cluster_config() -> ClusterConfig {
     // Two partitions, matching the `PlaintextConsumer*` suites, so the pooled
     // container is shared with them.
@@ -2322,7 +2331,7 @@ async fn fencing_on_transaction_expiration<F: ProducerBackendFactory>(ctx: &mut 
     // timeout the panic gives the state the coordinator listed last, or the
     // listing's error.
     let admin = txn_test_admin(ctx);
-    test_utils::retry_on_error_with_timeout(Duration::from_millis(test_utils::DEFAULT_MAX_WAIT_MS), || {
+    test_utils::retry_on_error_with_timeout(EXPIRED_TRANSACTION_ABORT_WAIT, || {
         let listing = admin.list_transactions().all();
         let txn_id = txn_id.clone();
         async move {
