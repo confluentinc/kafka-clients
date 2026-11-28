@@ -13,8 +13,9 @@ commits, the review and the gate. P5 is **done** (2026-11-27): its phase plan, `
 "For the user" list: `commitAsync({ offsets, callback })`'s `callback` stays non-null. P6 is **done**
 (2026-11-27): its phase plan, `P6.md`, was approved with its choices 2(a), done as the merge `34f8de73b` of
 PR #312's `c0adc2cf5`, 3(a) and 4(b), and its "Result" section has the commits, the review and the gate. The
-user accepted its deviation 1b and left 1a, the float's signaling NaN, open for their team. P7's phase plan,
-`P7.md`, was approved on 2026-11-28 with its choices 2(a), 3(a) and 4(b), and P7 is in progress.
+user accepted its deviation 1b and left 1a, the float's signaling NaN, open for their team. P7 is **done**
+(2026-11-28): its phase plan, `P7.md`, was approved with its choices 2(a), 3(a) and 4(b), and its "Result" section
+has the commits, the review and the gate. Its review withdrew ask 17 (§6).
 
 - Branch `dev/javascript-consumer-bindings`, on PR #312's head `f62d5fec9` (`origin/dev/javascript-producer-bindings`),
   an ancestor of the branch, and since 2026-11-27 merged with its newer `c0adc2cf5` (`34f8de73b`, P6.md, choice
@@ -497,7 +498,7 @@ FFI has them:
 2. `registerMetricForSubscription` and `unregisterMetricFromSubscription`, and the mock's `addedMetrics()`.
 3. The mock's `schedulePollTask(Runnable)`, `setClientInstanceId`, `disableTelemetry` and `injectTimeoutException`.
 
-Fifteen FFI and core behaviours the binding lives with for now:
+Fourteen FFI and core behaviours the binding lives with for now, ask 17 having been withdrawn:
 
 4. A negative `CloseOptions` timeout is read as zero (`duration_ms()` in `rust/src/ffi/consumer/close_options.rs`),
    where Java throws "The timeout cannot be negative." It's already a listed deviation (line 81). Ask: Java's check
@@ -576,12 +577,14 @@ Fifteen FFI and core behaviours the binding lives with for now:
     `rust/src/consumer/internals/async_kafka_consumer.rs`). Java's synchronized mock is reentrant and takes them all.
     Ask: let the mock's handle reach the mock for every operation, and the mock's own calls pass while its callback
     runs.
-17. Found in P5's review, by a broker probe: after `unsubscribe()` has run `onPartitionsRevoked`, the core's
-    `close()` runs `onPartitionsLost` for the same partitions. Java's `AbstractMembershipManager#leaveGroup` clears
-    the assignment snapshot (`notifyAssignmentChange(Collections.emptySet())`), so
-    `AsyncKafkaConsumer#runRebalanceCallbacksOnClose` finds nothing to revoke and calls no listener. The binding
-    passes it through; no test pins it yet (P7's broker tests can). Ask: clear the assignment snapshot when the member
-    leaves, as Java does.
+17. **Withdrawn in P7's review (156-1).** Found in P5's review, by a broker probe: after `unsubscribe()` has run
+    `onPartitionsRevoked`, the core's `close()` runs `onPartitionsLost` for the same partitions. Java's `close()`
+    does the same. `AbstractMembershipManager#clearAssignmentAndLeaveGroup` calls `subscriptions.unsubscribe()`
+    before `clearAssignment()`, which notifies the change only while `hasAutoAssignedPartitions()`, so the
+    assignment snapshot keeps the partitions. `AsyncKafkaConsumer#runRebalanceCallbacksOnClose`, with the member
+    epoch at -1, then calls `invokePartitionsLost`, and Java's own client, run three times, did so. P5's review had
+    read `leaveGroup` without that order. `test/integration/consumer.test.js` pins the behaviour on all three
+    listeners.
 18. Found while planning P6: the copy a client makes of its config handle (`copy_for_client` in
     `rust/src/producer/producer_config.rs` and `rust/src/consumer/consumer_config.rs`, which
     `kafka_producer_KafkaProducer_new` and `kafka_consumer_KafkaConsumer_new` build the client from) parses the
@@ -704,9 +707,11 @@ still parked. Row 6 was settled by PR #312's conventions on 2026-11-25 (line 155
 6. The mock keeps each added key and value until it's destroyed (4.6). Fine for a test double, and documented.
 7. Building, freezing and wrapping records costs time per record (Q9, Q24). Measured in P7, not acted on.
 8. A listener that never settles holds the rebalance and the call that delivered it, with no timeout (line 150).
-9. Two future improvements the consumer reaches aren't built (producer DECISIONS 3): a closed consumer collected
-   with an answer still queued runs that answer during garbage collection (Q49), and a call inside a callback,
-   after its first `await`, that waits for that callback hangs (Q46). The docs list both.
+9. Two future improvements the consumer could reach aren't built (producer DECISIONS 3). The first is Q49, a
+   closed consumer collected with an answer still queued. P7's review found the consumer can't meet it: each
+   waiting call keeps the consumer reachable until its answer has run, and the README says so. The second is Q46,
+   a call inside a callback that, after the callback's first `await`, waits for that callback and hangs. The docs
+   list it as an anti-pattern.
 10. The rows still parked in the conventions (decisions 4 to 6) may be decided against the recommendation, which
     reshapes P2 or P6.
 11. Python's split of `KafkaConsumerTest` is only a starting point. Python's mock is pure Python, while this one
