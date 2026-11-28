@@ -949,11 +949,11 @@ try {
   once the callback has. A callback that awaits that call, or anything that
   happens only after it (the poll loop's next round, a Promise the loop
   resolves), never settles, and neither does the call.
-- **Await every call you make on a consumer before you drop it**, the calls
-  made after `close()` included: a closed consumer that is garbage collected
-  while one of its calls still has an answer queued runs that answer's
-  JavaScript during the collection, and may hold the thread for up to 5
-  seconds while the client stops.
+- **Await every call you make on a consumer**: a call that isn't awaited
+  keeps the consumer busy, and the next call is refused (Commits, above). A
+  consumer with a call still waiting stays reachable until that call's answer
+  has run, a call made after `close()` included, so garbage collection never
+  frees it under a pending call and runs no JavaScript.
 
 ### MockConsumer
 
