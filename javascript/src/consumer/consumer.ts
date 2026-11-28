@@ -236,6 +236,14 @@ export interface Consumer<K = Buffer, V = Buffer> {
    * `InvalidRegularExpression` will be eventually thrown on a call to `poll`
    * following this call to subscribe.
    *
+   * This is a short-hand for `subscribe({ pattern, callback })`, which uses a
+   * no-op listener. If you need the ability to seek to particular offsets,
+   * you should prefer `subscribe({ pattern, callback })`, since group
+   * rebalances will cause partition offsets to be reset. You should also
+   * provide your own listener if you are doing your own offset management
+   * since the listener gives you an opportunity to commit offsets before a
+   * rebalance finishes.
+   *
    * @param options - the pattern to subscribe to
    * @returns settling once the subscription is set
    * @throws `IllegalArgumentError` rejects with it if pattern is null or empty
@@ -1192,6 +1200,8 @@ export interface Consumer<K = Buffer, V = Buffer> {
    *   `auto.create.topics.enable` and the consumer config
    *   `allow.auto.create.topics` are `true`, this method may return an empty
    *   list even though the topic is being auto-created in the background.
+   *   Callers should not assume the topic does not exist based solely on an
+   *   empty result.
    * @throws `WakeupError` rejects with it if `wakeup()` is called before or
    *   while this function is called
    * @throws `AuthenticationError` rejects with it if authentication fails
