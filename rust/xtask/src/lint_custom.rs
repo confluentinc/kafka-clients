@@ -4064,13 +4064,19 @@ impl Rule for ConsumerHandleSurface {
 /// translated yet, and each joins [`Self::SHARED`] when it is. `handle` hands
 /// out the `Send + Sync` handle for callbacks and other tasks.
 ///
-/// Scope: the public traits named `Consumer` and `DynConsumer`. Either missing
-/// is a finding, so the rule cannot silently check nothing.
+/// The share consumer follows the same rule (`share-consumer.md` §1): Java's
+/// `ShareConsumerImpl` guards every method with `acquireAndEnsureOpen()` or
+/// `acquire()` except `metrics()`, `wakeup()` and the three KIP-714 methods,
+/// so `ShareConsumer` / `DynShareConsumer` share [`Self::SHARED`].
+///
+/// Scope: the public traits named `Consumer`, `DynConsumer`, `ShareConsumer`
+/// and `DynShareConsumer`. Any missing is a finding, so the rule cannot
+/// silently check nothing.
 struct ConsumerReceiver;
 
 impl ConsumerReceiver {
     /// The traits whose methods are checked.
-    const TRAITS: [&'static str; 2] = ["Consumer", "DynConsumer"];
+    const TRAITS: [&'static str; 4] = ["Consumer", "DynConsumer", "ShareConsumer", "DynShareConsumer"];
 
     /// The methods that take `&self`: the translated methods Java leaves
     /// outside `acquireAndEnsureOpen()`, and the Rust-only `handle`. When
@@ -4138,7 +4144,8 @@ impl Rule for ConsumerReceiver {
 
     fn hint(&self) -> &'static str {
         "   The consumer is single-threaded, as Java's `acquireAndEnsureOpen()` makes it:
-   every `Consumer` / `DynConsumer` method Java guards takes `&mut self`, so the
+   every `Consumer` / `DynConsumer` / `ShareConsumer` / `DynShareConsumer` method
+   Java guards takes `&mut self`, so the
    compiler rules out two overlapping calls and a getter can later mutate state
    without a breaking change. A method takes `&self` only when Java leaves it
    unguarded (`wakeup`, `metrics`; `client_instance_id`,
@@ -6365,10 +6372,20 @@ mod consumer_receiver_tests {
                 fn assignment(&mut self) -> Vec<i32>;
                 fn wakeup(&self);
             }
+            pub trait ShareConsumer {
+                fn subscription(&mut self) -> Vec<String>;
+                fn wakeup(&self);
+                fn metrics(&self) -> Vec<i32>;
+                fn handle(&self) -> i32;
+            }
+            pub trait DynShareConsumer {
+                fn acknowledge_with_record(&mut self, offset: i64);
+                fn wakeup(&self);
+            }
             "#,
         );
         assert!(findings.is_empty(), "{findings:#?}");
-        assert_eq!(checked, 7);
+        assert_eq!(checked, 13);
     }
 
     #[test]
@@ -6386,6 +6403,14 @@ mod consumer_receiver_tests {
                 fn wakeup(&mut self);
                 fn build() -> Self where Self: Sized;
             }
+            pub trait ShareConsumer {
+                fn acquisition_lock_timeout_ms(&self) -> Option<i32>;
+                fn wakeup(&self);
+            }
+            pub trait DynShareConsumer {
+                fn subscription(&mut self) -> Vec<String>;
+                fn handle(&mut self) -> i32;
+            }
             "#,
         );
         let expected = [
@@ -6394,6 +6419,8 @@ mod consumer_receiver_tests {
             "`DynConsumer::paused` takes `&self`; it must take `&mut self`",
             "`DynConsumer::wakeup` takes `&mut self`; it must take `&self`",
             "`DynConsumer::build` takes `no receiver`; it must take `&mut self`",
+            "`ShareConsumer::acquisition_lock_timeout_ms` takes `&self`; it must take `&mut self`",
+            "`DynShareConsumer::handle` takes `&mut self`; it must take `&self`",
         ];
         for e in expected {
             assert!(findings.iter().any(|f| f.contains(e)), "missing `{e}` in {findings:#?}");
@@ -6416,7 +6443,11 @@ mod consumer_receiver_tests {
         );
         assert_eq!(
             findings,
-            vec!["no public trait `DynConsumer`; the rule checks its method receivers".to_string()]
+            vec![
+                "no public trait `DynConsumer`; the rule checks its method receivers".to_string(),
+                "no public trait `ShareConsumer`; the rule checks its method receivers".to_string(),
+                "no public trait `DynShareConsumer`; the rule checks its method receivers".to_string(),
+            ]
         );
     }
 }

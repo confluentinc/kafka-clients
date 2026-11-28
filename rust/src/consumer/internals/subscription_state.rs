@@ -35,6 +35,7 @@ use crate::common::requests::OffsetsForLeaderEpochResponse;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
+use indexmap::IndexMap;
 use log::{debug, info};
 use regex::Regex;
 
@@ -628,6 +629,14 @@ pub(crate) struct SubscriptionState {
     /// Monotonically-increasing id incremented after every assignment
     /// change. Wrapping addition matches Java's `int` overflow semantics.
     assignment_id: u32,
+    /// Test-only record of every [`Self::mark_pending_revocation`] call's
+    /// partitions (each sorted by topic, then partition), in call order. The
+    /// stand-in for the Java tests' Mockito
+    /// `verify(subscriptionState, times(n)).markPendingRevocation(set)`:
+    /// the pending flag itself is idempotent, so a real `SubscriptionState`
+    /// cannot show how often it was set.
+    #[cfg(test)]
+    pending_revocation_marks: Vec<Vec<TopicPartition>>,
 }
 
 impl SubscriptionState {
@@ -660,7 +669,22 @@ impl SubscriptionState {
             default_reset_strategy,
             rebalance_listener: None,
             assignment_id: 0,
+            #[cfg(test)]
+            pending_revocation_marks: Vec::new(),
         }
+    }
+
+    /// Test-only: the partitions of every [`Self::mark_pending_revocation`]
+    /// call so far, in call order (see the field).
+    #[cfg(test)]
+    pub(crate) fn pending_revocation_marks_for_test(&self) -> &[Vec<TopicPartition>] {
+        &self.pending_revocation_marks
+    }
+
+    /// Test-only: forget the recorded [`Self::mark_pending_revocation`] calls.
+    #[cfg(test)]
+    pub(crate) fn clear_pending_revocation_marks_for_test(&mut self) {
+        self.pending_revocation_marks.clear();
     }
 
     /// Monotonically-increasing id incremented after every assignment
@@ -829,7 +853,9 @@ impl SubscriptionState {
             ));
         }
 
-        let mut assigned_partition_states: HashMap<TopicPartition, TopicPartitionState> = HashMap::new();
+        // Java's `LinkedHashMap`: `PartitionStates#set` keeps the caller's
+        // order (translation-checklist R5).
+        let mut assigned_partition_states: IndexMap<TopicPartition, TopicPartitionState> = IndexMap::new();
         for tp in assignments {
             // Mirror Java: reuse existing state for retained partitions,
             // construct fresh for new. Critical for tests that re-assign a
@@ -1559,6 +1585,12 @@ impl SubscriptionState {
     /// Translates Java's `markPendingRevocation(Set<TopicPartition>)`.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.SubscriptionState#markPendingRevocation")]
     pub(crate) fn mark_pending_revocation(&mut self, tps: &[TopicPartition]) -> Result<(), Error> {
+        #[cfg(test)]
+        {
+            let mut marked = tps.to_vec();
+            marked.sort_by(|a, b| a.topic().cmp(b.topic()).then(a.partition().cmp(&b.partition())));
+            self.pending_revocation_marks.push(marked);
+        }
         for tp in tps {
             self.assigned_state_mut(tp)?.mark_pending_revocation();
         }
@@ -2233,6 +2265,29 @@ mod tests {
         let mut state = new_state();
         state.assign_from_user(HashSet::from([tp_test_0(), tp_test_1()])).unwrap();
         assert_assigned_partition_is_fetchable(&mut state);
+    }
+
+    /// Rust-only: `assign_from_subscribed` keeps the caller's order, as Java's
+    /// `SubscriptionState#assignFromSubscribed` does with its `LinkedHashMap`
+    /// (grouped by topic, `PartitionStates#set`). The assignment is redone on
+    /// fresh states so that a randomly ordered map would show.
+    #[test]
+    fn test_assign_from_subscribed_keeps_the_assignment_order() {
+        let tp = |topic: &str, partition: i32| TopicPartition::new(topic.to_string(), partition);
+        let assignment = [tp(TOPIC, 2), tp("other", 1), tp(TOPIC, 0), tp(TOPIC, 1), tp("other", 0)];
+        let expected = vec![tp(TOPIC, 2), tp(TOPIC, 0), tp(TOPIC, 1), tp("other", 1), tp("other", 0)];
+        for _ in 0..20 {
+            let mut state = new_state();
+            state
+                .subscribe_with_topics(HashSet::from([TOPIC.to_string(), "other".to_string()]), listener())
+                .unwrap();
+            state.assign_from_subscribed(&assignment).unwrap();
+            assert_eq!(expected, state.assigned_partitions_list());
+            for partition in &assignment {
+                state.seek(partition, 0).unwrap();
+            }
+            assert_eq!(expected, state.fetchable_partitions(|_| true));
+        }
     }
 
     /// Translated from `testIsFetchableOnAutoAssignment`.
@@ -3620,5 +3675,63 @@ mod tests {
         assert!(state.has_valid_position(&tp_test_0()));
         assert!(!state.awaiting_validation(&tp_test_0()).unwrap());
         assert!(!state.is_offset_reset_needed(&tp_test_0()).unwrap());
+    }
+
+    // ── Share consumer (KIP-932) members ──
+    //
+    // Rust-only: Java's `SubscriptionStateTest` has no share case.
+
+    /// `subscribeToShareGroup`: the AUTO_TOPICS_SHARE type with no rebalance
+    /// listener, `true` only when the subscription changes, and the share
+    /// branches of `hasAutoAssignedPartitions` and `prettyString`.
+    #[test]
+    fn subscribe_to_share_group_sets_the_share_subscription() {
+        let mut state = SubscriptionState::new(AutoOffsetResetStrategy::LATEST);
+        assert!(state.subscribe_to_share_group(HashSet::from(["t".to_string()])).unwrap());
+        assert!(!state.subscribe_to_share_group(HashSet::from(["t".to_string()])).unwrap());
+        assert!(state.subscribe_to_share_group(HashSet::from(["u".to_string()])).unwrap());
+        assert_eq!(HashSet::from(["u".to_string()]), state.subscription());
+        assert!(state.rebalance_listener().is_none());
+        assert!(state.has_auto_assigned_partitions());
+        assert_eq!("Subscribe to Share Group(u)", state.pretty_string());
+    }
+
+    /// `subscribeToShareGroup` after a manual assignment throws Java's
+    /// `IllegalStateException` (`setSubscriptionType`).
+    #[test]
+    fn subscribe_to_share_group_rejects_another_subscription_type() {
+        let mut state = SubscriptionState::new(AutoOffsetResetStrategy::LATEST);
+        state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
+        let err = state
+            .subscribe_to_share_group(HashSet::from(["t".to_string()]))
+            .expect_err("mutually exclusive");
+        assert!(matches!(err, Error::LocalIllegalState(_)), "{err:?}");
+        assert_eq!(
+            "Subscription to topics, partitions and pattern are mutually exclusive",
+            err.message()
+        );
+    }
+
+    /// `fetchablePartitions` / `hasFetchablePartitions` skip
+    /// `isFetchableAndSubscribed` for AUTO_TOPICS_SHARE: a share assignment is
+    /// fetchable without a position, where a regular subscription's is not.
+    #[test]
+    fn share_assignment_is_fetchable_without_a_position() {
+        let tp = TopicPartition::new("t".to_string(), 0);
+        let mut share = SubscriptionState::new(AutoOffsetResetStrategy::LATEST);
+        share.subscribe_to_share_group(HashSet::from(["t".to_string()])).unwrap();
+        share.assign_from_subscribed(std::slice::from_ref(&tp)).unwrap();
+        assert_eq!(vec![tp.clone()], share.fetchable_partitions(|_| true));
+        assert!(share.has_fetchable_partitions(|_| true));
+        assert!(share.fetchable_partitions(|_| false).is_empty(), "the predicate still applies");
+
+        let mut consumer = SubscriptionState::new(AutoOffsetResetStrategy::LATEST);
+        consumer.subscribe_with_topics(HashSet::from(["t".to_string()]), None).unwrap();
+        consumer.assign_from_subscribed(std::slice::from_ref(&tp)).unwrap();
+        assert!(
+            consumer.fetchable_partitions(|_| true).is_empty(),
+            "a subscription needs a position"
+        );
+        assert!(!consumer.has_fetchable_partitions(|_| true));
     }
 }

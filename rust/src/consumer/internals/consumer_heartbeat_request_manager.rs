@@ -23,11 +23,9 @@
 
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::Ordering;
-
-use tokio::sync::mpsc;
 
 use crate::ConsumerGroupHeartbeatRequestData;
+#[cfg(test)]
 use crate::common::Error;
 use crate::common::Uuid;
 use crate::common::errors::UnsupportedVersionError;
@@ -37,7 +35,6 @@ use crate::common::requests::ConcreteResponse;
 use crate::common::requests::ConsumerGroupHeartbeatResponse;
 use crate::common::requests::consumer_group_heartbeat_request;
 use crate::consumer::ConsumerConfig;
-use crate::consumer::internals::events::BackgroundEvent;
 use crate::consumer::internals::events::BackgroundEventHandler;
 use crate::consumer_group_heartbeat_request_data::TopicPartitions as RequestTopicPartitions;
 
@@ -47,43 +44,8 @@ use super::LocalAssignment;
 use super::MemberState;
 use super::RequestManager;
 use super::SubscriptionState;
-use super::{AbstractHeartbeatRequestManager, HeartbeatErrorAction, HeartbeatFailureAction};
+use super::{AbstractHeartbeatRequestManager, HeartbeatErrorAction, HeartbeatRequestManagerHooks};
 use super::{PollResult, UnsentRequest};
-
-/// Envelope for routing a `ConsumerGroupHeartbeatResponse` (or its
-/// transport-level failure) from the spawned response forwarder back
-/// to the heartbeat manager's next `poll(now)` call.
-///
-/// Mirrors the Java `AbstractHeartbeatRequestManager#makeHeartbeatRequest(boolean)`
-/// `whenComplete((response, exception) -> { onResponse / onFailure })`
-/// dispatch, but
-/// defers the state-update to the next bg-task `poll()` cycle. The
-/// rationale (per Phase 12.5 PLAN §"2. consumer_heartbeat_request_manager"
-/// "Structural decision"): the success path calls
-/// `membership_manager.abstract_mm.on_heartbeat_success(...)`, and the membership
-/// manager owns its own `Arc<Mutex<...>>`. Channel-back ensures no
-/// heartbeat-side guard is held when the cross-RM call fires
-/// (consumer-threading.md §16).
-pub(crate) enum PendingHeartbeatCompletion {
-    /// Broker returned a `ConsumerGroupHeartbeatResponse`. The forwarder
-    /// captures the response body and the completion time; the drain
-    /// applies success/error classification on `&mut self` inside the
-    /// next `poll(now)`.
-    Response {
-        response: ConsumerGroupHeartbeatResponse,
-        completion_time_ms: i64,
-        /// `ClientResponse.requestLatencyMs()` — recorded into the heartbeat
-        /// metrics sensor (`recordRequestLatency`) when the drain applies it.
-        /// Java records this in the `whenComplete` lambda whenever a response
-        /// arrives, regardless of the response's error code
-        /// (`AbstractHeartbeatRequestManager#makeHeartbeatRequest(boolean)`).
-        request_latency_ms: i64,
-    },
-    /// Transport-level failure (network error, in-flight cancellation,
-    /// type mismatch on the response body). The drain calls
-    /// `inner.on_failure(...)` and `membership_manager.on_heartbeat_failure(retriable)`.
-    Failure { error: Error, completion_time_ms: i64 },
-}
 
 /// Tracks which fields were sent on the most recent heartbeat. Java's
 /// `HeartbeatState.SentFields` private inner class. We omit fields only
@@ -269,35 +231,9 @@ fn build_topic_partitions_list(partitions: &std::collections::HashMap<Uuid, Vec<
 /// Java: `ConsumerHeartbeatRequestManager extends AbstractHeartbeatRequestManager<ConsumerGroupHeartbeatResponse>`.
 #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager")]
 pub(crate) struct ConsumerHeartbeatRequestManager {
-    inner: AbstractHeartbeatRequestManager,
+    inner: AbstractHeartbeatRequestManager<ConsumerGroupHeartbeatResponse>,
     membership_manager: Arc<ConsumerMembershipManager>,
     heartbeat_state: HeartbeatState,
-    /// Cloned into each spawned response forwarder so the forwarder
-    /// can route the heartbeat response back through `poll(now)`'s
-    /// drain step. See [`PendingHeartbeatCompletion`] for the
-    /// rationale (channel-back avoids §16 violations on the
-    /// `membership_manager` cross-call).
-    pending_completion_tx: mpsc::UnboundedSender<PendingHeartbeatCompletion>,
-    /// Drained by [`Self::drain_pending_completions`] at the top of
-    /// every `poll(now)` call. Held directly (no outer `Mutex`)
-    /// because the heartbeat manager is single-owner — only the
-    /// bg-task `poll(now)` cycle touches it. (`mpsc::UnboundedReceiver`
-    /// is `Send` but not `Sync`; single-ownership keeps it sound.)
-    pending_completion_rx: mpsc::UnboundedReceiver<PendingHeartbeatCompletion>,
-    /// The bg task's wakeup `Notify` (a clone of `event_notify`), poked by the
-    /// spawned response forwarder once it has queued a completion for
-    /// [`Self::drain_pending_completions`], so the next `run_once` drains it
-    /// at once. Java needs no equivalent: its `whenComplete` lambda runs
-    /// inside the network poll, so `onResponse` / `onFailure` have run before
-    /// the next `runOnce`. Here the forwarder runs after the poll returned;
-    /// without the poke the response waits out the poll timeout, which while
-    /// the request is in flight is up to the heartbeat interval
-    /// ([`RequestManager::maximum_time_to_wait`]) — delaying a new assignment,
-    /// a fence or a fatal error by that much. The FindCoordinator, commit and
-    /// fetch forwarders wake the bg task the same way. A default no-listener
-    /// `Notify` stands in until [`Self::set_completion_notify`] installs the
-    /// real one (unit tests that drive no bg task keep the default).
-    completion_notify: Arc<tokio::sync::Notify>,
 }
 
 impl ConsumerHeartbeatRequestManager {
@@ -323,23 +259,16 @@ impl ConsumerHeartbeatRequestManager {
         );
         let rebalance_timeout_ms = membership_manager.rebalance_timeout_ms;
         let heartbeat_state = HeartbeatState::new(subscriptions, membership_manager.clone(), rebalance_timeout_ms);
-        let (pending_completion_tx, pending_completion_rx) = mpsc::unbounded_channel();
-        Self {
-            inner,
-            membership_manager,
-            heartbeat_state,
-            pending_completion_tx,
-            pending_completion_rx,
-            completion_notify: Arc::new(tokio::sync::Notify::new()),
-        }
+        Self { inner, membership_manager, heartbeat_state }
     }
 
     /// Installs the bg task's wakeup `Notify` (a clone of `event_notify`) so
     /// the spawned response forwarder can wake the network poll once a
-    /// heartbeat completion is queued. See [`Self::completion_notify`].
+    /// heartbeat completion is queued. See
+    /// [`AbstractHeartbeatRequestManager::completion_notify`].
     /// Mirrors `FetchRequestManager::set_completion_notify`.
     pub(crate) fn set_completion_notify(&mut self, notify: Arc<tokio::sync::Notify>) {
-        self.completion_notify = notify;
+        self.inner.completion_notify = notify;
     }
 
     /// Wire up the [`HeartbeatMetricsManager`] so the heartbeat send/response
@@ -351,12 +280,6 @@ impl ConsumerHeartbeatRequestManager {
         metrics_manager: Arc<crate::consumer::internals::metrics::HeartbeatMetricsManager>,
     ) {
         self.inner.metrics_manager = Some(metrics_manager);
-    }
-
-    /// Java: `resetHeartbeatState()`.
-    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager#resetHeartbeatState")]
-    pub(crate) fn reset_heartbeat_state(&mut self) {
-        self.heartbeat_state.reset();
     }
 
     /// Test-only accessor for [`Self::should_send_leave_heartbeat_now`].
@@ -371,355 +294,126 @@ impl ConsumerHeartbeatRequestManager {
         self.should_send_leave_heartbeat_now()
     }
 
+    /// Test-only: drains the queued heartbeat completions, as `poll(now)`'s
+    /// step 0 does.
+    #[cfg(test)]
+    pub(crate) fn drain_pending_completions(&mut self, current_time_ms: i64) {
+        AbstractHeartbeatRequestManager::drain_pending_completions(self, current_time_ms);
+    }
+
+    /// Test-only: runs the base `onFailure` routing for a request failure.
+    #[cfg(test)]
+    pub(crate) fn on_failure(&mut self, error: &Error, completion_time_ms: i64) {
+        AbstractHeartbeatRequestManager::on_failure(self, error, completion_time_ms);
+    }
+
     /// Test-only: has the spawned response forwarder delivered a completion
     /// that the next `poll(now)`'s step 0 will drain? Lets a test wait for
     /// delivery and then poll exactly once, so the classification a poll
     /// performs is deterministic instead of raced against the forwarder.
     #[cfg(test)]
     pub(crate) fn pending_completions_empty_for_test(&self) -> bool {
-        self.pending_completion_rx.is_empty()
+        self.inner.pending_completion_rx.is_empty()
     }
 
-    /// Java: `shouldSendLeaveHeartbeatNow()`.
-    #[doc(
-        alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager#shouldSendLeaveHeartbeatNow"
-    )]
-    fn should_send_leave_heartbeat_now(&self) -> bool {
-        use crate::consumer::GroupMembershipOperation;
-        if self.membership_manager.group_instance_id().is_none()
-            && matches!(
-                self.membership_manager.leave_group_operation(),
-                GroupMembershipOperation::RemainInGroup
-            )
-        {
-            // Debug log added by 45c4bdc48a
-            // (`ConsumerHeartbeatRequestManager#shouldSendLeaveHeartbeatNow`).
-            // Guarded so the
-            // `member_id()` copy is only made when the line is emitted.
-            if log::log_enabled!(log::Level::Debug) {
-                log::debug!(
-                    "Dynamic member {} closed with REMAIN_IN_GROUP. No leave heartbeat will be sent, the member will \
-                     be removed by the coordinator after session timeout.",
-                    self.membership_manager.member_id()
-                );
-            }
-            return false;
-        }
-        self.membership_manager.state() == MemberState::Leaving
+    /// Returns a reference to the underlying
+    /// [`AbstractHeartbeatRequestManager`].
+    pub(crate) fn inner(&self) -> &AbstractHeartbeatRequestManager<ConsumerGroupHeartbeatResponse> {
+        &self.inner
     }
 
-    /// Java: `buildHeartbeatRequest()`. Returns an `UnsentRequest`
-    /// targeting the current coordinator node. Spawns a forwarder
-    /// that awaits the response receiver and routes the result back
-    /// to [`Self::drain_pending_completions`] via the
-    /// [`PendingHeartbeatCompletion`] channel — mirroring Java's
-    /// `AbstractHeartbeatRequestManager#makeHeartbeatRequest(boolean)`'s
-    /// `whenComplete((response, exception) -> ...)` lambda.
-    ///
-    /// If `ignore_response` is true (Java parity with its `ignoreResponse` branch — the
-    /// LEAVING / poll-timer-expired path), the forwarder drops the
-    /// completion silently instead of enqueueing it. Java's
-    /// `logResponse(request)` path also drops the response side-effect
-    /// without driving state machinery.
+    /// Returns a mutable reference to the underlying
+    /// [`AbstractHeartbeatRequestManager`].
+    pub(crate) fn inner_mut(&mut self) -> &mut AbstractHeartbeatRequestManager<ConsumerGroupHeartbeatResponse> {
+        &mut self.inner
+    }
+
+    /// Test-only accessor: returns `true` when the per-request
+    /// `SentFields` tracker has `subscribed_topic_names` populated (i.e.
+    /// the last build did NOT reset it). Used by the Issue-3 regression
+    /// to verify that `reset_heartbeat_state()` runs at the top of the
+    /// error branch of `on_response`.
+    #[cfg(test)]
+    pub(crate) fn sent_fields_topics_populated(&self) -> bool {
+        self.heartbeat_state.sent_fields.subscribed_topic_names.is_some()
+    }
+
+    /// Test-only: invoke the `HeartbeatState::build_request_data` field-diff
+    /// logic directly. Java tests construct a `HeartbeatState` and call
+    /// `buildRequestData()` repeatedly to assert which fields are present /
+    /// omitted across heartbeats. The Rust `HeartbeatState` is a private
+    /// inner type; this accessor exposes the same observable on the manager.
+    #[cfg(test)]
+    pub(crate) fn build_request_data_for_test(&mut self) -> ConsumerGroupHeartbeatRequestData {
+        self.heartbeat_state.build_request_data()
+    }
+}
+
+/// The `ConsumerHeartbeatRequestManager` implementations of Java's abstract
+/// `AbstractHeartbeatRequestManager` methods.
+impl HeartbeatRequestManagerHooks for ConsumerHeartbeatRequestManager {
+    type Response = ConsumerGroupHeartbeatResponse;
+    type MembershipManager = ConsumerMembershipManager;
+
+    fn base(&self) -> &AbstractHeartbeatRequestManager<ConsumerGroupHeartbeatResponse> {
+        &self.inner
+    }
+
+    fn base_mut(&mut self) -> &mut AbstractHeartbeatRequestManager<ConsumerGroupHeartbeatResponse> {
+        &mut self.inner
+    }
+
+    /// Returns the wrapped membership manager.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager#membershipManager")]
+    fn membership_manager(&self) -> &Arc<ConsumerMembershipManager> {
+        &self.membership_manager
+    }
+
+    /// Java: `heartbeatRequestName()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager#heartbeatRequestName")]
+    fn heartbeat_request_name(&self) -> &'static str {
+        "ConsumerGroupHeartbeatRequest"
+    }
+
+    /// Java: `buildHeartbeatRequest()`: a `ConsumerGroupHeartbeatRequest`
+    /// built from [`HeartbeatState`]'s field diff, targeting the current
+    /// coordinator node.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager#buildHeartbeatRequest")]
-    fn build_heartbeat_request(&mut self, ignore_response: bool) -> UnsentRequest {
+    fn build_heartbeat_request(&mut self) -> UnsentRequest {
         let data = self.heartbeat_state.build_request_data();
         let builder = Box::new(consumer_group_heartbeat_request::Builder::new(data));
         let node = self.inner.coordinator_request_manager.coordinator();
-        let mut unsent = UnsentRequest::new(builder, node);
-
-        let response_rx = unsent.take_response_receiver().expect("receiver fresh");
-        let tx = self.pending_completion_tx.clone();
-        // For the `logResponse`/ignore path, latency must still be recorded
-        // (Java `org.apache.kafka.clients.consumer.internals.AbstractHeartbeatRequestManager#logResponse`). The normal
-        // path records it via the drained envelope, so the metrics manager is only
-        // cloned for the ignore path.
-        let ignore_path_metrics = if ignore_response {
-            self.inner.metrics_manager.clone()
-        } else {
-            None
-        };
-        // The completion-time cell, not a handler clone: a clone would keep the
-        // sender alive, so `response_rx` could never see the request dropped
-        // uncompleted (`NetworkClient::close` with it in flight) and this
-        // task would never exit.
-        let completion_time_ms = unsent.handler().completion_time_ms_cell();
-        let completion_notify = Arc::clone(&self.completion_notify);
-        tokio::spawn(async move {
-            let result = response_rx.await;
-            // Java: `long completionTimeMs = request.handler().completionTimeMs()`
-            // — read once the request has completed, so it is the time the
-            // response (or failure) arrived, not the time the request was sent.
-            let now_ms = completion_time_ms.load(Ordering::Acquire);
-            let completion = match result {
-                Ok(Ok(mut client_response)) => {
-                    // Java: `response.requestLatencyMs()` — captured before
-                    // `take_response_body()`. Recorded in the drain (normal
-                    // path) or inline below (`logResponse`/ignore path).
-                    let request_latency_ms = client_response.request_latency_ms();
-                    match client_response.take_response_body() {
-                        Some(ConcreteResponse::ConsumerGroupHeartbeat(resp)) => PendingHeartbeatCompletion::Response {
-                            response: resp,
-                            completion_time_ms: now_ms,
-                            request_latency_ms,
-                        },
-                        _ => PendingHeartbeatCompletion::Failure {
-                            error: Error::new(Errors::UnknownServerError),
-                            completion_time_ms: now_ms,
-                        },
-                    }
-                },
-                Ok(Err(err)) => PendingHeartbeatCompletion::Failure { error: err, completion_time_ms: now_ms },
-                Err(_recv) => PendingHeartbeatCompletion::Failure {
-                    error: Error::new(Errors::NetworkError),
-                    completion_time_ms: now_ms,
-                },
-            };
-            // `ignore_response` mirrors Java's
-            // `org.apache.kafka.clients.consumer.internals.AbstractHeartbeatRequestManager#logResponse` path:
-            // log the outcome but do NOT drive the consumer state
-            // machinery. We drop the envelope outright; the response
-            // future itself was already resolved (the forwarder
-            // observed the result), so any callers waiting on it have
-            // already been unblocked.
-            if ignore_response {
-                // Java `org.apache.kafka.clients.consumer.internals.AbstractHeartbeatRequestManager#logResponse`:
-                // record latency for the arrived response, then drop the
-                // state-driving side-effect.
-                if let (Some(metrics_manager), PendingHeartbeatCompletion::Response { request_latency_ms, .. }) =
-                    (ignore_path_metrics.as_ref(), &completion)
-                {
-                    metrics_manager.record_request_latency(*request_latency_ms);
-                }
-            }
-            if !ignore_response {
-                // Receiver lives as long as the heartbeat manager;
-                // ignore the send error in case the manager has been
-                // dropped during a shutdown race.
-                let _ = tx.send(completion);
-                // Wake the bg task so the next `poll(now)` drains the
-                // completion now rather than after the poll timeout. Ordered
-                // after the send: once the permit is stored, the completion
-                // is queued. The ignore path drives no state, so it does not
-                // wake.
-                completion_notify.notify_one();
-            }
-        });
-        unsent
+        UnsentRequest::new(builder, node)
     }
 
-    /// Drains the [`PendingHeartbeatCompletion`] mpsc channel into the
-    /// abstract base + the membership manager. Called at the top of
-    /// [`RequestManager::poll`].
-    ///
-    /// Java reference: the `whenComplete` lambda body in
-    /// `AbstractHeartbeatRequestManager.makeHeartbeatRequest` —
-    /// `onResponse(...)` (success) / `onFailure(...)` (failure). The
-    /// Java code runs the lambda on the network-IO thread; Rust runs
-    /// the equivalent work here on the bg-task to keep all `&mut
-    /// self` access serialized through `poll(now)` and to keep the
-    /// cross-RM `membership_manager.on_heartbeat_*` call out of any
-    /// heartbeat-side guard (`consumer-threading.md` §16).
-    ///
-    /// **§16 audit**: between draining the channel and the cross-RM
-    /// `membership_manager.on_heartbeat_*` call, NO `Mutex::lock()`
-    /// invocation is made. The membership manager's own `Mutex` is
-    /// acquired only inside its `abstract_mm.on_heartbeat_success` /
-    /// `on_heartbeat_failure` methods.
-    fn drain_pending_completions(&mut self, _current_time_ms: i64) {
-        while let Ok(completion) = self.pending_completion_rx.try_recv() {
-            match completion {
-                PendingHeartbeatCompletion::Response { response, completion_time_ms, request_latency_ms } => {
-                    // Java: `metricsManager.recordRequestLatency(response.requestLatencyMs())`
-                    // before `onResponse`
-                    // (`AbstractHeartbeatRequestManager#makeHeartbeatRequest(boolean)`).
-                    if let Some(metrics_manager) = self.inner.metrics_manager.as_ref() {
-                        metrics_manager.record_request_latency(request_latency_ms);
-                    }
-                    self.on_response(&response, completion_time_ms);
-                },
-                PendingHeartbeatCompletion::Failure { error, completion_time_ms } => {
-                    self.on_failure(&error, completion_time_ms);
-                },
-            }
+    fn response_body(body: ConcreteResponse) -> Option<ConsumerGroupHeartbeatResponse> {
+        match body {
+            ConcreteResponse::ConsumerGroupHeartbeat(response) => Some(response),
+            _ => None,
         }
     }
 
-    /// Dispatch a `ConsumerGroupHeartbeatResponse` body to the
-    /// success or error path. Mirrors Java's `onResponse(R response,
-    /// long currentTimeMs)` (`AbstractHeartbeatRequestManager#onResponse`).
-    fn on_response(&mut self, response: &ConsumerGroupHeartbeatResponse, completion_time_ms: i64) {
-        let error = response.error();
-        if error == Errors::None {
-            let new_interval_ms = i64::from(response.data().heartbeat_interval_ms);
-            let member_id = self.membership_manager.member_id();
-            self.inner
-                .on_successful_response(&member_id, new_interval_ms, completion_time_ms);
-            if let Err(e) = self.membership_manager.abstract_mm.on_heartbeat_success(response) {
-                log::error!("on_heartbeat_success failed: {}", e);
-                let _ = self
-                    .inner
-                    .background_event_handler
-                    .add(BackgroundEvent::Error { error: e }, completion_time_ms);
-            }
-            return;
-        }
-        // Error response — Java's `onErrorResponse` resets the
-        // per-request `HeartbeatState` (the `SentFields` field tracker)
-        // at the TOP, before classifying. Without this, the next
-        // heartbeat's `build_request_data()` would diff against stale
-        // "sent" tracking and SKIP fields (subscribed topic names,
-        // rebalance timeout, server assignor, local assignment, pattern)
-        // that Java would re-send. The broker would then assume the
-        // consumer is still using stale subscription state.
-        //
-        // Java reference: `org.apache.kafka.clients.consumer.internals.AbstractHeartbeatRequestManager#onErrorResponse`
-        // (`resetHeartbeatState();` runs at its top,
-        // before `heartbeatRequestState.onFailedAttempt(currentTimeMs)`
-        // and the per-error switch).
-        self.reset_heartbeat_state();
-        // Classify via the abstract dispatch first, then delegate to
-        // the consumer-specific extras.
-        //
-        // Java: `String errorMessage = errorMessageForResponse(response);`
-        // (in `org.apache.kafka.clients.consumer.internals.AbstractHeartbeatRequestManager#onErrorResponse`), whose
-        // consumer implementation is `return response.data().errorMessage();`
-        // (`org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager#errorMessageForResponse`). It
-        // is the BROKER-supplied diagnostic and is nullable — for several codes
-        // (`UNSUPPORTED_ASSIGNOR`, `INVALID_REGULAR_EXPRESSION`, and every
-        // unknown code) it is the only information available about what the
-        // broker rejected, so it must not be substituted with the error
-        // enum's own name.
-        let error_message = response.data().error_message.as_deref();
-        let group_id = self.membership_manager.group_id();
-        let action = self
-            .inner
-            .classify_response_error(error, error_message, &group_id, completion_time_ms);
-        let final_action = match action {
-            HeartbeatErrorAction::DelegateToSpecific => self
-                .handle_specific_error_in_response(error, error_message, completion_time_ms)
-                .unwrap_or_else(|| {
-                    // Java: the `default:` arm of the switch in
-                    // `org.apache.kafka.clients.consumer.internals.AbstractHeartbeatRequestManager#onErrorResponse`
-                    // calls `handleSpecificExceptionInResponse(...)`; if
-                    // that returns false (no consumer-specific handler
-                    // matched), Java falls back to
-                    // `handleFatalFailure(error.exception(errorMessage))`.
-                    // Rust's mapping: `None` from the specific handler
-                    // means "no match" — fall through to the same fatal
-                    // path so unknown / future error codes don't get
-                    // silently swallowed.
-                    log::error!(
-                        "ConsumerGroupHeartbeatRequest failed due to unexpected error {:?}: {}",
-                        error,
-                        error_message.unwrap_or_default()
-                    );
-                    // Java: `handleFatalFailure(error.exception(errorMessage))`
-                    // — `Errors.exception(String)` falls back to the code's own
-                    // default message when the broker sent none
-                    // (`org.apache.kafka.common.protocol.Errors#exception(String)`).
-                    HeartbeatErrorAction::Fatal(match error_message {
-                        Some(message) => Error::with_message(error, message),
-                        None => Error::new(error),
-                    })
-                }),
-            other => other,
-        };
-        match final_action {
-            HeartbeatErrorAction::Handled => {},
-            HeartbeatErrorAction::Fenced => {
-                // Java: `membershipManager().transitionToFenced()`
-                // (the FENCED_MEMBER_EPOCH and UNKNOWN_MEMBER_ID arms of
-                // `org.apache.kafka.clients.consumer.internals.AbstractHeartbeatRequestManager#onErrorResponse`).
-                // The fence is treated as an INTERNAL state-machine
-                // event: Java does NOT call
-                // `backgroundEventHandler.add(new ErrorEvent(...))`
-                // here (compare with `AbstractHeartbeatRequestManager#handleFatalFailure`,
-                // which does emit an ErrorEvent). The
-                // member transitions through FENCED → JOINING and
-                // re-joins silently; the user never sees the fence
-                // from `poll()`. Emitting a `BackgroundEvent::Error`
-                // would surface `Error::FencedMemberEpoch` to
-                // the user, diverging from Java which returns
-                // `ConsumerRecords::empty()` and rejoins
-                // transparently.
-                //
-                // Applied inline, where Java applies it. The
-                // transition only *enqueues* the §31 onPartitionsLost
-                // callback (storing the ack receiver for the bg task
-                // to drive), so it needs no `.await` and runs from
-                // this sync path. No lock guard is live here — see
-                // [`Self::drain_pending_completions`].
-                if let Err(e) = self.membership_manager.transition_to_fenced(completion_time_ms) {
-                    // Java's `whenComplete` lambda logs what
-                    // `transitionToFenced` throws and does not rethrow.
-                    log::warn!("transition_to_fenced failed: {}", e);
-                }
-            },
-            HeartbeatErrorAction::Fatal(err) => {
-                // Java: `handleFatalFailure(error.exception(...))`
-                // (`org.apache.kafka.clients.consumer.internals.AbstractHeartbeatRequestManager#handleFatalFailure`) —
-                // emits an `ErrorEvent` AND calls
-                // `membershipManager().transitionToFatal()`, in that
-                // order.
-                let _ = self
-                    .inner
-                    .background_event_handler
-                    .add(BackgroundEvent::Error { error: err.clone() }, completion_time_ms);
-                if let Err(e) = self.membership_manager.transition_to_fatal(completion_time_ms) {
-                    log::warn!("transition_to_fatal failed: {}", e);
-                }
-            },
-            HeartbeatErrorAction::DelegateToSpecific => {
-                // Already handled above; this arm is unreachable
-                // because the `match action` block resolves
-                // `DelegateToSpecific` to a concrete action — either
-                // the specific handler's return value, or `Fatal`
-                // when the specific handler returns `None` (the
-                // `unwrap_or_else` fallback above). No path leaves
-                // `DelegateToSpecific` as the `final_action`.
-                debug_assert!(false, "DelegateToSpecific should have been resolved");
-            },
-        }
-        // Java: `membershipManager().onHeartbeatFailure(false)` at the
-        // tail of `onErrorResponse`. The Rust `on_heartbeat_failure`
-        // mutates membership state internally — no further async
-        // transition is required at this point.
-        self.membership_manager.on_heartbeat_failure(false);
+    /// Java: `errorForResponse(response)` → `Errors.forCode(response.data().errorCode())`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager#errorForResponse")]
+    fn error_for_response(response: &ConsumerGroupHeartbeatResponse) -> Errors {
+        response.error()
     }
 
-    /// Transport-level / non-response failure handler. Mirrors Java's
-    /// `onFailure(Throwable, long)`
-    /// (`AbstractHeartbeatRequestManager#onFailure`).
-    fn on_failure(&mut self, error: &Error, completion_time_ms: i64) {
-        // Java: `resetHeartbeatState()` at the top of `onFailure`.
-        self.reset_heartbeat_state();
-        let abstract_action = self.inner.on_failure(error, completion_time_ms);
-        let retriable = matches!(abstract_action, HeartbeatFailureAction::Retriable);
-        if !retriable {
-            // Java: `handleSpecificFailure(exception)` runs only on
-            // the non-retriable path. If it returns false, fall back
-            // to `handleFatalFailure(exception)`.
-            let specific_handled = self.handle_specific_failure(error, completion_time_ms);
-            if !specific_handled {
-                log::error!("ConsumerGroupHeartbeatRequest failed due to fatal error: {}", error);
-                // Java: `handleFatalFailure(exception)`
-                // (`org.apache.kafka.clients.consumer.internals.AbstractHeartbeatRequestManager#handleFatalFailure`) —
-                // emits an `ErrorEvent` AND calls
-                // `membershipManager().transitionToFatal()`, in that
-                // order. Both are mirrored here.
-                let _ = self
-                    .inner
-                    .background_event_handler
-                    .add(BackgroundEvent::Error { error: error.clone() }, completion_time_ms);
-                if let Err(e) = self.membership_manager.transition_to_fatal(completion_time_ms) {
-                    log::warn!("transition_to_fatal failed: {}", e);
-                }
-            }
-        }
-        // Java: `membershipManager().onHeartbeatFailure(retriable)`
-        // at the tail of `onFailure`.
-        self.membership_manager.on_heartbeat_failure(retriable);
+    /// Java: `errorMessageForResponse(response)` → `response.data().errorMessage()`.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager#errorMessageForResponse"
+    )]
+    fn error_message_for_response(response: &ConsumerGroupHeartbeatResponse) -> Option<&str> {
+        response.data().error_message.as_deref()
+    }
+
+    /// Java: `heartbeatIntervalForResponse(response)` →
+    /// `response.data().heartbeatIntervalMs()`.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager#heartbeatIntervalForResponse"
+    )]
+    fn heartbeat_interval_for_response(response: &ConsumerGroupHeartbeatResponse) -> i64 {
+        i64::from(response.data().heartbeat_interval_ms)
     }
 
     /// Java: `handleSpecificFailure(Throwable exception)`. The Consumer
@@ -734,7 +428,7 @@ impl ConsumerHeartbeatRequestManager {
     /// [`BackgroundEventHandler::add`] so the resulting `ErrorEvent` is
     /// attributed to the actual failure time rather than epoch zero.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager#handleSpecificFailure")]
-    pub(crate) fn handle_specific_failure(&mut self, error: &crate::common::Error, current_time_ms: i64) -> bool {
+    fn handle_specific_failure(&mut self, error: &crate::common::Error, current_time_ms: i64) -> bool {
         use crate::common::Error;
         if error.is_unsupported_version_error() {
             let error_message = error.message();
@@ -749,7 +443,7 @@ impl ConsumerHeartbeatRequestManager {
                     "ConsumerGroupHeartbeatRequest failed due to unsupported version while sending request: \
                      {error_message}"
                 );
-                AbstractHeartbeatRequestManager::CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG
+                AbstractHeartbeatRequestManager::<ConsumerGroupHeartbeatResponse>::CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG
             };
             // Surface the parent type here: handleFatalFailure propagates this via BackgroundEvent
             // to the user-facing API. Propagating the subclass would be a user-visible behavior change.
@@ -776,7 +470,7 @@ impl ConsumerHeartbeatRequestManager {
     #[doc(
         alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager#handleSpecificExceptionInResponse"
     )]
-    pub(crate) fn handle_specific_error_in_response(
+    fn handle_specific_error_in_response(
         &mut self,
         error: crate::common::protocol::Errors,
         error_message: Option<&str>,
@@ -788,10 +482,10 @@ impl ConsumerHeartbeatRequestManager {
             Errors::UnsupportedVersion => {
                 log::error!(
                     "ConsumerGroupHeartbeatRequest failed due to unsupported version response on broker side: {}",
-                    AbstractHeartbeatRequestManager::CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG
+                    AbstractHeartbeatRequestManager::<ConsumerGroupHeartbeatResponse>::CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG
                 );
                 Some(HeartbeatErrorAction::Fatal(Error::unsupported_version(
-                    AbstractHeartbeatRequestManager::CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG.to_string(),
+                    AbstractHeartbeatRequestManager::<ConsumerGroupHeartbeatResponse>::CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG.to_string(),
                 )))
             },
             Errors::UnreleasedInstanceId => {
@@ -906,248 +600,54 @@ impl ConsumerHeartbeatRequestManager {
         }
     }
 
-    /// Returns a reference to the underlying
-    /// [`AbstractHeartbeatRequestManager`].
-    pub(crate) fn inner(&self) -> &AbstractHeartbeatRequestManager {
-        &self.inner
+    /// Java: `resetHeartbeatState()`.
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager#resetHeartbeatState")]
+    fn reset_heartbeat_state(&mut self) {
+        self.heartbeat_state.reset();
     }
 
-    /// Returns a mutable reference to the underlying
-    /// [`AbstractHeartbeatRequestManager`].
-    pub(crate) fn inner_mut(&mut self) -> &mut AbstractHeartbeatRequestManager {
-        &mut self.inner
-    }
-
-    /// Returns the wrapped membership manager.
-    #[doc(alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager#membershipManager")]
-    pub(crate) fn membership_manager(&self) -> &Arc<ConsumerMembershipManager> {
-        &self.membership_manager
-    }
-
-    /// Test-only accessor: returns `true` when the per-request
-    /// `SentFields` tracker has `subscribed_topic_names` populated (i.e.
-    /// the last build did NOT reset it). Used by the Issue-3 regression
-    /// to verify that `reset_heartbeat_state()` runs at the top of the
-    /// error branch of `on_response`.
-    #[cfg(test)]
-    pub(crate) fn sent_fields_topics_populated(&self) -> bool {
-        self.heartbeat_state.sent_fields.subscribed_topic_names.is_some()
-    }
-
-    /// Test-only: invoke the `HeartbeatState::build_request_data` field-diff
-    /// logic directly. Java tests construct a `HeartbeatState` and call
-    /// `buildRequestData()` repeatedly to assert which fields are present /
-    /// omitted across heartbeats. The Rust `HeartbeatState` is a private
-    /// inner type; this accessor exposes the same observable on the manager.
-    #[cfg(test)]
-    pub(crate) fn build_request_data_for_test(&mut self) -> ConsumerGroupHeartbeatRequestData {
-        self.heartbeat_state.build_request_data()
+    /// Java: `shouldSendLeaveHeartbeatNow()`.
+    #[doc(
+        alias = "org.apache.kafka.clients.consumer.internals.ConsumerHeartbeatRequestManager#shouldSendLeaveHeartbeatNow"
+    )]
+    fn should_send_leave_heartbeat_now(&self) -> bool {
+        use crate::consumer::GroupMembershipOperation;
+        if self.membership_manager.group_instance_id().is_none()
+            && matches!(
+                self.membership_manager.leave_group_operation(),
+                GroupMembershipOperation::RemainInGroup
+            )
+        {
+            // Debug log added by 45c4bdc48a
+            // (`ConsumerHeartbeatRequestManager#shouldSendLeaveHeartbeatNow`).
+            // Guarded so the
+            // `member_id()` copy is only made when the line is emitted.
+            if log::log_enabled!(log::Level::Debug) {
+                log::debug!(
+                    "Dynamic member {} closed with REMAIN_IN_GROUP. No leave heartbeat will be sent, the member will \
+                     be removed by the coordinator after session timeout.",
+                    self.membership_manager.member_id()
+                );
+            }
+            return false;
+        }
+        self.membership_manager.state() == MemberState::Leaving
     }
 }
 
+/// The base `poll` / `pollOnClose` / `maximumTimeToWait` of Java's
+/// `AbstractHeartbeatRequestManager`, which this subclass inherits.
 impl RequestManager for ConsumerHeartbeatRequestManager {
-    /// Java: `poll(long currentTimeMs)`. Mirrors
-    /// `AbstractHeartbeatRequestManager.poll(...)` phase-for-phase.
-    ///
-    /// Per `consumer-threading.md` §10, `poll` is sync. The membership
-    /// state machine's async transitions (fenced, fatal, reconcile)
-    /// happen in the bg-task path (Phase 10) which can `.await`;
-    /// `poll` only computes whether a heartbeat needs to be sent.
     fn poll(&mut self, current_time_ms: i64) -> PollResult {
-        // 0. Drain any pending heartbeat completions from prior
-        // spawned forwarders. State-update happens before the next
-        // emission decision so `should_heartbeat_now` /
-        // `request_in_flight` observe the post-completion state.
-        self.drain_pending_completions(current_time_ms);
-
-        // 1. Skip-heartbeat short-circuit.
-        let coordinator_known = self.inner.coordinator_request_manager.coordinator().is_some();
-        if !coordinator_known
-            || self
-                .membership_manager
-                .abstract_mm
-                .inner
-                .lock()
-                .map(|g| g.should_skip_heartbeat())
-                .unwrap_or(false)
-        {
-            // Java: membershipManager().onHeartbeatRequestSkipped().
-            // We ignore the error: this only mutates state on LEAVING.
-            let _ = self.membership_manager.abstract_mm.on_heartbeat_request_skipped();
-            self.inner.maybe_propagate_coordinator_fatal_error_event(current_time_ms);
-            return PollResult::empty();
-        }
-
-        // 2. Poll-timer-expired stale path. Java calls
-        // `pollTimer.update(currentTimeMs)` here; the Rust deadline-based
-        // timer doesn't need the update — `poll_timer_is_expired` reads
-        // `current_time_ms` directly.
-        // Java parity, including its limitation: a dynamic member closed with
-        // REMAIN_IN_GROUP is LEAVING but `is_leaving_group()` is false for
-        // it, so if its poll timer has already expired this branch is taken
-        // on every poll, `transition_to_sending_leave_group(true)` fails
-        // (LEAVING -> PREPARE_LEAVING is not a valid transition) and no
-        // heartbeat is built. The close-time leave then never completes and
-        // `close()` waits out its close timeout, as Java's does (where the
-        // `IllegalStateException` escapes `runOnce` on every iteration).
-        if self.inner.poll_timer_is_expired(current_time_ms) && !self.membership_manager.is_leaving_group() {
-            log::warn!(
-                "Consumer poll timeout has expired. This means the time between subsequent calls to poll() was longer than the configured max.poll.interval.ms."
-            );
-            // Java: membershipManager().transitionToSendingLeaveGroup(true).
-            if let Err(e) = self.membership_manager.transition_to_sending_leave_group(true) {
-                log::warn!("transition_to_sending_leave_group failed: {}", e);
-                return PollResult::empty();
-            }
-            // Build leave heartbeat (ignoreResponse=true) per Java's
-            // `org.apache.kafka.clients.consumer.internals.AbstractHeartbeatRequestManager#poll`.
-            let request = self.build_heartbeat_request(true);
-            // Java parity: `makeHeartbeatRequest(currentTimeMs, true)` records
-            // the heartbeat-sent time (`AbstractHeartbeatRequestManager#makeHeartbeatRequest(long,boolean)`)
-            // for every send, including this poll-timer-expired leave path.
-            // The normal path records it inside `make_heartbeat_poll_result`
-            // below; this branch builds its own `PollResult`, so record here.
-            if let Some(metrics_manager) = self.inner.metrics_manager.as_ref() {
-                metrics_manager.record_heartbeat_sent_ms(current_time_ms);
-            }
-            // Java parity: `makeHeartbeatRequest(currentTimeMs, true)` always
-            // calls `membershipManager().onHeartbeatRequestGenerated()`
-            // (`AbstractHeartbeatRequestManager.makeHeartbeatRequest`). For a
-            // member whose poll timer expired, that transitions LEAVING →
-            // STALE (`AbstractMembershipManager.onHeartbeatRequestGenerated`
-            // → `transitionToStale()`). The earlier Rust translation omitted
-            // this call here, so the member stayed in LEAVING forever and the
-            // STALE path was unreachable via poll().
-            if let Err(e) = self.membership_manager.abstract_mm.on_heartbeat_request_generated() {
-                log::warn!("on_heartbeat_request_generated (poll-timer-expiry) failed: {}", e);
-            }
-            // If the member is now STALE, the assignment must be released via
-            // the §31 onPartitionsLost listener — the tail of Java's
-            // `transitionToStale`. Enqueuing that callback needs no `.await`
-            // (the ack is stored for the bg task to drive), so it runs
-            // inline here, as it does in Java.
-            if self.membership_manager.state() == MemberState::Stale
-                && let Err(e) = self.membership_manager.transition_to_stale(current_time_ms)
-            {
-                log::warn!("transition_to_stale failed: {}", e);
-            }
-            self.inner.heartbeat_request_state.reset();
-            self.reset_heartbeat_state();
-            return PollResult::new(self.inner.heartbeat_request_state.heartbeat_interval_ms(), vec![request]);
-        }
-
-        // 3. Decide whether to heartbeat now.
-        let heartbeat_now = self.should_send_leave_heartbeat_now() || {
-            let inner = self.membership_manager.abstract_mm.inner.lock();
-            let guard = match inner {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            guard.should_heartbeat_now() && !self.inner.heartbeat_request_state.request_in_flight()
-        };
-
-        if !self.inner.heartbeat_request_state.can_send_request(current_time_ms) && !heartbeat_now {
-            return PollResult::with_time_until_next_poll_ms(
-                self.inner.heartbeat_request_state.time_to_next_heartbeat_ms(current_time_ms),
-            );
-        }
-
-        // Java: `makeHeartbeatRequest(currentTimeMs, false)`.
-        let request = self.build_heartbeat_request(false);
-        // Java: record send attempt, reset timer, increment metrics.
-        // membershipManager().onHeartbeatRequestGenerated() advances
-        // ACKNOWLEDGING / LEAVING / etc.
-        if let Err(e) = self.membership_manager.abstract_mm.on_heartbeat_request_generated() {
-            log::warn!("on_heartbeat_request_generated failed: {}", e);
-        }
-        AbstractHeartbeatRequestManager::make_heartbeat_poll_result(request, &mut self.inner, current_time_ms)
+        AbstractHeartbeatRequestManager::poll(self, current_time_ms)
     }
 
     fn poll_on_close(&mut self, current_time_ms: i64) -> PollResult {
-        // Drain any pending completions one last time so close paths
-        // observe the post-completion state.
-        self.drain_pending_completions(current_time_ms);
-        // Java: if (membershipManager().isLeavingGroup()) send the
-        // leave heartbeat (ignoreResponse=true — pollOnClose drops
-        // the response by Java's `logResponse(...)` semantics).
-        if self.membership_manager.is_leaving_group() {
-            let request = self.build_heartbeat_request(true);
-            // Java parity: `pollOnClose` routes its leave heartbeat through
-            // `makeHeartbeatRequest(currentTimeMs, true)`
-            // (in `org.apache.kafka.clients.consumer.internals.AbstractHeartbeatRequestManager#pollOnClose`), which
-            // records the heartbeat-sent time (`AbstractHeartbeatRequestManager#makeHeartbeatRequest(long,boolean)`).
-            // This is the third of Java's three heartbeat send sites; record here so `last-heartbeat-seconds-ago`
-            // reflects the close-path leave heartbeat, matching the poll-timer
-            // leave path above and the normal path in `make_heartbeat_poll_result`.
-            if let Some(metrics_manager) = self.inner.metrics_manager.as_ref() {
-                metrics_manager.record_heartbeat_sent_ms(current_time_ms);
-            }
-            return PollResult::new(self.inner.heartbeat_request_state.heartbeat_interval_ms(), vec![request]);
-        }
-        PollResult::empty()
+        AbstractHeartbeatRequestManager::poll_on_close(self, current_time_ms)
     }
 
     fn maximum_time_to_wait(&self, current_time_ms: i64) -> i64 {
-        // When the member is UNSUBSCRIBED (for example, with manual assignment;
-        // KAFKA-20426) or in the terminal FATAL state (KAFKA-21010), return
-        // i64::MAX to indicate there is no next heartbeat to wait for —
-        // allowing the application thread to block for the full user-specified
-        // poll timeout rather than spinning in a busy loop.
-        //
-        // Deviation note (Critic 64, Observation 1): Java
-        // `AbstractHeartbeatRequestManager.maximumTimeToWait` (:254 at 4.4)
-        // calls `pollTimer.update(currentTimeMs)` FIRST, before the
-        // UNSUBSCRIBED || FATAL short-circuit at :259. That `update` advances the Java `Timer`'s
-        // *internal* clock so its no-arg `isExpired()` / `remainingMs()`
-        // queries later in the method observe `currentTimeMs`. The Rust poll
-        // timer holds only an absolute `poll_timer_expires_at_ms` and every
-        // query (`poll_timer_is_expired` / `poll_timer_remaining_ms`) takes
-        // `current_time_ms` as a parameter, so there is no mutable internal
-        // clock to update — the update is folded into each query call. This
-        // method also takes `&self`, so it cannot mutate timer state. Thus
-        // the `pollTimer.update` step has no Rust counterpart on this path and
-        // its omission is behavior-faithful.
-        //
-        // The membership state is read once, under one lock, for all three
-        // predicates below: Java's mocked/`synchronized` reads are separate
-        // calls, but nothing else runs on the background task between them.
-        let (state, should_skip_heartbeat, should_heartbeat_now) = {
-            let inner = self.membership_manager.abstract_mm.inner.lock();
-            let guard = match inner {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            (guard.state, guard.should_skip_heartbeat(), guard.should_heartbeat_now())
-        };
-        // No heartbeat can be sent in these states: UNSUBSCRIBED has nothing to heartbeat for,
-        // and FATAL is terminal. The fatal error has already been propagated to the
-        // application thread, so there is no need to wake it before its poll timeout expires.
-        if state == MemberState::Unsubscribed || state == MemberState::Fatal {
-            return i64::MAX;
-        }
-        // Unblock the application thread so STALE/FENCED members can run
-        // assignment-release callbacks and rejoin during the next poll.
-        if self.inner.poll_timer_is_expired(current_time_ms) {
-            return 0;
-        }
-        // Mirror the guard in poll(). A heartbeat is only sent when the coordinator is known and the
-        // member is in a state that can send heartbeats. This covers cases such as:
-        // - The coordinator is unavailable (for example, during bootstrap DNS resolution or after a
-        //   re-authentication failure).
-        // - The member is FENCED (or STALE with the poll timer already reset) and waiting for the
-        //   application thread to run assignment-release callbacks before rejoining.
-        // Return retryBackoffMs rather than the heartbeat interval, since the interval remains 0 until
-        // the first heartbeat response is received, which would also lead to busy-spinning.
-        // (KAFKA-20253 added this branch returning the heartbeat interval; KAFKA-21010 changed it.)
-        if self.inner.coordinator_request_manager.coordinator().is_none() || should_skip_heartbeat {
-            return self.inner.heartbeat_request_state.retry_backoff_ms();
-        }
-        if should_heartbeat_now && !self.inner.heartbeat_request_state.request_in_flight() {
-            return 0;
-        }
-        let remaining_poll = self.inner.poll_timer_remaining_ms(current_time_ms);
-        let time_to_hb = self.inner.heartbeat_request_state.time_to_next_heartbeat_ms(current_time_ms);
-        std::cmp::min(remaining_poll / 2, time_to_hb)
+        AbstractHeartbeatRequestManager::maximum_time_to_wait(self, current_time_ms)
     }
 }
 
@@ -1156,15 +656,16 @@ impl RequestManager for ConsumerHeartbeatRequestManager {
 /// e7b0cb7908 (KAFKA-18862) split the shared tests out of
 /// `ConsumerHeartbeatRequestManagerTest` into the abstract base
 /// `AbstractHeartbeatRequestManagerTest`, which the consumer and share test
-/// classes inherit. Rust keeps one in-module test suite per production file;
-/// the abstract layer here has no response routing of its own (it is a helper
-/// this manager composes), so the inherited tests run in this module, against
-/// `ConsumerHeartbeatRequestManager`, exactly as Java runs them through
-/// `ConsumerHeartbeatRequestManagerTest`. They share `AbstractFixture`, which
-/// mirrors the base class's `@BeforeEach` defaults. The abstract layer's own
-/// unit tests (`abstract_heartbeat_request_manager.rs`) exercise its helpers
-/// directly and have no Java counterpart. The share subclass test
-/// (`ShareHeartbeatRequestManagerTest`) is out of scope (§20).
+/// classes inherit. Rust keeps one in-module test suite per production file.
+/// The abstract layer's routing (`poll`, `onResponse`, `onFailure`, ...) is
+/// generic and needs a concrete subclass to run, so the inherited tests run in
+/// this module, against `ConsumerHeartbeatRequestManager`, exactly as Java runs
+/// them through `ConsumerHeartbeatRequestManagerTest`. They share
+/// `AbstractFixture`, which mirrors the base class's `@BeforeEach` defaults.
+/// The abstract layer's own unit tests (`abstract_heartbeat_request_manager.rs`)
+/// exercise its helpers directly and have no Java counterpart. The share
+/// subclass test (`ShareHeartbeatRequestManagerTest`) is translated with the
+/// share manager (Milestone 18 P4b).
 ///
 /// `AbstractHeartbeatRequestManagerTest` (9 tests):
 /// - `testTimerNotDue` — `test_timer_not_due` (`timer_not_due` is the JOINING-state variant)
@@ -1232,11 +733,14 @@ impl RequestManager for ConsumerHeartbeatRequestManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::Error;
     use crate::common::Node;
     use crate::common::internals::ClusterResourceListeners;
     use crate::consumer::ConsumerConfig;
     use crate::consumer::internals::AutoOffsetResetStrategy;
     use crate::consumer::internals::ConsumerMetadata;
+    use crate::consumer::internals::MembershipManagerHooks;
+    use crate::consumer::internals::events::BackgroundEvent;
     use tokio::sync::mpsc;
 
     /// Default heartbeat interval used by Java's
@@ -1875,7 +1379,7 @@ mod tests {
         assert!(
             matches!(&events[0].event,
                 crate::consumer::internals::events::BackgroundEvent::Error { error }
-                    if error.to_string().contains(AbstractHeartbeatRequestManager::CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG)),
+                    if error.to_string().contains(AbstractHeartbeatRequestManager::<ConsumerGroupHeartbeatResponse>::CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG)),
             "the ErrorEvent must carry the consumer-protocol-not-supported message, got: {:?}",
             events[0].event
         );
@@ -1906,9 +1410,9 @@ mod tests {
         let cases = [
             (
                 crate::common::Error::unsupported_version(
-                    AbstractHeartbeatRequestManager::CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG,
+                    AbstractHeartbeatRequestManager::<ConsumerGroupHeartbeatResponse>::CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG,
                 ),
-                AbstractHeartbeatRequestManager::CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG,
+                AbstractHeartbeatRequestManager::<ConsumerGroupHeartbeatResponse>::CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG,
             ),
             (
                 UnsupportedProtocolFieldError::with_message(
@@ -1924,7 +1428,7 @@ mod tests {
                 crate::common::Error::unsupported_version(
                     crate::common::requests::ConsumerGroupHeartbeatRequest::REGEX_RESOLUTION_NOT_SUPPORTED_MSG,
                 ),
-                AbstractHeartbeatRequestManager::CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG,
+                AbstractHeartbeatRequestManager::<ConsumerGroupHeartbeatResponse>::CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG,
             ),
             (
                 UnsupportedProtocolFieldError::with_message("some other field"),
@@ -1961,7 +1465,7 @@ mod tests {
     /// `PendingHeartbeatCompletion::Response` envelope. On the next
     /// `poll(now)`, the drain at the top invokes
     /// `on_response` → `inner.on_successful_response` +
-    /// `membership_manager.abstract_mm.on_heartbeat_success(response)`. The
+    /// `membership_manager.on_heartbeat_success(response)`. The
     /// membership state advances past JOINING.
     ///
     /// This is the test that would have caught the Phase-12 audit
@@ -3659,7 +3163,7 @@ mod tests {
         let notify = Arc::new(tokio::sync::Notify::new());
         f.mgr.set_completion_notify(Arc::clone(&notify));
 
-        let unsent = f.mgr.build_heartbeat_request(true);
+        let unsent = AbstractHeartbeatRequestManager::make_heartbeat_request(&mut f.mgr, true);
         unsent
             .handler()
             .on_complete(create_heartbeat_response(Errors::None, DEFAULT_HEARTBEAT_INTERVAL_MS, f.now));

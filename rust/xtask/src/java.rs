@@ -507,12 +507,15 @@ pub fn rust_method_bases(method: &str) -> Vec<String> {
 }
 
 /// Applies CLAUDE.md §2's word substitutions to a snake_case name.
+/// `exceptionally` (Java's `completeExceptionally` family) becomes
+/// `with_error`, as in `is_completed_with_error`.
 pub(crate) fn translate_words(snake: &str) -> String {
     snake
         .split('_')
         .map(|w| match w {
             "exception" => "error",
             "exceptions" => "errors",
+            "exceptionally" => "with_error",
             "throw" => "return",
             "throws" => "returns",
             other => other,

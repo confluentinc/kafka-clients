@@ -19,8 +19,8 @@
 
 use std::sync::{Arc, Mutex};
 
+use crate::Metadata;
 use crate::common::TopicPartition;
-use crate::consumer::internals::ConsumerMetadata;
 use crate::consumer::internals::SubscriptionState;
 
 /// Translates the Java static-utility class `org.apache.kafka.clients.consumer.internals.FetchUtils`,
@@ -46,11 +46,11 @@ impl FetchUtils {
     /// TopicPartition)`.
     #[doc(alias = "org.apache.kafka.clients.consumer.internals.FetchUtils#requestMetadataUpdate")]
     pub(crate) fn request_metadata_update(
-        metadata: &ConsumerMetadata,
+        metadata: &Metadata,
         subscriptions: &Arc<Mutex<SubscriptionState>>,
         topic_partition: &TopicPartition,
     ) {
-        metadata.metadata_arc().request_update(false);
+        metadata.request_update(false);
         let mut guard = subscriptions.lock().expect("SubscriptionState mutex poisoned");
         guard.clear_preferred_read_replica(topic_partition);
     }
@@ -61,6 +61,7 @@ mod tests {
     use super::*;
     use crate::common::internals::ClusterResourceListeners;
     use crate::consumer::internals::AutoOffsetResetStrategy;
+    use crate::consumer::internals::ConsumerMetadata;
 
     fn tp(topic: &str, partition: i32) -> TopicPartition {
         TopicPartition::new(topic.to_string(), partition)

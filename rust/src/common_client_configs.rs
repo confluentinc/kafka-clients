@@ -415,21 +415,14 @@ mod tests {
     /// Java's `TestConfig`, whose `postProcessParsedConfig` validates the SASL
     /// mechanism and post-processes the reconnect backoff.
     fn test_config(props: ConfigMap) -> Result<AbstractConfig, Error> {
-        AbstractConfig::with_hooks(
-            &TEST_CONFIG_DEF,
-            props,
-            false,
-            "TestConfig",
-            |parsed| parsed,
-            |config| {
-                CommonClientConfigs::post_validate_sasl_mechanism_config(config)?;
-                Ok(CommonClientConfigs::post_process_reconnect_backoff_configs(
-                    config,
-                    config.parsed_values(),
-                    true,
-                ))
-            },
-        )
+        AbstractConfig::with_hooks(&TEST_CONFIG_DEF, props, false, "TestConfig", Ok, |config| {
+            CommonClientConfigs::post_validate_sasl_mechanism_config(config)?;
+            Ok(CommonClientConfigs::post_process_reconnect_backoff_configs(
+                config,
+                config.parsed_values(),
+                true,
+            ))
+        })
     }
 
     fn props(entries: &[(&str, &str)]) -> ConfigMap {

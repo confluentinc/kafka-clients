@@ -70,18 +70,25 @@
 #![cfg_attr(not(test), expect(dead_code))]
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+
+use indexmap::IndexMap;
 
 use super::ApplicationEvent;
 use super::CompletableEventReaper;
 use super::EventProcessor;
+use crate::Metadata;
 use crate::common::utils::Time;
-use crate::common::{Error, IsolationLevel, TopicPartition};
+use crate::common::{Error, IsolationLevel, TopicIdPartition, TopicPartition};
 use crate::consumer::ConsumerRebalanceListener;
 use crate::consumer::OffsetAndMetadata;
-use crate::consumer::internals::ConsumerMetadata;
+use crate::consumer::internals::HeartbeatRequestManagerHooks;
+use crate::consumer::internals::MembershipManagerHooks;
 use crate::consumer::internals::RequestManagers;
+use crate::consumer::internals::{Acknowledgements, NodeAcknowledgements};
 use crate::consumer::internals::{FetchPosition, SubscriptionState};
+use crate::consumer::internals::{ShareConsumeRequestManager, ShareMembershipManager};
 
 /// Translated from `ApplicationEventProcessor`. Owns shared references to
 /// the consumer's request managers, metadata, and subscription state and
@@ -96,10 +103,13 @@ pub(crate) struct ApplicationEventProcessor {
     /// field on the bg-thread; Rust wraps in `Arc<Mutex<...>>` so the
     /// bg-task `run_once` loop can also access the same instance.
     request_managers: Arc<Mutex<RequestManagers>>,
-    /// Consumer metadata — used for `requestUpdateForNewTopics()`,
-    /// `currentLeader(...)`, `updateLastSeenEpochIfNewer(...)`,
-    /// `updateVersion()`, and `fetch()` (`Cluster` snapshot).
-    metadata: Arc<ConsumerMetadata>,
+    /// Java: `private final Metadata metadata` — used for
+    /// `requestUpdateForNewTopics()`, `currentLeader(...)`,
+    /// `updateLastSeenEpochIfNewer(...)`, `updateVersion()`, and `fetch()`
+    /// (`Cluster` snapshot). The base type, as in Java: the consumer passes its
+    /// `ConsumerMetadata`'s inner `Metadata`, and the share consumer (which has
+    /// no `ConsumerMetadata`) its `ShareConsumerMetadata`'s.
+    metadata: Arc<Metadata>,
     /// Subscription state — guarded by `std::sync::Mutex` per
     /// `consumer-threading.md` §16.
     subscriptions: Arc<Mutex<SubscriptionState>>,
@@ -146,7 +156,7 @@ impl ApplicationEventProcessor {
     )]
     pub(crate) fn new(
         request_managers: Arc<Mutex<RequestManagers>>,
-        metadata: Arc<ConsumerMetadata>,
+        metadata: Arc<Metadata>,
         subscriptions: Arc<Mutex<SubscriptionState>>,
         application_event_reaper: Arc<Mutex<CompletableEventReaper>>,
         time: Arc<dyn Time>,
@@ -1168,7 +1178,7 @@ impl ApplicationEventProcessor {
     fn process_apply_assignment(
         &mut self,
         handle: super::CompletableEventHandle<()>,
-        assigned_partitions: HashSet<TopicPartition>,
+        assigned_partitions: Vec<TopicPartition>,
         added_partitions: Vec<TopicPartition>,
     ) {
         let membership_arc = {
@@ -1498,6 +1508,215 @@ impl ApplicationEventProcessor {
             Err(poisoned) => poisoned.into_inner(),
         }
     }
+
+    // -------------------------------------------------------------------
+    // Share consumer (KIP-932) arms, `share-consumer.md` §5
+    // -------------------------------------------------------------------
+    //
+    // Each arm clones the manager it needs out of `RequestManagers` and
+    // releases that lock before calling it. The share consume request
+    // manager's lock is taken for the call only and is released before the
+    // event's handle is chained on the future the call returns.
+
+    /// The share membership manager (Java's
+    /// `requestManagers.shareHeartbeatRequestManager.get().membershipManager()`),
+    /// if a share heartbeat manager is present.
+    fn share_heartbeat_membership_manager(&self) -> Option<Arc<ShareMembershipManager>> {
+        self.lock_request_managers()
+            .share_heartbeat
+            .as_ref()
+            .map(|hrm| Arc::clone(hrm.membership_manager()))
+    }
+
+    /// The share consume request manager, if present.
+    fn share_consume_request_manager(&self) -> Option<Arc<Mutex<ShareConsumeRequestManager>>> {
+        self.lock_request_managers().share_consume.clone()
+    }
+
+    /// Java: `process(SharePollEvent)`. Reconciles (`maybeReconcile(true)`),
+    /// tells the membership manager the application polled, restarts the
+    /// poll timer, and completes the event.
+    ///
+    /// A failed reconciliation is logged by the membership manager and does
+    /// not stop the event, as Java's `void maybeReconcile` does not. An error
+    /// from `on_consumer_poll` is what Java would throw out of `process`: it
+    /// is logged as the network thread's catch logs it, and the event is left
+    /// incomplete (the application side then expires it).
+    fn process_share_poll(&mut self, poll_time_ms: i64, is_complete: &AtomicBool) {
+        let share_membership = self.lock_request_managers().share_membership.clone();
+        if let Some(share_membership) = share_membership
+            && let Err(e) = share_membership.maybe_reconcile(self.time.milliseconds(), true)
+        {
+            log::debug!("Share reconciliation did not complete: {e}");
+        }
+
+        {
+            let mut rm_guard = self.lock_request_managers();
+            if let Some(hrm) = rm_guard.share_heartbeat.as_mut() {
+                let membership_manager = Arc::clone(hrm.membership_manager());
+                if let Err(e) = membership_manager.on_consumer_poll() {
+                    log::error!("Error processing event {e}");
+                    return;
+                }
+                hrm.reset_poll_timer(poll_time_ms);
+            }
+        }
+
+        is_complete.store(true, Ordering::Release);
+    }
+
+    /// Java: `process(ShareFetchEvent)` — tells the share consume request
+    /// manager to fetch more records.
+    fn process_share_fetch(&mut self, acknowledgements_map: IndexMap<TopicIdPartition, NodeAcknowledgements>) {
+        if let Some(scrm) = self.share_consume_request_manager() {
+            lock(&scrm).fetch(acknowledgements_map);
+        }
+    }
+
+    /// Java: `process(ShareAcknowledgeSyncEvent)` — the consumer acknowledged
+    /// delivery of records synchronously.
+    ///
+    /// Without a share consume request manager Java returns without
+    /// completing the future, which the reaper then expires; so does this
+    /// (the reaper holds the handle's completion slot).
+    fn process_share_acknowledge_sync(
+        &mut self,
+        handle: super::CompletableEventHandle<HashMap<TopicIdPartition, Acknowledgements>>,
+        acknowledgements_map: IndexMap<TopicIdPartition, NodeAcknowledgements>,
+    ) {
+        let Some(scrm) = self.share_consume_request_manager() else {
+            return;
+        };
+        let future = lock(&scrm).commit_sync(acknowledgements_map, handle.deadline_ms());
+        future.when_complete(Self::complete(handle));
+    }
+
+    /// Java: `process(ShareAcknowledgeAsyncEvent)` — the consumer
+    /// acknowledged delivery of records asynchronously.
+    fn process_share_acknowledge_async(
+        &mut self,
+        acknowledgements_map: IndexMap<TopicIdPartition, NodeAcknowledgements>,
+        deadline_ms: i64,
+    ) {
+        if let Some(scrm) = self.share_consume_request_manager() {
+            lock(&scrm).commit_async(acknowledgements_map, deadline_ms);
+        }
+    }
+
+    /// Java: `process(ShareSubscriptionChangeEvent)` — the subscription
+    /// changed for a share group. This will make the consumer join the share
+    /// group if it is not part of it yet, or send the updated subscription if
+    /// it is already a member.
+    ///
+    /// An error from `subscribe_to_share_group` (the subscription type is
+    /// already another) completes the handle with it, which is what the
+    /// network thread's catch does with Java's `IllegalStateException`.
+    fn process_share_subscription_change(
+        &mut self,
+        handle: super::CompletableEventHandle<()>,
+        topics: HashSet<String>,
+    ) {
+        let Some(membership_manager) = self.share_heartbeat_membership_manager() else {
+            handle.complete_with_error(Error::kafka_message(
+                "Group membership manager not present when processing a subscribe event",
+            ));
+            return;
+        };
+
+        // The guard is released before `Metadata` is called (the lock order
+        // is `Metadata`, then `SubscriptionState`).
+        let subscribe_result = self.lock_subscriptions().subscribe_to_share_group(topics);
+        match subscribe_result {
+            Ok(true) => {
+                self.metadata.request_update_for_new_topics();
+            },
+            Ok(false) => {},
+            Err(e) => {
+                handle.complete_with_error(e);
+                return;
+            },
+        }
+
+        membership_manager.on_subscription_updated();
+
+        handle.complete(());
+    }
+
+    /// Java: `process(ShareUnsubscribeEvent)` — the consumer unsubscribed
+    /// from all topics. This will make the consumer release its assignment
+    /// and send a request to leave the share group. The handle completes when
+    /// the leave future does (the leave heartbeat is sent).
+    fn process_share_unsubscribe(&mut self, handle: super::CompletableEventHandle<()>) {
+        let Some(membership_manager) = self.share_heartbeat_membership_manager() else {
+            handle.complete_with_error(Error::kafka_message(
+                "Group membership manager not present when processing an unsubscribe event",
+            ));
+            return;
+        };
+
+        self.lock_subscriptions().unsubscribe();
+
+        match membership_manager.leave_group(self.time.milliseconds()) {
+            // The future will be completed on heartbeat sent
+            Ok(future) => future.when_complete(Self::complete(handle)),
+            Err(e) => {
+                handle.complete_with_error(e);
+            },
+        }
+    }
+
+    /// Java: `process(ShareAcknowledgeOnCloseEvent)` — the consumer is
+    /// closing. This will make the consumer complete pending
+    /// acknowledgements; the handle completes when they have responses.
+    fn process_share_acknowledge_on_close(
+        &mut self,
+        handle: super::CompletableEventHandle<()>,
+        acknowledgements_map: IndexMap<TopicIdPartition, NodeAcknowledgements>,
+    ) {
+        let Some(scrm) = self.share_consume_request_manager() else {
+            handle.complete_with_error(Error::kafka_message(
+                "Group membership manager not present when processing an acknowledge-on-close event",
+            ));
+            return;
+        };
+        let future = lock(&scrm).acknowledge_on_close(acknowledgements_map, handle.deadline_ms());
+        future.when_complete(Self::complete(handle));
+    }
+
+    /// Java: `process(ShareAcknowledgementCommitCallbackRegistrationEvent)` —
+    /// whether the acknowledgement commit callback is configured by the user.
+    fn process_share_acknowledgement_commit_callback_registration(&mut self, is_callback_registered: bool) {
+        if let Some(scrm) = self.share_consume_request_manager() {
+            lock(&scrm).set_acknowledgement_commit_callback_registered(is_callback_registered);
+        }
+    }
+
+    /// Java: `complete(CompletableFuture<T> b)` — the action that completes
+    /// `handle` with the result of the future it is chained on
+    /// (`future.whenComplete(complete(event.future()))`).
+    ///
+    /// The action only completes the handle (a non-blocking `oneshot` send),
+    /// so it may run while the manager that completes the future holds its own
+    /// lock (`ShareConsumeRequestManager::handle_completed_requests`).
+    #[doc(alias = "org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor#complete")]
+    fn complete<T: Clone + Send + 'static>(
+        handle: super::CompletableEventHandle<T>,
+    ) -> impl FnOnce(&Result<T, Error>) + Send + 'static {
+        move |result| match result {
+            Ok(value) => {
+                handle.complete(value.clone());
+            },
+            Err(e) => {
+                handle.complete_with_error(e.clone());
+            },
+        }
+    }
+}
+
+/// Locks the share consume request manager. Its state is only touched by the
+/// background task, so a poisoned lock carries no information.
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 // ============================================================================
@@ -1634,6 +1853,32 @@ impl EventProcessor<ApplicationEvent> for ApplicationEventProcessor {
             ApplicationEvent::ApplyAssignment { handle, assigned_partitions, added_partitions } => {
                 self.process_apply_assignment(handle, assigned_partitions, added_partitions);
             },
+
+            // ───── Share consumer (KIP-932) arms ─────
+            ApplicationEvent::SharePoll { deadline_ms: _, poll_time_ms, is_complete } => {
+                self.process_share_poll(poll_time_ms, &is_complete);
+            },
+            ApplicationEvent::ShareFetch { acknowledgements_map } => {
+                self.process_share_fetch(acknowledgements_map);
+            },
+            ApplicationEvent::ShareAcknowledgeSync { handle, acknowledgements_map } => {
+                self.process_share_acknowledge_sync(handle, acknowledgements_map);
+            },
+            ApplicationEvent::ShareAcknowledgeAsync { acknowledgements_map, deadline_ms } => {
+                self.process_share_acknowledge_async(acknowledgements_map, deadline_ms);
+            },
+            ApplicationEvent::ShareSubscriptionChange { handle, topics } => {
+                self.process_share_subscription_change(handle, topics);
+            },
+            ApplicationEvent::ShareUnsubscribe { handle } => {
+                self.process_share_unsubscribe(handle);
+            },
+            ApplicationEvent::ShareAcknowledgeOnClose { handle, acknowledgements_map } => {
+                self.process_share_acknowledge_on_close(handle, acknowledgements_map);
+            },
+            ApplicationEvent::ShareAcknowledgementCommitCallbackRegistration { is_callback_registered } => {
+                self.process_share_acknowledgement_commit_callback_registration(is_callback_registered);
+            },
         }
     }
 }
@@ -1668,6 +1913,7 @@ mod tests {
     use crate::consumer::internals::CommitRequestManager;
     use crate::consumer::internals::ConsumerHeartbeatRequestManager;
     use crate::consumer::internals::ConsumerMembershipManager;
+    use crate::consumer::internals::ConsumerMetadata;
     use crate::consumer::internals::ConsumerRebalanceListenerMethodName;
     use crate::consumer::internals::CoordinatorRequestManager;
     use crate::consumer::internals::OffsetsRequestManager;
@@ -1806,7 +2052,7 @@ mod tests {
         let reaper = Arc::new(Mutex::new(CompletableEventReaper::new()));
         let processor = ApplicationEventProcessor::new(
             Arc::clone(&request_managers),
-            Arc::clone(&metadata),
+            metadata.metadata_arc(),
             Arc::clone(&subscriptions),
             Arc::clone(&reaper),
             Arc::new(crate::common::utils::SystemTime),
@@ -2778,7 +3024,7 @@ mod tests {
         let reaper = Arc::new(Mutex::new(CompletableEventReaper::new()));
         let mut processor = ApplicationEventProcessor::new(
             Arc::clone(&request_managers),
-            Arc::clone(&metadata),
+            metadata.metadata_arc(),
             Arc::clone(&subscriptions),
             reaper,
             Arc::new(crate::common::utils::SystemTime),
@@ -3007,9 +3253,7 @@ mod tests {
         );
 
         // Leave heartbeat response (epoch -1) completes it.
-        mm.abstract_mm
-            .on_heartbeat_success(&leave_heartbeat_response(mm.member_id()))
-            .unwrap();
+        mm.on_heartbeat_success(&leave_heartbeat_response(mm.member_id())).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), rx)
             .await
             .expect("UnsubscribeEvent must complete once the leave response arrives")
@@ -3139,9 +3383,7 @@ mod tests {
         assert!(rx2.try_recv().is_err(), "second leave must wait for the ongoing leave");
         assert!(rx3.try_recv().is_err(), "close-time leave must wait for the ongoing leave");
 
-        mm.abstract_mm
-            .on_heartbeat_success(&leave_heartbeat_response(mm.member_id()))
-            .unwrap();
+        mm.on_heartbeat_success(&leave_heartbeat_response(mm.member_id())).unwrap();
         for rx in [rx1, rx2, rx3] {
             tokio::time::timeout(std::time::Duration::from_secs(5), rx)
                 .await
@@ -3256,9 +3498,7 @@ mod tests {
         assert!(rx.try_recv().is_err(), "still waiting for the leave heartbeat response");
 
         mm.abstract_mm.on_heartbeat_request_generated().unwrap();
-        mm.abstract_mm
-            .on_heartbeat_success(&leave_heartbeat_response(mm.member_id()))
-            .unwrap();
+        mm.on_heartbeat_success(&leave_heartbeat_response(mm.member_id())).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), rx)
             .await
             .expect("UnsubscribeEvent must complete once the leave response arrives")
@@ -4317,7 +4557,7 @@ mod tests {
         )));
         let processor = ApplicationEventProcessor::new(
             request_managers,
-            metadata,
+            metadata.metadata_arc(),
             Arc::clone(&subscriptions),
             Arc::new(Mutex::new(CompletableEventReaper::new())),
             Arc::new(crate::common::utils::SystemTime),
@@ -4902,5 +5142,538 @@ mod tests {
             "poll #2 must reach updateFetchPositions (markValidatePositionsComplete)"
         );
         drop(retried);
+    }
+
+    /// The share-consumer (KIP-932) arms (`share-consumer.md` §5). Java's
+    /// `ApplicationEventProcessorTest` has one share case,
+    /// `testSharePollEventCallsShareManagers` (through `setupShareProcessor()`);
+    /// the others are Rust-only, one or more per arm, and assert Java's
+    /// messages for the arms that fail without a manager.
+    ///
+    /// Java mocks the share managers; Rust builds the real ones through the
+    /// share supplier (`RequestManagers::supplier_with_share_acknowledgement_event_handler`)
+    /// and asserts the observable effect of each Mockito `verify`.
+    mod share {
+        use std::collections::HashMap;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use indexmap::IndexMap;
+
+        use super::*;
+        use crate::ShareGroupHeartbeatResponseData;
+        use crate::common::metrics::Metrics;
+        use crate::common::protocol::Errors;
+        use crate::common::requests::{RequestTestUtils, ShareGroupHeartbeatResponse};
+        use crate::common::utils::MockTime;
+        use crate::common::{TopicIdPartition, Uuid};
+        use crate::consumer::AcknowledgeType;
+        use crate::consumer::internals::events::{CompletableEvent, ShareAcknowledgementEventHandler};
+        use crate::consumer::internals::{
+            Acknowledgements, ConsumerUtils, MemberState, NodeAcknowledgements, ShareConsumeRequestManager,
+            ShareConsumerMetadata, ShareFetchBuffer, ShareFetchMetricsManager, ShareFetchMetricsRegistry,
+            ShareMembershipManager,
+        };
+        use crate::share_group_heartbeat_response_data::{Assignment, TopicPartitions};
+
+        const TOPIC: &str = "topic1";
+
+        /// Builds a share event around a completable handle.
+        type ShareEventOf = fn(CompletableEventHandle<()>) -> ApplicationEvent;
+        const MAX_POLL_INTERVAL_MS: i64 = 300_000;
+
+        /// Java's `setupShareProcessor()`, over the real share managers.
+        struct ShareFixture {
+            processor: ApplicationEventProcessor,
+            request_managers: Arc<Mutex<RequestManagers>>,
+            subscriptions: Arc<Mutex<SubscriptionState>>,
+            metadata: Arc<ShareConsumerMetadata>,
+            membership: Arc<ShareMembershipManager>,
+            share_consume: Arc<Mutex<ShareConsumeRequestManager>>,
+            acknowledgement_event_handler: Arc<ShareAcknowledgementEventHandler>,
+            time: Arc<MockTime>,
+            topic_id: Uuid,
+        }
+
+        fn setup_share_processor() -> ShareFixture {
+            let config = ConsumerConfig {
+                bootstrap_servers: vec!["localhost:9092".to_string()],
+                group_id: Some("share-group".to_string()),
+                ..ConsumerConfig::defaults()
+            };
+            let time = Arc::new(MockTime::new());
+            let subscriptions = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
+            let metadata = Arc::new(ShareConsumerMetadata::with_config(
+                &config,
+                Arc::clone(&subscriptions),
+                ClusterResourceListeners::new(),
+            ));
+            let metrics = Arc::new(Metrics::with_time(Arc::clone(&time) as Arc<dyn Time>));
+            let registry =
+                ShareFetchMetricsRegistry::with_metric_grp_prefix(ConsumerUtils::CONSUMER_SHARE_METRIC_GROUP_PREFIX);
+            let acknowledgement_event_handler = Arc::new(ShareAcknowledgementEventHandler::new());
+            let (background_event_tx, _background_event_rx) = mpsc::unbounded_channel();
+            let rm = RequestManagers::supplier_with_share_acknowledgement_event_handler(
+                Arc::clone(&time) as Arc<dyn Time>,
+                Arc::clone(&acknowledgement_event_handler),
+                Arc::new(BackgroundEventHandler::new(background_event_tx)),
+                Arc::clone(&metadata),
+                Arc::clone(&subscriptions),
+                Arc::new(ShareFetchBuffer::new()),
+                &config,
+                "share-group",
+                None,
+                Arc::new(ShareFetchMetricsManager::new(Arc::clone(&metrics), &registry)),
+                &metrics,
+                &Arc::new(tokio::sync::Notify::new()),
+            )
+            .expect("the default config is valid");
+            let membership = Arc::clone(rm.share_membership.as_ref().expect("share membership manager"));
+            let share_consume = Arc::clone(rm.share_consume.as_ref().expect("share consume request manager"));
+            let request_managers = Arc::new(Mutex::new(rm));
+            let processor = ApplicationEventProcessor::new(
+                Arc::clone(&request_managers),
+                metadata.metadata_arc(),
+                Arc::clone(&subscriptions),
+                Arc::new(Mutex::new(CompletableEventReaper::new())),
+                Arc::clone(&time) as Arc<dyn Time>,
+            );
+            let fx = ShareFixture {
+                processor,
+                request_managers,
+                subscriptions,
+                metadata,
+                membership,
+                share_consume,
+                acknowledgement_event_handler,
+                time,
+                topic_id: Uuid::random_uuid(),
+            };
+            fx.update_metadata(1);
+            fx
+        }
+
+        /// The processor of Java's `setupProcessor` without a group: no share
+        /// manager at all.
+        fn setup_processor_without_share_managers() -> (ApplicationEventProcessor, Arc<Mutex<CompletableEventReaper>>) {
+            let fx = setup_processor(false);
+            (fx.processor, fx.reaper)
+        }
+
+        impl ShareFixture {
+            fn now(&self) -> i64 {
+                self.time.milliseconds()
+            }
+
+            /// One node leading the topic's `partitions` partitions. The metadata
+            /// keeps only the subscribed topics, so a test that subscribes
+            /// updates it again.
+            fn update_metadata(&self, partitions: i32) {
+                let response = RequestTestUtils::metadata_update_with_ids(
+                    "kafka-cluster",
+                    1,
+                    &HashMap::new(),
+                    &HashMap::from([(TOPIC.to_string(), partitions)]),
+                    &|_| Some(0),
+                    &HashMap::from([(TOPIC.to_string(), self.topic_id)]),
+                );
+                self.metadata.update_with_current_request_version(&response, false, self.now());
+            }
+
+            fn subscribe(&mut self) {
+                let (handle, rx) = CompletableEventHandle::<()>::new(i64::MAX);
+                self.processor.process(ApplicationEvent::ShareSubscriptionChange {
+                    handle,
+                    topics: HashSet::from([TOPIC.to_string()]),
+                });
+                await_complete(rx).expect("subscribed");
+            }
+
+            fn share_poll(&mut self, poll_time_ms: i64) -> bool {
+                let is_complete = Arc::new(AtomicBool::new(false));
+                self.processor.process(ApplicationEvent::SharePoll {
+                    deadline_ms: poll_time_ms + 1,
+                    poll_time_ms,
+                    is_complete: Arc::clone(&is_complete),
+                });
+                is_complete.load(Ordering::Acquire)
+            }
+
+            /// A heartbeat response assigning `partitions` of the topic at
+            /// `member_epoch`.
+            fn receive_assignment(&self, partitions: Vec<i32>, member_epoch: i32) {
+                let mut topic_partitions = TopicPartitions::new();
+                topic_partitions.set_topic_id(self.topic_id).set_partitions(partitions);
+                let mut assignment = Assignment::new();
+                assignment.set_topic_partitions(vec![topic_partitions]);
+                let mut data = ShareGroupHeartbeatResponseData::new();
+                data.set_error_code(Errors::None.code())
+                    .set_member_id(Some(self.membership.member_id()))
+                    .set_member_epoch(member_epoch)
+                    .set_assignment(Some(assignment));
+                self.membership
+                    .abstract_mm
+                    .on_heartbeat_success::<ShareMembershipManager>(&ShareGroupHeartbeatResponse::new(data))
+                    .expect("heartbeat success");
+            }
+
+            fn poll_timer_remaining_ms(&self) -> i64 {
+                let rm = self.request_managers.lock().unwrap();
+                rm.share_heartbeat
+                    .as_ref()
+                    .expect("share heartbeat manager")
+                    .inner()
+                    .poll_timer_remaining_ms(self.now())
+            }
+
+            fn tip(&self) -> TopicIdPartition {
+                TopicIdPartition::new(self.topic_id, TopicPartition::new(TOPIC.to_string(), 0))
+            }
+
+            fn node_acknowledgements(&self, offset: i64) -> IndexMap<TopicIdPartition, NodeAcknowledgements> {
+                let mut acknowledgements = Acknowledgements::empty();
+                acknowledgements.add(offset, Some(AcknowledgeType::Accept));
+                IndexMap::from([(self.tip(), NodeAcknowledgements::new(0, acknowledgements))])
+            }
+
+            /// Polls the share consume request manager, as `run_once` does
+            /// through `RequestManagers::entries`.
+            fn poll_share_consume(&self) -> usize {
+                let now = self.now();
+                lock(&self.share_consume).poll(now).unsent_requests.len()
+            }
+        }
+
+        /// Java `testSharePollEventCallsShareManagers`:
+        /// `verify(shareMembershipManager).maybeReconcile(true)`,
+        /// `verify(shareMembershipManager).onConsumerPoll()` and
+        /// `verify(shareHeartbeatRequestManager).resetPollTimer(event.pollTimeMs())`,
+        /// then `assertTrue(event.isComplete())`.
+        ///
+        /// Each `verify` becomes the effect of the real call: `onConsumerPoll`
+        /// moves a member whose subscription was updated from UNSUBSCRIBED to
+        /// JOINING; `resetPollTimer` arms the poll timer for
+        /// `max.poll.interval.ms`; `maybeReconcile(true)` applies an assignment
+        /// the member received. The last step revokes a partition, which only
+        /// `maybeReconcile(true)` reconciles (`AbstractMembershipManager#maybeReconcile`
+        /// returns early for `canCommit == false` when partitions are revoked),
+        /// so the test fails if the arm passes `false`.
+        #[test]
+        #[doc(
+            alias = "org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessorTest#testSharePollEventCallsShareManagers"
+        )]
+        fn test_share_poll_event_calls_share_managers() {
+            let mut fx = setup_share_processor();
+            fx.subscribe();
+            assert_eq!(MemberState::Unsubscribed, fx.membership.state());
+            assert_eq!(
+                i64::MAX - fx.now(),
+                fx.poll_timer_remaining_ms(),
+                "not armed before the first poll"
+            );
+
+            let poll_time_ms = fx.now();
+            assert!(fx.share_poll(poll_time_ms));
+            assert_eq!(MemberState::Joining, fx.membership.state(), "onConsumerPoll joins the group");
+            assert_eq!(MAX_POLL_INTERVAL_MS, fx.poll_timer_remaining_ms(), "resetPollTimer(pollTimeMs)");
+
+            fx.receive_assignment(vec![0], 1);
+            assert_eq!(MemberState::Reconciling, fx.membership.state());
+            assert!(fx.subscriptions.lock().unwrap().assigned_partitions().is_empty());
+
+            assert!(fx.share_poll(fx.now()));
+            assert_eq!(
+                HashSet::from([TopicPartition::new(TOPIC.to_string(), 0)]),
+                fx.subscriptions.lock().unwrap().assigned_partitions(),
+                "maybeReconcile(true) applies the assignment"
+            );
+            assert_eq!(MemberState::Acknowledging, fx.membership.state());
+
+            // A new assignment that revokes partition 0.
+            fx.update_metadata(2);
+            fx.membership.on_heartbeat_request_generated().expect("acknowledged");
+            assert_eq!(MemberState::Stable, fx.membership.state());
+            fx.receive_assignment(vec![1], 2);
+            assert!(fx.share_poll(fx.now()));
+            assert_eq!(
+                HashSet::from([TopicPartition::new(TOPIC.to_string(), 1)]),
+                fx.subscriptions.lock().unwrap().assigned_partitions(),
+                "maybeReconcile(true) also reconciles a revocation"
+            );
+        }
+
+        /// Java's share `RequestManagers#entries()` order, share heartbeat →
+        /// share membership → share consume, is what lets a reconciled
+        /// assignment be fetched in the same `ConsumerNetworkThread#runOnce`:
+        /// the membership manager's `poll` (`maybeReconcile(true)`) assigns the
+        /// partition, then the share consume manager's `poll` builds its
+        /// `ShareFetch`. One walk of `entries()`, as `run_once` makes it, sends
+        /// exactly one `ShareFetch`; with membership and consume swapped it
+        /// would send none.
+        #[test]
+        fn one_entries_walk_fetches_the_partition_the_membership_poll_just_assigned() {
+            let mut fx = setup_share_processor();
+            fx.subscribe();
+            fx.update_metadata(1);
+            assert!(fx.share_poll(fx.now()));
+            assert_eq!(MemberState::Joining, fx.membership.state());
+            fx.processor
+                .process(ApplicationEvent::ShareFetch { acknowledgements_map: IndexMap::new() });
+            fx.receive_assignment(vec![0], 1);
+            assert_eq!(MemberState::Reconciling, fx.membership.state());
+
+            let now = fx.now();
+            let mut sent = 0;
+            for rm in fx.request_managers.lock().unwrap().entries() {
+                sent += rm.poll(now).unsent_requests.len();
+            }
+            assert_eq!(1, sent, "the ShareFetch for the partition the membership poll just assigned");
+        }
+
+        /// `process(ShareSubscriptionChangeEvent)`: `subscribeToShareGroup`,
+        /// `requestUpdateForNewTopics()` only when the subscription changed,
+        /// `onSubscriptionUpdated()`, then the future completes.
+        #[test]
+        fn share_subscription_change_subscribes_and_requests_metadata_only_on_change() {
+            let mut fx = setup_share_processor();
+            // `requestUpdateForNewTopics` resets the equivalent-response
+            // backoff count; a seeded count shows whether it ran.
+            fx.metadata.set_equivalent_response_count_for_test(5);
+            fx.subscribe();
+            assert_eq!(
+                HashSet::from([TOPIC.to_string()]),
+                fx.subscriptions.lock().unwrap().subscription()
+            );
+            assert_eq!(0, fx.metadata.equivalent_response_count_for_test(), "requestUpdateForNewTopics");
+            assert!(
+                fx.membership.abstract_mm.inner.lock().unwrap().subscription_updated,
+                "onSubscriptionUpdated"
+            );
+
+            fx.metadata.set_equivalent_response_count_for_test(5);
+            fx.subscribe();
+            assert_eq!(
+                5,
+                fx.metadata.equivalent_response_count_for_test(),
+                "an unchanged subscription requests nothing"
+            );
+        }
+
+        /// `subscribeToShareGroup` throws when the consumer already uses another
+        /// subscription type; Java's network thread completes the event's future
+        /// with that exception.
+        #[test]
+        fn share_subscription_change_fails_on_another_subscription_type() {
+            let mut fx = setup_share_processor();
+            fx.subscriptions
+                .lock()
+                .unwrap()
+                .assign_from_user(HashSet::from([TopicPartition::new(TOPIC.to_string(), 0)]))
+                .expect("assign");
+            let (handle, rx) = CompletableEventHandle::<()>::new(i64::MAX);
+            fx.processor.process(ApplicationEvent::ShareSubscriptionChange {
+                handle,
+                topics: HashSet::from([TOPIC.to_string()]),
+            });
+            let err = await_complete(rx).expect_err("a user assignment excludes a subscription");
+            assert!(matches!(err, Error::LocalIllegalState(_)), "{err:?}");
+            assert_eq!(
+                "Subscription to topics, partitions and pattern are mutually exclusive",
+                err.message()
+            );
+            assert!(!fx.membership.abstract_mm.inner.lock().unwrap().subscription_updated);
+        }
+
+        /// `process(ShareUnsubscribeEvent)`: `subscriptions.unsubscribe()`, then
+        /// `leaveGroup()`, whose future completes the event's. A member in the
+        /// group is LEAVING until its leave heartbeat is sent (here: skipped, as
+        /// no coordinator is known), and only then does the event complete.
+        #[test]
+        fn share_unsubscribe_unsubscribes_and_completes_when_the_leave_does() {
+            let mut fx = setup_share_processor();
+            fx.subscribe();
+            assert!(fx.share_poll(fx.now()));
+            fx.receive_assignment(vec![0], 1);
+            assert!(fx.share_poll(fx.now()));
+            assert_eq!(MemberState::Acknowledging, fx.membership.state());
+
+            let (handle, mut rx) = CompletableEventHandle::<()>::new(i64::MAX);
+            fx.processor.process(ApplicationEvent::ShareUnsubscribe { handle });
+            assert!(
+                fx.subscriptions.lock().unwrap().subscription().is_empty(),
+                "subscriptions.unsubscribe()"
+            );
+            assert_eq!(MemberState::Leaving, fx.membership.state());
+            assert!(rx.try_recv().is_err(), "the event completes with the leave, not before");
+
+            // The heartbeat manager's poll, as `run_once` makes it.
+            let now = fx.now();
+            for rm in fx.request_managers.lock().unwrap().entries() {
+                let _ = rm.poll(now);
+            }
+            assert_eq!(MemberState::Unsubscribed, fx.membership.state());
+            assert!(matches!(rx.try_recv(), Ok(Ok(()))));
+        }
+
+        /// `process(ShareFetchEvent)` calls `fetch(acknowledgementsMap)`, which
+        /// makes the next poll of the share consume request manager build a
+        /// `ShareFetch`; without the event it builds none.
+        #[test]
+        fn share_fetch_tells_the_share_consume_request_manager_to_fetch() {
+            let mut fx = setup_share_processor();
+            fx.subscribe();
+            fx.update_metadata(1);
+            fx.subscriptions
+                .lock()
+                .unwrap()
+                .assign_from_subscribed(&[TopicPartition::new(TOPIC.to_string(), 0)])
+                .expect("assign");
+            let member_id = Uuid::random_uuid().to_string();
+            lock(&fx.share_consume).on_member_epoch_updated(Some(1), &member_id);
+            assert_eq!(0, fx.poll_share_consume(), "nothing to fetch before a ShareFetchEvent");
+
+            fx.processor
+                .process(ApplicationEvent::ShareFetch { acknowledgements_map: IndexMap::new() });
+            assert_eq!(1, fx.poll_share_consume(), "one ShareFetch to the leader");
+        }
+
+        /// `process(ShareAcknowledgeAsyncEvent)` calls `commitAsync`. With no
+        /// share session for the node, the manager fails the acknowledgements at
+        /// once and emits a `ShareAcknowledgementEvent` with them.
+        #[test]
+        fn share_acknowledge_async_commits_through_the_share_consume_request_manager() {
+            let mut fx = setup_share_processor();
+            let deadline_ms = fx.now() + 30_000;
+            fx.processor.process(ApplicationEvent::ShareAcknowledgeAsync {
+                acknowledgements_map: fx.node_acknowledgements(5),
+                deadline_ms,
+            });
+            let events = fx.acknowledgement_event_handler.drain_events();
+            assert_eq!(1, events.len());
+            let acknowledgements = &events[0].acknowledgements_map()[&fx.tip()];
+            assert_eq!(
+                Some(Some(AcknowledgeType::Accept)),
+                acknowledgements.acknowledgements_type_map().get(&5).copied()
+            );
+            let expected = Errors::NetworkError.error().expect("an error");
+            let error = acknowledgements.acknowledge_error().expect("failed");
+            assert_eq!(expected.message(), error.message());
+        }
+
+        /// `process(ShareAcknowledgeSyncEvent)` chains the event's future on
+        /// `commitSync`'s (`whenComplete(complete(event.future()))`); with
+        /// nothing to acknowledge, that future is already complete.
+        #[test]
+        fn share_acknowledge_sync_completes_with_the_commit_sync_future() {
+            let mut fx = setup_share_processor();
+            let (handle, rx) =
+                CompletableEventHandle::<HashMap<TopicIdPartition, Acknowledgements>>::new(fx.now() + 1_000);
+            fx.processor
+                .process(ApplicationEvent::ShareAcknowledgeSync { handle, acknowledgements_map: IndexMap::new() });
+            let result = await_complete_value(rx).expect("commitSync completes");
+            assert!(result.is_empty());
+        }
+
+        /// `process(ShareAcknowledgeOnCloseEvent)` chains the event's future on
+        /// `acknowledgeOnClose`'s. The manager completes that future on its next
+        /// poll (no member id yet), from inside its own lock, and the event
+        /// completes then.
+        #[test]
+        fn share_acknowledge_on_close_completes_when_the_close_future_does() {
+            let mut fx = setup_share_processor();
+            let (handle, mut rx) = CompletableEventHandle::<()>::new(fx.now() + 1_000);
+            fx.processor
+                .process(ApplicationEvent::ShareAcknowledgeOnClose { handle, acknowledgements_map: IndexMap::new() });
+            assert!(rx.try_recv().is_err(), "not before the manager's poll");
+
+            assert_eq!(0, fx.poll_share_consume());
+            assert!(matches!(rx.try_recv(), Ok(Ok(()))));
+        }
+
+        /// `process(ShareAcknowledgementCommitCallbackRegistrationEvent)` calls
+        /// `setAcknowledgementCommitCallbackRegistered(isCallbackRegistered)`.
+        /// The flag's effect (a successful acknowledgement emits a
+        /// `ShareAcknowledgementEvent` only when it is set) needs a response, so
+        /// it is pinned by the `run_once` tests in
+        /// `share_consume_request_manager.rs`.
+        #[test]
+        fn share_acknowledgement_commit_callback_registration_sets_the_flag() {
+            let mut fx = setup_share_processor();
+            for registered in [true, false, true] {
+                fx.processor
+                    .process(ApplicationEvent::ShareAcknowledgementCommitCallbackRegistration {
+                        is_callback_registered: registered,
+                    });
+                assert_eq!(
+                    registered,
+                    lock(&fx.share_consume).is_acknowledgement_commit_callback_registered_for_test()
+                );
+            }
+        }
+
+        /// Without the share managers (Java's processor with
+        /// `requestManagers.share*` empty): the subscribe, unsubscribe and
+        /// acknowledge-on-close arms fail with Java's `KafkaException` texts,
+        /// the sync-acknowledge arm returns without completing the future (the
+        /// reaper expires it), and the other arms do nothing but complete the
+        /// poll event.
+        #[test]
+        fn share_events_without_share_managers() {
+            let (mut processor, reaper) = setup_processor_without_share_managers();
+            let cases: [(&str, ShareEventOf); 3] = [
+                (
+                    "Group membership manager not present when processing a subscribe event",
+                    |handle| ApplicationEvent::ShareSubscriptionChange {
+                        handle,
+                        topics: HashSet::from([TOPIC.to_string()]),
+                    },
+                ),
+                (
+                    "Group membership manager not present when processing an unsubscribe event",
+                    |handle| ApplicationEvent::ShareUnsubscribe { handle },
+                ),
+                (
+                    "Group membership manager not present when processing an acknowledge-on-close event",
+                    |handle| ApplicationEvent::ShareAcknowledgeOnClose {
+                        handle,
+                        acknowledgements_map: IndexMap::new(),
+                    },
+                ),
+            ];
+            for (message, event) in cases {
+                let (handle, rx) = CompletableEventHandle::<()>::new(i64::MAX);
+                processor.process(event(handle));
+                let err = await_complete(rx).expect_err(message);
+                assert_eq!(message, err.message());
+                assert!(err.is_kafka_error(), "Java's bare KafkaException: {err:?}");
+                assert!(!matches!(err, Error::LocalIllegalState(_)), "{err:?}");
+            }
+
+            let (handle, mut rx, erased) =
+                CompletableEvent::make_completable_event::<HashMap<TopicIdPartition, Acknowledgements>>(100);
+            reaper.lock().unwrap().add(erased);
+            processor.process(ApplicationEvent::ShareAcknowledgeSync { handle, acknowledgements_map: IndexMap::new() });
+            assert!(rx.try_recv().is_err(), "Java returns without completing the future");
+            reaper.lock().unwrap().reap(100);
+            assert!(matches!(rx.try_recv(), Ok(Err(Error::Timeout(_)))), "the reaper expires it");
+
+            processor.process(ApplicationEvent::ShareFetch { acknowledgements_map: IndexMap::new() });
+            processor.process(ApplicationEvent::ShareAcknowledgeAsync {
+                acknowledgements_map: IndexMap::new(),
+                deadline_ms: 0,
+            });
+            processor.process(ApplicationEvent::ShareAcknowledgementCommitCallbackRegistration {
+                is_callback_registered: true,
+            });
+            let is_complete = Arc::new(AtomicBool::new(false));
+            processor.process(ApplicationEvent::SharePoll {
+                deadline_ms: 1,
+                poll_time_ms: 0,
+                is_complete: Arc::clone(&is_complete),
+            });
+            assert!(
+                is_complete.load(Ordering::Acquire),
+                "completeSuccessfully() without share managers too"
+            );
+        }
     }
 }

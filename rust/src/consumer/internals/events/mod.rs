@@ -39,6 +39,8 @@ mod background_event_handler;
 mod completable_event;
 mod completable_event_reaper;
 mod event_processor;
+mod share_acknowledgement_event;
+mod share_acknowledgement_event_handler;
 
 pub(crate) use application_event::{ApplicationEvent, ApplicationEventEnvelope, AsyncPollState};
 pub(crate) use application_event_handler::ApplicationEventHandler;
@@ -48,3 +50,5 @@ pub(crate) use background_event_handler::BackgroundEventHandler;
 pub(crate) use completable_event::{CompletableEvent, CompletableEventErasedHandle, CompletableEventHandle};
 pub(crate) use completable_event_reaper::CompletableEventReaper;
 pub(crate) use event_processor::EventProcessor;
+pub(crate) use share_acknowledgement_event::ShareAcknowledgementEvent;
+pub(crate) use share_acknowledgement_event_handler::ShareAcknowledgementEventHandler;

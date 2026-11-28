@@ -39,7 +39,7 @@ export MULTILANG_IMAGE_TAG
 
 .PHONY: build build-integration-tests build-all-features build-cdylib \
 	devel-build devel-build-integration-tests devel-build-all-features build-tests-all-features \
-	test test-all-features test-all-features-ssl test-all-features-sasl-ssl \
+	test test-all-features test-all-features-ssl test-all-features-sasl-ssl test-integration-broker-4.4 \
 	test-integration test-integration-plaintext test-integration-ssl test-integration-sasl-ssl \
 	test-integration-grpc-python test-integration-grpc-c test-integration-grpc-dotnet \
 	test-integration-grpc-python-native test-integration-grpc-c-native test-integration-grpc-dotnet-native \
@@ -216,6 +216,24 @@ test-all-features-ssl:
 	INTEGRATION_TEST_PROTOCOL=ssl $(MAKE) test-all-features
 test-all-features-sasl-ssl:
 	INTEGRATION_TEST_PROTOCOL=sasl_ssl $(MAKE) test-all-features
+
+# The 4.4 broker leg: the integration tests that skip themselves on the default
+# 4.2.0 broker image (kafka_cluster::broker_release() gates), run against
+# apache/kafka 4.4.0 so they run somewhere in CI. They are the share consumer
+# suites (the 4.4-only DLQ, rack-aware and added-partitions tests, the 4.3+
+# group-config and lag tests, the `_assignment_interval_*` arms), the
+# assignment-interval arms of the consumer max-size bounce test, and the 4.3+
+# quota-config test. Only these, and only over the PLAINTEXT listener: Java's
+# gating is by broker release, not by protocol, and the whole binary on a
+# second broker version would double the job's broker memory (the share suites
+# alone peak at ~6 GiB of containers). The filters are libtest substrings, so
+# the plain-named tests of a gated pair also run here and skip themselves.
+BROKER_4_4_TESTS = share_consumer \
+	consumer_bounce_test::test_async_consumer_receives_fatal_exception_when_group_passes_max_size \
+	admin_bootstrap_controllers_test::test_quota_configs_is_read_only_should_be_false
+test-integration-broker-4.4:
+	INTEGRATION_TEST_BROKER_TAG=4.4.0 INTEGRATION_TEST_PROTOCOL=plaintext \
+		$(CARGO_TEST) --features integration-tests --test integration -- $(BROKER_4_4_TESTS)
 
 # ── Per-backend multilanguage integration tests ──────────────────────────
 #

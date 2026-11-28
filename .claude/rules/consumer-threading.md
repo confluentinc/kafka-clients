@@ -561,12 +561,11 @@ compatibility but is NOT in scope now.
   - `ConsumerDelegate`, `ConsumerDelegateCreator` (only needed for >1
     delegate; collapses to direct `Box::new(AsyncKafkaConsumer)` per
     section 2).
-  - All share-consumer files (KIP-932): `KafkaShareConsumer`,
-    `MockShareConsumer`, `ShareConsumer`, `ShareConsumerConfig`,
-    `ShareConsumerImpl`, `Acknowledgements`, `AcknowledgeType`,
-    `AcknowledgementCommitCallback`, `AcknowledgementCommitCallbackHandler`,
-    `ShareCompletedFetch`, `ShareConsumeRequestManager`,
-    `ShareAcknowledgementMode`, `ShareAcquireMode`, related tests.
+
+**Share consumer (KIP-932):** no longer out of scope. Since Milestone 18 the
+share-consumer files and their tests are translated under
+[share-consumer.md](share-consumer.md), which supplements this file for
+share-consumer code.
 
 **Tests out of scope** (do NOT translate, do not block DoD on these):
 
@@ -575,7 +574,8 @@ compatibility but is NOT in scope now.
   - `RangeAssignorTest`, `RoundRobinAssignorTest`, `StickyAssignorTest`,
     `AbstractStickyAssignorTest`, `CooperativeStickyAssignorTest`,
     `ConsumerPartitionAssignorTest`, `ConsumerProtocolTest`.
-  - All `Share*Test` files.
+  - (`Share*Test` files are in scope; see
+    [share-consumer.md](share-consumer.md).)
 
 **Public API behavior for out-of-scope features:**
 
@@ -729,7 +729,7 @@ COMMENTS.DONE entry. Examples of legitimate deviations:
     de-duplication when the bg-side handling is identical).
   - Deferring a variant to a later phase because its dependencies
     aren't in scope yet.
-  - An out-of-scope event family (Streams, Share per §20) — skipped
+  - An out-of-scope event family (Streams) — skipped
     entirely, not silently included as non-completable.
   - A custom payload shape because Java uses its own state-machine
     inside the event (`AsyncPollEvent` is the precedent: bare
