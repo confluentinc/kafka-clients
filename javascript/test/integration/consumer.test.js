@@ -965,20 +965,27 @@ listenerTest(
         ({ offsets, exception }) => {
           seen.push([what, offsets === null ? null : String(offsets), exception === null ? null : exception.constructor.name]);
         };
+      // The empty map first: Java's AsyncKafkaConsumer#commit answers it with
+      // a completed future, which becomes the last pending async commit, so
+      // committed last it would leave commitSync() nothing to wait for.
+      await consumer.commitAsync({ offsets: new TopicPartitionMap(), callback: record('empty') });
       await consumer.commitAsync({ offsets: new TopicPartitionMap([[tp, new OffsetAndMetadata(1n)]]), callback: record('ok') });
       // Beyond the broker's offset.metadata.max.bytes, 4096: the commit fails.
       const tooLarge = new OffsetAndMetadata({ offset: 2n, leaderEpoch: null, metadata: 'x'.repeat(5000) });
       await consumer.commitAsync({ offsets: new TopicPartitionMap([[tp, tooLarge]]), callback: record('failed') });
-      await consumer.commitAsync({ offsets: new TopicPartitionMap(), callback: record('empty') });
-      // A callback runs only inside a waiting call: an earlier commit's may
-      // already have run inside a later commitAsync(), whose commit() runs the
-      // callbacks whose answers came back first, as Java's
-      // AsyncKafkaConsumer#commit runs offsetCommitCallbackInvoker
-      // .executeCallbacks(); none runs while no call waits.
+      // A callback runs only inside a waiting call, never inside its own
+      // commitAsync(): an earlier commit's may already have run inside a later
+      // commitAsync(), whose commit() first runs the callbacks whose answers
+      // came back (Java's AsyncKafkaConsumer#commit runs
+      // offsetCommitCallbackInvoker.executeCallbacks()), but not the last
+      // one's, and none runs while no call waits.
+      assert.ok(!seen.some(([what]) => what === 'failed'), 'the last commit ran its callback inside its own commitAsync()');
       const ranBeforeIdle = seen.length;
       await new Promise((resolve) => setTimeout(resolve, 1000));
       assert.equal(seen.length, ranBeforeIdle);
-      // commitSync() waits for the commits before it and runs their callbacks.
+      // commitSync() waits for the last pending async commit, the failed one,
+      // which completes after the commits before it, and runs every callback
+      // still waiting.
       await consumer.commitSync();
       assert.deepEqual(
         [...seen].sort(),
