@@ -1456,10 +1456,41 @@ function groupMetadataReaders(metadata: ConsumerGroupMetadata): void {
   expectTypeOf(metadata.hashCode()).toEqualTypeOf<number>();
 }
 void groupMetadataReaders;
+// The value classes' Object and JSON methods, and the enums' readers.
+function valueClassMethods(metadata: ConsumerGroupMetadata): void {
+  expectTypeOf(withEpoch.toString()).toEqualTypeOf<string>();
+  expectTypeOf(withEpoch.toJSON().offset).toEqualTypeOf<string>();
+  expectTypeOf(found.toString()).toEqualTypeOf<string>();
+  expectTypeOf(found.hashCode()).toEqualTypeOf<number>();
+  expectTypeOf(found.toJSON().timestamp).toEqualTypeOf<string>();
+  expectTypeOf(bare.toString()).toEqualTypeOf<string>();
+  expectTypeOf(bare.hashCode()).toEqualTypeOf<number>();
+  expectTypeOf(bare.toJSON().pattern).toEqualTypeOf<string | null>();
+  expectTypeOf(metadata.toString()).toEqualTypeOf<string>();
+  expectTypeOf(metadata.toJSON().groupId).toEqualTypeOf<string>();
+  expectTypeOf(GroupProtocol.CLASSIC.toString()).toEqualTypeOf<string>();
+  expectTypeOf(GroupProtocol.CLASSIC.ordinal()).toEqualTypeOf<number>();
+  expectTypeOf(CloseOptions.GroupMembershipOperation.LEAVE_GROUP.name()).toEqualTypeOf<string>();
+  expectTypeOf(CloseOptions.GroupMembershipOperation.LEAVE_GROUP.toString()).toEqualTypeOf<string>();
+  expectTypeOf(CloseOptions.GroupMembershipOperation.LEAVE_GROUP.toJSON()).toEqualTypeOf<string>();
+}
+void valueClassMethods;
+// The consumer's errors with no form above: each constructor form.
+import { CommitFailedError, InvalidOffsetError, RetriableCommitFailedError } from '@confluentinc/kafka-javascript/consumer';
+void new CommitFailedError();
+void new CommitFailedError('m');
+void new CommitFailedError({ message: null });
+void new RetriableCommitFailedError(new Error('cause'));
+void new RetriableCommitFailedError({ cause: null });
+void new RetriableCommitFailedError('m');
+void new RetriableCommitFailedError({ message: 'm' });
+void new RetriableCommitFailedError({ message: 'm', cause: new Error('cause') });
+expectTypeOf(new NoOffsetForPartitionError({ partition: formsTp })).toMatchTypeOf<InvalidOffsetError>();
+// @ts-expect-error InvalidOffsetError is abstract, as Java's InvalidOffsetException is
+void new InvalidOffsetError('m');
 
-// Every form of the Consumer interface, through which a KafkaConsumer and a
-// MockConsumer are both passed: each class's own signatures must satisfy
-// every overload the interface declares.
+// Every form of the Consumer interface, on a Consumer-typed receiver: the
+// interface's own signatures. Each class's are below, called on the class.
 async function everyConsumerForm(consumer: Consumer<string, number>): Promise<void> {
   const tp = formsTp;
   const offsets = new TopicPartitionMap<OffsetAndMetadata>([[tp, new OffsetAndMetadata(1)]]);
@@ -1539,8 +1570,162 @@ async function everyConsumerForm(consumer: Consumer<string, number>): Promise<vo
 }
 void everyConsumerForm;
 
+// Every Consumer form called on each class itself, so that each class's own
+// overload signatures compile: an iterable that is no array where one is taken.
+async function everyKafkaConsumerForm(c: KafkaConsumer<string, number>): Promise<void> {
+  const tp = formsTp;
+  const tps = new Set([tp]);
+  const offsets = new TopicPartitionMap<OffsetAndMetadata>([[tp, new OffsetAndMetadata(1)]]);
+  const times = new TopicPartitionMap<bigint | number>([[tp, 0]]);
+  const listener: ConsumerRebalanceListener = { onPartitionsRevoked() {}, onPartitionsAssigned() {} };
+  const pattern = new SubscriptionPattern('t.*');
+  expectTypeOf(c.assignment()).toEqualTypeOf<TopicPartitionSet>();
+  expectTypeOf(c.subscription()).toEqualTypeOf<Set<string>>();
+  await c.subscribe({ topics: new Set(['t']) });
+  await c.subscribe(new Set(['t']));
+  await c.subscribe({ topics: ['t'], callback: listener });
+  await c.subscribe({ pattern, callback: listener });
+  await c.subscribe({ pattern });
+  await c.subscribe(pattern);
+  await c.assign({ partitions: tps });
+  await c.assign(tps);
+  await c.unsubscribe();
+  expectTypeOf(await c.poll({ timeout: 0 })).toEqualTypeOf<ConsumerRecords<string, number>>();
+  expectTypeOf(await c.poll(0)).toEqualTypeOf<ConsumerRecords<string, number>>();
+  await c.commitSync();
+  await c.commitSync({ timeout: 1 });
+  await c.commitSync(1);
+  await c.commitSync({ offsets });
+  await c.commitSync(offsets);
+  await c.commitSync({ offsets, timeout: 1 });
+  await c.commitAsync();
+  await c.commitAsync({ callback: null });
+  await c.commitAsync(() => undefined);
+  await c.commitAsync({ offsets, callback: () => undefined });
+  await c.seek({ partition: tp, offset: 0 });
+  await c.seek({ partition: tp, offsetAndMetadata: new OffsetAndMetadata(0) });
+  await c.seekToBeginning({ partitions: tps });
+  await c.seekToBeginning(tps);
+  await c.seekToEnd({ partitions: tps });
+  await c.seekToEnd(tps);
+  expectTypeOf(await c.position({ partition: tp })).toEqualTypeOf<bigint>();
+  expectTypeOf(await c.position(tp)).toEqualTypeOf<bigint>();
+  expectTypeOf(await c.position({ partition: tp, timeout: 1 })).toEqualTypeOf<bigint>();
+  expectTypeOf(await c.committed({ partitions: tps })).toEqualTypeOf<TopicPartitionMap<OffsetAndMetadata | null>>();
+  expectTypeOf(await c.committed(tps)).toEqualTypeOf<TopicPartitionMap<OffsetAndMetadata | null>>();
+  expectTypeOf(await c.committed({ partitions: tps, timeout: 1 })).toEqualTypeOf<TopicPartitionMap<OffsetAndMetadata | null>>();
+  expectTypeOf(c.metrics()).toEqualTypeOf<MetricNameMap<Metric>>();
+  expectTypeOf(await c.partitionsFor({ topic: 't' })).toEqualTypeOf<PartitionInfo[]>();
+  expectTypeOf(await c.partitionsFor('t')).toEqualTypeOf<PartitionInfo[]>();
+  expectTypeOf(await c.partitionsFor({ topic: 't', timeout: 1 })).toEqualTypeOf<PartitionInfo[]>();
+  expectTypeOf(await c.listTopics()).toEqualTypeOf<Map<string, PartitionInfo[]>>();
+  expectTypeOf(await c.listTopics({ timeout: 1 })).toEqualTypeOf<Map<string, PartitionInfo[]>>();
+  expectTypeOf(await c.listTopics(1)).toEqualTypeOf<Map<string, PartitionInfo[]>>();
+  expectTypeOf(c.paused()).toEqualTypeOf<TopicPartitionSet>();
+  await c.pause({ partitions: tps });
+  await c.pause(tps);
+  await c.resume({ partitions: tps });
+  await c.resume(tps);
+  expectTypeOf(await c.offsetsForTimes({ timestampsToSearch: times })).toEqualTypeOf<TopicPartitionMap<OffsetAndTimestamp | null>>();
+  expectTypeOf(await c.offsetsForTimes(times)).toEqualTypeOf<TopicPartitionMap<OffsetAndTimestamp | null>>();
+  expectTypeOf(await c.offsetsForTimes({ timestampsToSearch: times, timeout: 1 })).toEqualTypeOf<
+    TopicPartitionMap<OffsetAndTimestamp | null>
+  >();
+  expectTypeOf(await c.beginningOffsets({ partitions: tps })).toEqualTypeOf<TopicPartitionMap<bigint>>();
+  expectTypeOf(await c.beginningOffsets(tps)).toEqualTypeOf<TopicPartitionMap<bigint>>();
+  expectTypeOf(await c.beginningOffsets({ partitions: tps, timeout: 1 })).toEqualTypeOf<TopicPartitionMap<bigint>>();
+  expectTypeOf(await c.endOffsets({ partitions: tps })).toEqualTypeOf<TopicPartitionMap<bigint>>();
+  expectTypeOf(await c.endOffsets(tps)).toEqualTypeOf<TopicPartitionMap<bigint>>();
+  expectTypeOf(await c.endOffsets({ partitions: tps, timeout: 1 })).toEqualTypeOf<TopicPartitionMap<bigint>>();
+  expectTypeOf(await c.currentLag({ topicPartition: tp })).toEqualTypeOf<bigint | null>();
+  expectTypeOf(await c.currentLag(tp)).toEqualTypeOf<bigint | null>();
+  expectTypeOf(c.groupMetadata()).toEqualTypeOf<ConsumerGroupMetadata>();
+  expectTypeOf(c.wakeup()).toEqualTypeOf<void>();
+  await c.close();
+  await c.close({ option: new CloseOptions() });
+  await c.close(new CloseOptions());
+  await c[Symbol.asyncDispose]();
+}
+void everyKafkaConsumerForm;
+
+async function everyMockConsumerForm(c: MockConsumer<string, number>): Promise<void> {
+  const tp = formsTp;
+  const tps = new Set([tp]);
+  const offsets = new TopicPartitionMap<OffsetAndMetadata>([[tp, new OffsetAndMetadata(1)]]);
+  const times = new TopicPartitionMap<bigint | number>([[tp, 0]]);
+  const listener: ConsumerRebalanceListener = { onPartitionsRevoked() {}, onPartitionsAssigned() {} };
+  const pattern = new SubscriptionPattern('t.*');
+  expectTypeOf(c.assignment()).toEqualTypeOf<TopicPartitionSet>();
+  expectTypeOf(c.subscription()).toEqualTypeOf<Set<string>>();
+  await c.subscribe({ topics: new Set(['t']) });
+  await c.subscribe(new Set(['t']));
+  await c.subscribe({ topics: ['t'], callback: listener });
+  await c.subscribe({ pattern, callback: listener });
+  await c.subscribe({ pattern });
+  await c.subscribe(pattern);
+  await c.assign({ partitions: tps });
+  await c.assign(tps);
+  await c.unsubscribe();
+  expectTypeOf(await c.poll({ timeout: 0 })).toEqualTypeOf<ConsumerRecords<string, number>>();
+  expectTypeOf(await c.poll(0)).toEqualTypeOf<ConsumerRecords<string, number>>();
+  await c.commitSync();
+  await c.commitSync({ timeout: 1 });
+  await c.commitSync(1);
+  await c.commitSync({ offsets });
+  await c.commitSync(offsets);
+  await c.commitSync({ offsets, timeout: 1 });
+  await c.commitAsync();
+  await c.commitAsync({ callback: null });
+  await c.commitAsync(() => undefined);
+  await c.commitAsync({ offsets, callback: () => undefined });
+  await c.seek({ partition: tp, offset: 0 });
+  await c.seek({ partition: tp, offsetAndMetadata: new OffsetAndMetadata(0) });
+  await c.seekToBeginning({ partitions: tps });
+  await c.seekToBeginning(tps);
+  await c.seekToEnd({ partitions: tps });
+  await c.seekToEnd(tps);
+  expectTypeOf(await c.position({ partition: tp })).toEqualTypeOf<bigint>();
+  expectTypeOf(await c.position(tp)).toEqualTypeOf<bigint>();
+  expectTypeOf(await c.position({ partition: tp, timeout: 1 })).toEqualTypeOf<bigint>();
+  expectTypeOf(await c.committed({ partitions: tps })).toEqualTypeOf<TopicPartitionMap<OffsetAndMetadata | null>>();
+  expectTypeOf(await c.committed(tps)).toEqualTypeOf<TopicPartitionMap<OffsetAndMetadata | null>>();
+  expectTypeOf(await c.committed({ partitions: tps, timeout: 1 })).toEqualTypeOf<TopicPartitionMap<OffsetAndMetadata | null>>();
+  expectTypeOf(c.metrics()).toEqualTypeOf<MetricNameMap<Metric>>();
+  expectTypeOf(await c.partitionsFor({ topic: 't' })).toEqualTypeOf<PartitionInfo[]>();
+  expectTypeOf(await c.partitionsFor('t')).toEqualTypeOf<PartitionInfo[]>();
+  expectTypeOf(await c.partitionsFor({ topic: 't', timeout: 1 })).toEqualTypeOf<PartitionInfo[]>();
+  expectTypeOf(await c.listTopics()).toEqualTypeOf<Map<string, PartitionInfo[]>>();
+  expectTypeOf(await c.listTopics({ timeout: 1 })).toEqualTypeOf<Map<string, PartitionInfo[]>>();
+  expectTypeOf(await c.listTopics(1)).toEqualTypeOf<Map<string, PartitionInfo[]>>();
+  expectTypeOf(c.paused()).toEqualTypeOf<TopicPartitionSet>();
+  await c.pause({ partitions: tps });
+  await c.pause(tps);
+  await c.resume({ partitions: tps });
+  await c.resume(tps);
+  expectTypeOf(await c.offsetsForTimes({ timestampsToSearch: times })).toEqualTypeOf<TopicPartitionMap<OffsetAndTimestamp | null>>();
+  expectTypeOf(await c.offsetsForTimes(times)).toEqualTypeOf<TopicPartitionMap<OffsetAndTimestamp | null>>();
+  expectTypeOf(await c.offsetsForTimes({ timestampsToSearch: times, timeout: 1 })).toEqualTypeOf<
+    TopicPartitionMap<OffsetAndTimestamp | null>
+  >();
+  expectTypeOf(await c.beginningOffsets({ partitions: tps })).toEqualTypeOf<TopicPartitionMap<bigint>>();
+  expectTypeOf(await c.beginningOffsets(tps)).toEqualTypeOf<TopicPartitionMap<bigint>>();
+  expectTypeOf(await c.beginningOffsets({ partitions: tps, timeout: 1 })).toEqualTypeOf<TopicPartitionMap<bigint>>();
+  expectTypeOf(await c.endOffsets({ partitions: tps })).toEqualTypeOf<TopicPartitionMap<bigint>>();
+  expectTypeOf(await c.endOffsets(tps)).toEqualTypeOf<TopicPartitionMap<bigint>>();
+  expectTypeOf(await c.endOffsets({ partitions: tps, timeout: 1 })).toEqualTypeOf<TopicPartitionMap<bigint>>();
+  expectTypeOf(await c.currentLag({ topicPartition: tp })).toEqualTypeOf<bigint | null>();
+  expectTypeOf(await c.currentLag(tp)).toEqualTypeOf<bigint | null>();
+  expectTypeOf(c.groupMetadata()).toEqualTypeOf<ConsumerGroupMetadata>();
+  expectTypeOf(c.wakeup()).toEqualTypeOf<void>();
+  await c.close();
+  await c.close({ option: new CloseOptions() });
+  await c.close(new CloseOptions());
+  await c[Symbol.asyncDispose]();
+}
+void everyMockConsumerForm;
+
 // The forms of KafkaConsumer and MockConsumer the interface does not have,
-// and the two classes passed through it.
+// and the two classes passed to it, which checks that each is a Consumer.
 async function everyClassForm(): Promise<void> {
   const configs: ConsumerConfigs = { 'bootstrap.servers': 'localhost:9092', 'group.protocol': 'consumer' };
   const created = await KafkaConsumer.create({
