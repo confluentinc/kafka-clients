@@ -70,6 +70,11 @@ pub enum Backend {
     /// the .NET gRPC server with `CONSUMER_FLAVOR=async` — the async
     /// client-flavor variant.
     DotnetAsync,
+    /// The JavaScript (Node.js) producer, run inside the JavaScript gRPC
+    /// server (`javascript/verifiable_clients/chaos_workload.js`). Producer
+    /// only: the binding has no consumer yet (`multilanguage-tests` feature
+    /// required).
+    Js,
 }
 
 impl Backend {
@@ -81,6 +86,7 @@ impl Backend {
             "c" => Some(Backend::C),
             "dotnet" => Some(Backend::Dotnet),
             "dotnet-async" => Some(Backend::DotnetAsync),
+            "javascript" => Some(Backend::Js),
             _ => None,
         }
     }
@@ -93,6 +99,7 @@ impl Backend {
             Backend::C => "c",
             Backend::Dotnet => "dotnet",
             Backend::DotnetAsync => "dotnet-async",
+            Backend::Js => "javascript",
         }
     }
 
@@ -371,6 +378,7 @@ async fn build_grpc_workload(
         Backend::C => BackendKind::C,
         Backend::Dotnet => BackendKind::Dotnet,
         Backend::DotnetAsync => BackendKind::DotnetAsync,
+        Backend::Js => BackendKind::Js,
         Backend::Rust => unreachable!("rust handled by build_workload"),
     };
     let handle = get_or_start(kind, broker_network).await;
@@ -1445,11 +1453,13 @@ mod tests {
             Backend::C,
             Backend::Dotnet,
             Backend::DotnetAsync,
+            Backend::Js,
         ] {
             assert_eq!(Backend::parse(backend.label()), Some(backend), "{backend:?}");
             assert_eq!(backend.is_grpc(), backend != Backend::Rust, "{backend:?}");
         }
         assert_eq!(Backend::Dotnet.label(), "dotnet");
         assert_eq!(Backend::DotnetAsync.label(), "dotnet-async");
+        assert_eq!(Backend::Js.label(), "javascript");
     }
 }

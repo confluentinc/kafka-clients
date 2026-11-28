@@ -14,14 +14,19 @@
 
 //! The `multilanguage_test!` declarative macro.
 //!
-//! Each invocation expands to six `#[tokio::test(flavor = "multi_thread")]`
+//! Each invocation expands to seven `#[tokio::test(flavor = "multi_thread")]`
 //! wrappers — one per backend — that call the same generic test body. The
 //! body must be `async fn body<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F)`.
 //!
 //! Naming convention: `name__rust`, `name__grpc_python`,
 //! `name__grpc_python_async`, `name__grpc_c`, `name__grpc_dotnet`,
-//! `name__grpc_dotnet_async`. The double underscore is intentional so the
-//! backend label is easy to grep for in `cargo test` output.
+//! `name__grpc_dotnet_async`, `name__grpc_js`. The double underscore is
+//! intentional so the backend label is easy to grep for in `cargo test` output.
+//!
+//! `__grpc_js` drives the Node.js producer, which has no consumer or admin
+//! client yet: only this macro has a `__grpc_js` arm, and its `JsGrpcFactory`
+//! serves the producer alone. [`crate::multilanguage_js_test`] expands to that
+//! arm alone, for a scenario that runs on the JavaScript backend only.
 //!
 //! Every backend that runs in a container behind gRPC shares the `__grpc_`
 //! infix, so a single `--skip __grpc` excludes all of them — `make -C
@@ -31,7 +36,7 @@
 //! joining a job that has no image for it. `__rust` deliberately lacks the
 //! infix — it drives the native client with no container and no gRPC hop.
 //!
-//! The five container-backed arms are individually `#[cfg(feature =
+//! The six container-backed arms are individually `#[cfg(feature =
 //! "multilanguage-tests")]` and the macro itself is available with only
 //! `integration-tests`, the shape [`crate::multilanguage_admin_test`] has.
 //! Under `integration-tests` alone (`make test-integration`, `verify-commit`)
@@ -52,9 +57,9 @@
 //! multilanguage_test!(test_produce_single_record, produce_single_record_inner);
 //! ```
 
-/// Expand a generic test body into six `#[tokio::test]` wrappers — one
+/// Expand a generic test body into seven `#[tokio::test]` wrappers — one
 /// per backend (rust / grpc_python / grpc_python_async / grpc_c / grpc_dotnet /
-/// grpc_dotnet_async). See module docs for the expected signature of `$body`.
+/// grpc_dotnet_async / grpc_js). See module docs for the expected signature of `$body`.
 ///
 /// Two forms are supported:
 ///   - `multilanguage_test!(name, body)` — uses `ClusterConfig::default()`
@@ -181,6 +186,44 @@ macro_rules! multilanguage_test {
                 .await;
                 let factory =
                     $crate::common::backend_factory::DotnetAsyncGrpcFactory::new(handle.channel().await, handle.untimed_channel().await);
+                timer.body_started();
+                $body(&mut ctx, &factory).await;
+            }
+        }
+        $crate::multilanguage_js_test!($(#[$attr])* $name, $body, $cluster_config);
+    };
+}
+
+/// The `__grpc_js` arm of [`crate::multilanguage_test`] alone: one
+/// `#[tokio::test]` wrapper that runs `$body` on the JavaScript backend, named
+/// `<name>__grpc_js`. `multilanguage_test!` expands to it for its own
+/// `__grpc_js` arm; a scenario that runs on the JavaScript backend only
+/// invokes it directly, with the same forms and attributes.
+#[macro_export]
+macro_rules! multilanguage_js_test {
+    ($(#[$attr:meta])* $name:ident, $body:ident) => {
+        $crate::multilanguage_js_test!(
+            $(#[$attr])* $name,
+            $body,
+            $crate::common::cluster_config::ClusterConfig::default()
+        );
+    };
+    ($(#[$attr:meta])* $name:ident, $body:ident, $cluster_config:expr) => {
+        ::paste::paste! {
+            $(#[$attr])*
+            #[cfg(feature = "multilanguage-tests")]
+            #[expect(non_snake_case)]
+            #[tokio::test(flavor = "multi_thread")]
+            async fn [<$name __ grpc_js>]() {
+                let mut timer = $crate::common::arm_timer::ArmTimer::start(stringify!($name), "grpc_js");
+                let mut ctx = $crate::common::test_context::TestContext::new($cluster_config).await;
+                let handle = $crate::common::backend_pool::get_or_start(
+                    $crate::common::backend_pool::BackendKind::Js,
+                    ctx.broker_network_name(),
+                )
+                .await;
+                let factory =
+                    $crate::common::backend_factory::JsGrpcFactory::new(handle.channel().await, handle.untimed_channel().await);
                 timer.body_started();
                 $body(&mut ctx, &factory).await;
             }
