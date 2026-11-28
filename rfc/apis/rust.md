@@ -48,7 +48,7 @@ The names in Java have a clear mapping to their equivalents in Rust. The followi
 | `package org.apache.kafka.clients.consumer`        | `module consumer`                                   |
 | `class ProducerRecord` (PascalCase)                | `ProducerRecord struct/enum` (PascalCase)           |
 | `method maybeThrowAnyException` (camelCase)        | `maybe_return_any_error` (snake_case)               |
-| `const CommonClientConfigs.RETRY_BACKOFF_EXP_BASE` | `CommonClientConfigs::RETRY_BACKOFF_EXP_BASE`     |
+| `const ProducerConfig.CLIENT_ID_CONFIG`            | `ProducerConfig::CLIENT_ID_CONFIG`                  |
 | `throw / throws`                                   | `return Err(...) / Result<T, Error>`                |
 | Java "thread"                                      | Rust "task" (e.g. in log messages)                  |
 
@@ -162,7 +162,7 @@ loop {
 
 Subscribe with a rebalance callback that fires when partitions are assigned or revoked (e.g. to commit offsets before losing a partition), then poll a batch. In Java, this is a `ConsumerRebalanceListener` passed to subscribe; in Rust an `Arc<dyn ConsumerRebalanceListener>` passed to `subscribe_with_topics_listener`.
 
-The listener runs on the caller's poll task in every client: Java invokes it inside `poll()`, and the Rust translation preserves that — the callback executes on the task that calls `poll()`, never on the background task. Because `poll` borrows the consumer as `&mut self`, a Rust listener cannot capture the consumer itself as a Java listener does; instead it captures the `ConsumerHandle` returned by `consumer.handle()`, which exposes the operations that are safe to call from inside a callback (`commit_sync`, `seek_*`, `pause`/`resume`, `position`, ...). In the future, the `RebalanceListener` interface from KIP-1306 will resolve this more neatly.
+The listener runs on the caller's poll task in every client: Java invokes it inside `poll()`, and the Rust translation preserves that — the callback executes on the task that calls `poll()`, never on the background task. Because `poll` borrows the consumer as `&mut self`, a Rust listener cannot capture the consumer itself as a Java listener does; instead it captures the `ConsumerHandle` returned by `consumer.handle()`, which exposes the operations that are safe to call from inside a callback (`commit_sync`, `seek_to_end`, `pause`/`resume`, `position` and so on). In the future, the `RebalanceListener` interface from KIP-1306 will resolve this more neatly.
 
 #### Java
 
@@ -175,6 +175,7 @@ consumer.subscribe(Arrays.asList("foo", "bar"), new ConsumerRebalanceListener() 
         System.out.println("assigned: " + partitions);
     }
 });
+
 while (true) {
     ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(100));
     for (ConsumerRecord<String, String> record : records)
@@ -188,6 +189,7 @@ while (true) {
 struct CommittingRebalanceListener {
     consumer: ConsumerHandle,
 }
+
 #[async_trait]
 impl ConsumerRebalanceListener for CommittingRebalanceListener {
     async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
@@ -201,9 +203,11 @@ impl ConsumerRebalanceListener for CommittingRebalanceListener {
 
 let listener: Arc<dyn ConsumerRebalanceListener> =
     Arc::new(CommittingRebalanceListener { consumer: consumer.handle() });
+
 consumer
     .subscribe_with_topics_listener(vec!["foo".into(), "bar".into()], listener)
     .await?;
+
 loop {
     let records = consumer.poll(Duration::from_millis(100)).await?;
     for record in &records {
@@ -212,7 +216,7 @@ loop {
 }
 ```
 
-### AdminClient - Create a topic and block until the request completes or fails.
+### Admin client example - Create a topic and block until the request completes or fails.
 
 Java declares each admin operation as a pair — a default `<method_name>(args)` forwarding to `<method_name>(args, new <MethodName>Options())` — so Rust has a pair too: the no-options form owns the plain name and the options-taking form carries the `_with_options` suffix. `NewTopic`'s `(name, int, short)` and `(name, Optional<Integer>, Optional<Short>)` constructors differ only by `Optional`, so they collapse to a single Rust constructor taking `Option`.
 
@@ -221,7 +225,7 @@ Java declares each admin operation as a pair — a default `<method_name>(args)`
 ```java
 CreateTopicsResult result = admin.createTopics(
     Set.of(new NewTopic("my-topic", 12, (short) 3)));
-result.values().get("my-topic").get(); // block until created or failed
+result.all().get(); // block until created or failed
 ```
 
 #### Rust
@@ -359,7 +363,7 @@ The `Consumer<K, V>` trait and its type parameters are both `Send + 'static` bec
 
 Most of the methods of the `Consumer<K, V>` trait take a mutable reference to the consumer. This is because, just like in Java, the consumer instance is not shareable across threads.
 
-Only the new KIP-848 consumer group rebalance protocol (`group.protocol=consumer`) is supported. Note that `group.protocol` still defaults to `classic` (matching Java), and `KafkaConsumer::new` returns a `LocalUnsupportedOperationError` (Java's `UnsupportedOperationException`) for it, so every consumer configuration must set `group.protocol=consumer` explicitly.
+Only the new KIP-848 consumer group rebalance protocol (`group.protocol=consumer`) is supported. Note that `group.protocol` still defaults to `classic` (matching Java), and `KafkaConsumer::new` returns a `LocalUnsupportedOperationError` (Java's `UnsupportedOperationException`) for it, so every consumer configuration must set `group.protocol=consumer` explicitly. When the default group protocol in Apache Kafka changes to `consumer`, this will no longer be necessary.
 
 ```rust
 pub trait Consumer<K, V>: Send + 'static
@@ -495,8 +499,6 @@ where
         value_deserializer: impl Deserializer<V>,
     ) -> Result<Self, Error>;
 }
-
-impl<K, V> Consumer<K, V> for KafkaConsumer<K, V> { /* ... */ }
 ```
 
 The `ConsumerRecord` looks like this:
@@ -536,8 +538,8 @@ impl<K, V> ConsumerRecords<K, V> {
         next_offsets: HashMap<TopicPartition, OffsetAndMetadata>,
     ) -> Self;
     pub fn empty() -> Self;
-    pub fn records_partition(&self, partition: &TopicPartition) -> &[ConsumerRecord<K, V>];
-    pub fn records_topic<'a>(&'a self, topic: &'a str) -> impl Iterator<Item = &'a ConsumerRecord<K, V>> + 'a;
+    pub fn records_with_partition(&self, partition: &TopicPartition) -> &[ConsumerRecord<K, V>];
+    pub fn records_with_topic<'a>(&'a self, topic: &'a str) -> impl Iterator<Item = &'a ConsumerRecord<K, V>> + 'a;
     pub fn partitions(&self) -> impl Iterator<Item = &TopicPartition>;
     pub fn count(&self) -> usize;
     pub fn is_empty(&self) -> bool;
@@ -645,17 +647,21 @@ use std::collections::HashMap;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::Mutex;
+
 use confluent_kafka::common::Error;
 use confluent_kafka::common::serialization::StringSerializer;
-use confluent_kafka::producer::callback;
 use confluent_kafka::producer::Callback;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
 use confluent_kafka::producer::ProducerRecord;
+use confluent_kafka::producer::callback;
+
 use uuid::Uuid;
+
 const TOPIC_NAME: &str = "my-topic";
 const NUM_RECORDS: usize = 10;
+
 #[tokio::main]
 async fn main() -> ExitCode {
     match run().await {
@@ -666,21 +672,26 @@ async fn main() -> ExitCode {
         },
     }
 }
+
 async fn run() -> Result<(), Error> {
     let producer = create_kafka_producer()?;
     println!("Kafka producer created successfully.");
+
     // Delivery callbacks run on the producer's background task, so the first
     // delivery error is recorded here and checked once `close()` has flushed
     // every outstanding record and invoked every callback.
     let first_delivery_error: Arc<Mutex<Option<Error>>> = Arc::new(Mutex::new(None));
+
     let result = produce_records(&producer, &first_delivery_error).await;
     let close_result = producer.close().await;
+
     let delivery_result = match first_delivery_error.lock().unwrap().take() {
         Some(e) => Err(e),
         None => Ok(()),
     };
     result.and(delivery_result).and(close_result)
 }
+
 async fn produce_records(
     producer: &KafkaProducer<String, String>,
     first_delivery_error: &Arc<Mutex<Option<Error>>>,
@@ -688,13 +699,16 @@ async fn produce_records(
     for i in 0..NUM_RECORDS {
         let key = format!("key-{i}");
         let value = format!("value-{i}");
+
         println!("Producing record: key={key}, value={value}");
         let record = ProducerRecord::with_key(TOPIC_NAME.to_string(), Some(key), Some(value));
+
         let callback = delivery_callback(i, Arc::clone(first_delivery_error));
         producer.send_with_callback(record, Some(callback)).await?;
     }
     Ok(())
 }
+
 fn delivery_callback(index: usize, first_delivery_error: Arc<Mutex<Option<Error>>>) -> Box<dyn Callback> {
     // Per the `Callback` contract, on failure `metadata` is still `Some` but holds a
     // sentinel `-1` offset (and `-1` partition if none could be resolved), so `error`
@@ -715,9 +729,11 @@ fn delivery_callback(index: usize, first_delivery_error: Arc<Mutex<Option<Error>
         },
     }))
 }
+
 fn bootstrap_servers() -> String {
     std::env::var("KAFKA_BOOTSTRAP_SERVERS").unwrap_or_else(|_| "localhost:9092".to_string())
 }
+
 fn create_kafka_producer() -> Result<KafkaProducer<String, String>, Error> {
     let props = HashMap::from([
         (ProducerConfig::BOOTSTRAP_SERVERS_CONFIG.to_string(), bootstrap_servers()),
@@ -726,7 +742,9 @@ fn create_kafka_producer() -> Result<KafkaProducer<String, String>, Error> {
             format!("client-{}", Uuid::new_v4()),
         ),
     ]);
+
     println!("Kafka producer properties: {props:?}");
+
     let config = ProducerConfig::new(&props)?;
     KafkaProducer::new(config, StringSerializer::new(), StringSerializer::new())
 }
