@@ -1,0 +1,5 @@
+# TopicPartition(String topic, int partition): an int is int32_t (§5).
+file: confluent/kafka/common/topic_partition.hpp
+replace: TopicPartition(std::string_view topic, int32_t partition)
+with: TopicPartition(std::string_view topic, int partition)
+expect: confluent-kafka-java-signature parameter 'partition' of 'TopicPartition' is int

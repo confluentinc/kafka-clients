@@ -1,0 +1,21 @@
+# cpp/CLAUDE.md §10. Google style with the two project changes: 4-space indent
+# and 120 columns, the width the Rust and C sources already use.
+BasedOnStyle: Google
+IndentWidth: 4
+ColumnLimit: 120
+AccessModifierOffset: -4
+DerivePointerAlignment: false
+PointerAlignment: Left
+AllowShortFunctionsOnASingleLine: Inline
+IncludeBlocks: Regroup
+IncludeCategories:
+  # The binding's own headers first, then the C FFI header, then the standard library.
+  - Regex: '^<confluent/kafka/'
+    Priority: 1
+  - Regex: '^<confluent_kafka_bindings\.h>'
+    Priority: 2
+  - Regex: '^<gtest/'
+    Priority: 3
+  - Regex: '^<.*>'
+    Priority: 4
+SortIncludes: CaseSensitive

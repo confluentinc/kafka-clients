@@ -258,9 +258,34 @@ pub fn write_doc_baseline() -> anyhow::Result<()> {
 
 /// `cargo xtask javadoc <marker|rust-path|C symbol>`: prints the translated
 /// Javadoc of an item, and the item's size limit.
+///
+/// `cargo xtask javadoc --words` reads markers from stdin, one per line, and
+/// prints `<marker>\t<words>` for each: the word count (documentation.md §5)
+/// of every Javadoc the marker's doc is measured against, comma-separated,
+/// empty when it has none, `?` when no indexed class has it. The C++
+/// binding's linter (`cpp/tools/lint`) checks its own count against it.
 pub fn javadoc(args: &[String]) -> anyhow::Result<()> {
+    if args.len() == 1 && args[0] == "--words" {
+        let (rule, _) = doc_rule()?;
+        for line in std::io::stdin().lines() {
+            let marker = line?;
+            let marker = marker.trim();
+            if marker.is_empty() {
+                continue;
+            }
+            let words = rule.javadoc_words(marker).map_or_else(
+                || "?".to_string(),
+                |w| w.iter().map(ToString::to_string).collect::<Vec<_>>().join(","),
+            );
+            println!("{marker}\t{words}");
+        }
+        return Ok(());
+    }
     let [query] = args else {
-        anyhow::bail!("usage: cargo xtask javadoc <org.apache.kafka.… marker | crate::… path | C symbol>");
+        anyhow::bail!(
+            "usage: cargo xtask javadoc <org.apache.kafka.… marker | crate::… path | C symbol>\n       \
+             cargo xtask javadoc --words < markers"
+        );
     };
     let (rule, krate) = doc_rule()?;
     print!("{}", rule.explain(&krate, query)?);

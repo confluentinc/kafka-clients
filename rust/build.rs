@@ -36,7 +36,44 @@ fn format_generated_dir(dir: &Path) {
     }
 }
 
+/// The major version of the C ABI: the `N` of `libconfluent_kafka.so.N` and
+/// `libconfluent_kafka.N.dylib`. It moves with the C ABI, not with the crate's
+/// version: the Rust API is stable since 1.0.0 while the C FFI is experimental,
+/// so every incompatible change to the C API raises it.
+const C_ABI_MAJOR: u32 = 0;
+
+/// Gives the shared library the versioned name a system package installs it
+/// under, when `CONFLUENT_KAFKA_C_ABI_SONAME=1`: a program linked against it then
+/// loads `libconfluent_kafka.so.<C_ABI_MAJOR>`, so a package upgrade replaces the
+/// library under it and an incompatible one installs beside it. Only a packaging
+/// build sets the variable, and it installs the file under that name: a plain
+/// `cargo build` leaves the library unversioned, so the bindings built in the
+/// repository, and the wheels and NuGet packages that carry their own copy, load
+/// it as `libconfluent_kafka.so`, the one name cargo writes.
+///
+/// The name lives where each format keeps it, for the target rather than the host
+/// this script runs on: an ELF `DT_SONAME`, a Mach-O install name. A Windows DLL
+/// is identified by its file name alone, so there is nothing to set.
+fn shared_library_identity() {
+    println!("cargo:rerun-if-env-changed=CONFLUENT_KAFKA_C_ABI_SONAME");
+    if env::var("CONFLUENT_KAFKA_C_ABI_SONAME").as_deref() != Ok("1") {
+        return;
+    }
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_vendor = env::var("CARGO_CFG_TARGET_VENDOR").unwrap_or_default();
+    if target_vendor == "apple" {
+        println!("cargo:rustc-cdylib-link-arg=-Wl,-install_name,@rpath/libconfluent_kafka.{C_ABI_MAJOR}.dylib");
+    } else if matches!(
+        target_os.as_str(),
+        "linux" | "android" | "freebsd" | "netbsd" | "openbsd" | "dragonfly" | "illumos" | "solaris"
+    ) {
+        println!("cargo:rustc-cdylib-link-arg=-Wl,-soname,libconfluent_kafka.so.{C_ABI_MAJOR}");
+    }
+}
+
 fn main() {
+    shared_library_identity();
+
     println!("cargo:rerun-if-changed=generator/messages/");
     println!("cargo:rerun-if-changed=generator/test-messages/");
     // The emitted code depends on the generator's own source, not just on the

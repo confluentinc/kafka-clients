@@ -1382,7 +1382,7 @@ type	org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Node	interfa
 method	org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Node	instance	name()
 method	org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Node	instance	predecessors()
 method	org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Node	instance	successors()
-type	org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Processor	class	Node
+type	org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Processor	class	org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Node
 ctor	org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Processor	Processor(String name, Set stores, Set successors, Set predecessors)
 method	org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Processor	instance	equals(Object o)
 method	org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Processor	instance	hashCode()
@@ -1391,7 +1391,7 @@ method	org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Processor	
 method	org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Processor	instance	stores()
 method	org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Processor	instance	successors()
 method	org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Processor	instance	toString()
-type	org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Sink	class	Node
+type	org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Sink	class	org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Node
 ctor	org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Sink	Sink(String name, Optional topic, Set successors, Set predecessors)
 method	org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Sink	instance	equals(Object o)
 method	org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Sink	instance	hashCode()
@@ -1400,7 +1400,7 @@ method	org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Sink	insta
 method	org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Sink	instance	successors()
 method	org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Sink	instance	toString()
 method	org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Sink	instance	topic()
-type	org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Source	class	Node
+type	org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Source	class	org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Node
 ctor	org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Source	Source(String name, Set topics, Set successors, Set predecessors)
 method	org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Source	instance	equals(Object o)
 method	org.apache.kafka.clients.admin.StreamsGroupTopologyDescription$Source	instance	hashCode()
@@ -2697,11 +2697,11 @@ method	org.apache.kafka.common.config.ConfigDef	instance	withClientSslSupport()
 method	org.apache.kafka.common.config.ConfigDef	static	convertToString(Object parsedValue, Type type)
 method	org.apache.kafka.common.config.ConfigDef	static	convertToStringMapWithPasswordValues(Map configs)
 method	org.apache.kafka.common.config.ConfigDef	static	parseType(String name, Object value, Type type)
-type	org.apache.kafka.common.config.ConfigDef$CaseInsensitiveValidString	class	Validator
+type	org.apache.kafka.common.config.ConfigDef$CaseInsensitiveValidString	class	org.apache.kafka.common.config.ConfigDef$Validator
 method	org.apache.kafka.common.config.ConfigDef$CaseInsensitiveValidString	instance	ensureValid(String name, Object o)
 method	org.apache.kafka.common.config.ConfigDef$CaseInsensitiveValidString	instance	toString()
 method	org.apache.kafka.common.config.ConfigDef$CaseInsensitiveValidString	static	in(String[] validStrings)
-type	org.apache.kafka.common.config.ConfigDef$CompositeValidator	class	Validator
+type	org.apache.kafka.common.config.ConfigDef$CompositeValidator	class	org.apache.kafka.common.config.ConfigDef$Validator
 method	org.apache.kafka.common.config.ConfigDef$CompositeValidator	instance	ensureValid(String name, Object value)
 method	org.apache.kafka.common.config.ConfigDef$CompositeValidator	instance	toString()
 method	org.apache.kafka.common.config.ConfigDef$CompositeValidator	static	of(Validator[] validators)
@@ -2731,28 +2731,28 @@ method	org.apache.kafka.common.config.ConfigDef$Importance	instance	name()
 method	org.apache.kafka.common.config.ConfigDef$Importance	instance	ordinal()
 method	org.apache.kafka.common.config.ConfigDef$Importance	static	valueOf(String ?)
 method	org.apache.kafka.common.config.ConfigDef$Importance	static	values()
-type	org.apache.kafka.common.config.ConfigDef$LambdaValidator	class	Validator
+type	org.apache.kafka.common.config.ConfigDef$LambdaValidator	class	org.apache.kafka.common.config.ConfigDef$Validator
 method	org.apache.kafka.common.config.ConfigDef$LambdaValidator	instance	ensureValid(String name, Object value)
 method	org.apache.kafka.common.config.ConfigDef$LambdaValidator	instance	toString()
 method	org.apache.kafka.common.config.ConfigDef$LambdaValidator	static	with(BiConsumer ensureValid, Supplier toStringFunction)
-type	org.apache.kafka.common.config.ConfigDef$ListSize	class	Validator
+type	org.apache.kafka.common.config.ConfigDef$ListSize	class	org.apache.kafka.common.config.ConfigDef$Validator
 method	org.apache.kafka.common.config.ConfigDef$ListSize	instance	ensureValid(String name, Object value)
 method	org.apache.kafka.common.config.ConfigDef$ListSize	instance	toString()
 method	org.apache.kafka.common.config.ConfigDef$ListSize	static	atMostOfSize(int maxSize)
-type	org.apache.kafka.common.config.ConfigDef$NonEmptyString	class	Validator
+type	org.apache.kafka.common.config.ConfigDef$NonEmptyString	class	org.apache.kafka.common.config.ConfigDef$Validator
 ctor	org.apache.kafka.common.config.ConfigDef$NonEmptyString	NonEmptyString()
 method	org.apache.kafka.common.config.ConfigDef$NonEmptyString	instance	ensureValid(String name, Object o)
 method	org.apache.kafka.common.config.ConfigDef$NonEmptyString	instance	toString()
-type	org.apache.kafka.common.config.ConfigDef$NonEmptyStringWithoutControlChars	class	Validator
+type	org.apache.kafka.common.config.ConfigDef$NonEmptyStringWithoutControlChars	class	org.apache.kafka.common.config.ConfigDef$Validator
 ctor	org.apache.kafka.common.config.ConfigDef$NonEmptyStringWithoutControlChars	NonEmptyStringWithoutControlChars()
 method	org.apache.kafka.common.config.ConfigDef$NonEmptyStringWithoutControlChars	instance	ensureValid(String name, Object value)
 method	org.apache.kafka.common.config.ConfigDef$NonEmptyStringWithoutControlChars	instance	toString()
 method	org.apache.kafka.common.config.ConfigDef$NonEmptyStringWithoutControlChars	static	nonEmptyStringWithoutControlChars()
-type	org.apache.kafka.common.config.ConfigDef$NonNullValidator	class	Validator
+type	org.apache.kafka.common.config.ConfigDef$NonNullValidator	class	org.apache.kafka.common.config.ConfigDef$Validator
 ctor	org.apache.kafka.common.config.ConfigDef$NonNullValidator	NonNullValidator()
 method	org.apache.kafka.common.config.ConfigDef$NonNullValidator	instance	ensureValid(String name, Object value)
 method	org.apache.kafka.common.config.ConfigDef$NonNullValidator	instance	toString()
-type	org.apache.kafka.common.config.ConfigDef$Range	class	Validator
+type	org.apache.kafka.common.config.ConfigDef$Range	class	org.apache.kafka.common.config.ConfigDef$Validator
 method	org.apache.kafka.common.config.ConfigDef$Range	instance	ensureValid(String name, Object o)
 method	org.apache.kafka.common.config.ConfigDef$Range	instance	toString()
 method	org.apache.kafka.common.config.ConfigDef$Range	static	atLeast(Number min)
@@ -2775,13 +2775,13 @@ method	org.apache.kafka.common.config.ConfigDef$Type	instance	name()
 method	org.apache.kafka.common.config.ConfigDef$Type	instance	ordinal()
 method	org.apache.kafka.common.config.ConfigDef$Type	static	valueOf(String ?)
 method	org.apache.kafka.common.config.ConfigDef$Type	static	values()
-type	org.apache.kafka.common.config.ConfigDef$ValidList	class	Validator
+type	org.apache.kafka.common.config.ConfigDef$ValidList	class	org.apache.kafka.common.config.ConfigDef$Validator
 method	org.apache.kafka.common.config.ConfigDef$ValidList	instance	ensureValid(String name, Object value)
 method	org.apache.kafka.common.config.ConfigDef$ValidList	instance	toString()
 method	org.apache.kafka.common.config.ConfigDef$ValidList	static	anyNonDuplicateValues(boolean isEmptyAllowed, boolean isNullAllowed)
 method	org.apache.kafka.common.config.ConfigDef$ValidList	static	in(String[] validStrings)
 method	org.apache.kafka.common.config.ConfigDef$ValidList	static	in(boolean isEmptyAllowed, String[] validStrings)
-type	org.apache.kafka.common.config.ConfigDef$ValidString	class	Validator
+type	org.apache.kafka.common.config.ConfigDef$ValidString	class	org.apache.kafka.common.config.ConfigDef$Validator
 method	org.apache.kafka.common.config.ConfigDef$ValidString	instance	ensureValid(String name, Object o)
 method	org.apache.kafka.common.config.ConfigDef$ValidString	instance	toString()
 method	org.apache.kafka.common.config.ConfigDef$ValidString	static	in(String[] validStrings)

@@ -1809,6 +1809,20 @@ impl ApiDocs {
 
     /// `cargo xtask javadoc <query>`: the translated Javadoc of a marker, or
     /// of the item with Rust path or C symbol `query`, with its size limit.
+    /// The word count (documentation.md §5) of each Javadoc a doc translating
+    /// `marker` is measured against, after `{@inheritDoc}` and pointer-only
+    /// Javadocs are followed; `None` when no indexed class has the marker.
+    pub(super) fn javadoc_words(&self, marker: &str) -> Option<Vec<usize>> {
+        self.java.resolve(marker)?;
+        let translator = self.translator();
+        Some(
+            self.followed_javadocs(marker, &mut BTreeSet::new())
+                .iter()
+                .map(|d| word_count(&translator.to_rustdoc(d)))
+                .collect(),
+        )
+    }
+
     pub(super) fn explain(&self, krate: &Crate, query: &str) -> anyhow::Result<String> {
         let translator = self.translator();
         if query.starts_with(java::MARKER_PREFIX) {

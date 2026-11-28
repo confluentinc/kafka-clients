@@ -1,0 +1,6 @@
+# A decisions.txt line no header uses is reported (§4.6): here Node(int,String,int) takes a
+# plain std::string_view host although the decision makes it nullable.
+file: confluent/kafka/common/node.hpp
+replace: Node(int32_t id, std::optional<std::string_view> host, int32_t port);
+with: Node(int32_t id, std::string_view host, int32_t port);
+expect: confluent-kafka-surface no header needs `org.apache.kafka.common.Node#Node(int,String,int) host nullable`

@@ -1,0 +1,5 @@
+# An enum is an enum class (cpp/CLAUDE.md §3.3, §12.3).
+file: confluent/kafka/common/resource/pattern_type.hpp
+replace: enum class PatternType : int8_t {
+with: enum PatternType : int8_t {
+expect: confluent-kafka-abi is an unscoped enum

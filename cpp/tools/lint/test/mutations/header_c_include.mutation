@@ -1,0 +1,5 @@
+# No public header includes the C header (§1.2).
+file: confluent/kafka/common/node.hpp
+replace: #include <confluent/kafka/export.hpp>
+with: #include <confluent/kafka/export.hpp>\nextern "C" {\n#include <confluent_kafka_bindings.h>\n}
+expect: confluent-kafka-header a public header never includes the C header

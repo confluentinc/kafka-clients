@@ -1,0 +1,5 @@
+# A class with data holds one pointer (cpp/CLAUDE.md §12.3).
+file: confluent/kafka/common/topic_partition.hpp
+replace:     std::shared_ptr<const Impl> impl_;
+with:     std::shared_ptr<const Impl> impl_;\n    int32_t cached_hash_ = 0;
+expect: confluent-kafka-abi holds 2 data member(s)

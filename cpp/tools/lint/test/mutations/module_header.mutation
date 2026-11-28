@@ -1,0 +1,5 @@
+# Every header of a module is in its module header.
+file: confluent/kafka/consumer.hpp
+replace: #include <confluent/kafka/consumer/subscription_pattern.hpp>
+with: // (not included)
+expect: confluent-kafka-header does not include <confluent/kafka/consumer/subscription_pattern.hpp>

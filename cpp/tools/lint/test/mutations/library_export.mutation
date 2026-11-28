@@ -1,0 +1,5 @@
+# What the library defines is exported (§3.2).
+file: confluent/kafka/common/node.hpp
+replace: class CONFLUENT_KAFKA_CPP_API Node {
+with: class Node {
+expect: confluent-kafka-library is not marked CONFLUENT_KAFKA_CPP_API

@@ -1,0 +1,5 @@
+# Every parameter has its @param (cpp/CLAUDE.md §12.1).
+file: confluent/kafka/common/topic_partition.hpp
+replace:     /// @param partition the partition number\n
+with: 
+expect: confluent-kafka-doc parameter 'partition' of 'TopicPartition' has no @param
