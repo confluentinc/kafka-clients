@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! Integration tests for the AsyncKafkaConsumer against a real
-//! Kafka 4.2.0 broker.
+//! Kafka 4.4.0 broker.
 //!
 //! These tests exercise the production constructor wired in Phase 12
 //! (commit 4/N): `KafkaConsumer::<K, V>::new(...)` returns a real
@@ -22,7 +22,7 @@
 //! state machine end-to-end.
 //!
 //! All four tests run against a testcontainers-provisioned Kafka
-//! 4.2.0 broker with `group.coordinator.rebalance.protocols=classic,consumer`
+//! 4.4.0 broker with `group.coordinator.rebalance.protocols=classic,consumer`
 //! enabled, exercising the full subscribe/poll/commit/seek loop end
 //! to end. Phase 12.5 wired the per-RM response routing
 //! (FindCoordinator, Heartbeat, TopicMetadata, Fetch, OffsetCommit,

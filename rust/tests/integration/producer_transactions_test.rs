@@ -1563,7 +1563,7 @@ crate::multilanguage_test!(
 /// Translates `TransactionsTest.testEmptyAbortAfterCommit`
 /// (`TransactionsTest.scala:1043-1057`). Java's `@CsvSource` lists only the
 /// `consumer, true` (`isTV2Enabled`) row — there is no TV1 row to translate — and
-/// the pooled `apache/kafka:4.2.0` KRaft brokers finalize `transaction.version=2`,
+/// the pooled `apache/kafka:4.4.0` KRaft brokers finalize `transaction.version=2`,
 /// so no downgrade is needed.
 async fn empty_abort_after_commit<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let (topic1, _topic2) = create_txn_test_topics(ctx).await;
@@ -2443,7 +2443,7 @@ crate::multilanguage_test!(
 //     shutdown, abort-cleanup interval, ...) are not reproduced: none reaches an
 //     assertion here, and each would fork the pooled container.
 //   - `ProducerIntegrationTest` runs each test at `transaction.version` 0, 1 and
-//     2 (`@ClusterFeature`). The `apache/kafka:4.2.0` brokers are formatted at
+//     2 (`@ClusterFeature`). The `apache/kafka:4.4.0` brokers are formatted at
 //     the latest metadata version, which finalizes `transaction.version=2`, and
 //     the harness cannot re-format them at a lower level. The TV2 row runs on
 //     the pooled cluster; the TV0 / TV1 rows run the same body on a
@@ -2990,7 +2990,7 @@ crate::multilanguage_test!(
 //     `ctx.group_id`), because the cluster is pooled and both classes' tests
 //     share it (concurrently, and across repeated runs of the same test).
 //   - `TransactionsExpirationTest` runs each scenario at `transaction.version` 1
-//     and 2 (`@ClusterFeature`). The `apache/kafka:4.2.0` brokers are formatted
+//     and 2 (`@ClusterFeature`). The `apache/kafka:4.4.0` brokers are formatted
 //     at the latest metadata version, which finalizes `transaction.version=2`,
 //     and the harness cannot re-format them at a lower level. The TV2 rows run
 //     on the pooled cluster; the TV1 rows run the same body on a
@@ -3898,7 +3898,7 @@ crate::multilanguage_test!(
 ///
 /// Java formats the `isTV2Enabled = false` cluster with `transaction.version=1`
 /// (`QuorumTestHarness.scala:284-286`); the harness image formats every
-/// cluster at the 4.2.0 default (`transaction.version=2`), so the TV1 row
+/// cluster at the 4.4.0 default (`transaction.version=2`), so the TV1 row
 /// downgrades the finalized feature to 1 with `Admin::update_features` on its
 /// dedicated cluster before any producer exists — the approach
 /// `consumer_test.rs` uses for `group.version` — and waits until every broker
@@ -4015,7 +4015,7 @@ async fn downgrade_transaction_version_to_1(ctx: &TestContext) {
 /// wait until every broker's `DescribeFeatures` reports the finalized `level` —
 /// the harness stand-in for Java's `@ClusterFeature(feature =
 /// TRANSACTION_VERSION, version = level)`, which formats the cluster at that
-/// level. The harness image always formats at the 4.2.0 default (TV2), so the
+/// level. The harness image always formats at the 4.4.0 default (TV2), so the
 /// cluster must be [`ClusterConfig::dedicated`]: the downgrade is cluster-wide.
 async fn downgrade_transaction_version(ctx: &TestContext, level: i16) {
     use confluent_kafka::admin::DescribeFeaturesOptions;

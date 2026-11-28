@@ -14,7 +14,7 @@
 
 //! Integration tests for the consumer-group-offset admin RPCs
 //! (`listConsumerGroupOffsets` / `alterConsumerGroupOffsets` /
-//! `deleteConsumerGroupOffsets`) against a real Kafka 4.2.0 broker.
+//! `deleteConsumerGroupOffsets`) against a real Kafka 4.4.0 broker.
 //!
 //! Mirrors the offset-management scenarios in Java's
 //! `KafkaAdminClientIntegrationTest`, exercising the real network engine and the

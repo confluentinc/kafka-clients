@@ -19,7 +19,7 @@
 //! Apache Kafka 4.2.
 //!
 //! These exercise the consumer PUBLIC-API surface against a real
-//! Kafka 4.2.0 cluster: record headers, pause/resume, `partitions_for`,
+//! Kafka 4.4.0 cluster: record headers, pause/resume, `partitions_for`,
 //! `list_topics`, `offsets_for_times`, `end_offsets`, full `seek`
 //! (seekToEnd / seek-mid), LogAppendTime timestamp-type, null group id,
 //! `position` timeout + wakeup, and zero-timeout offset queries.

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! Integration tests for the admin group listing / describe / deletion RPCs
-//! against a real Kafka 4.2.0 broker.
+//! against a real Kafka 4.4.0 broker.
 //!
 //! Mirrors the group-management scenarios in Java's
 //! `KafkaAdminClientIntegrationTest` / `PlaintextConsumerTest` (list / describe

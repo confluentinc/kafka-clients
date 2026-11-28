@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Integration tests for the KafkaProducer against a real Kafka 4.2.0 broker.
+//! Integration tests for the KafkaProducer against a real Kafka 4.4.0 broker.
 //!
 //! Translated from:
 //! - `org.apache.kafka.clients.producer.ProducerCompressionTest`: `testCompression`

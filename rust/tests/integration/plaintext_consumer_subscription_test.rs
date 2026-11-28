@@ -18,7 +18,7 @@
 //!
 //! These tests exercise the **subscription-based** consumer API
 //! (`subscribe_with_topics`, `subscribe_with_pattern`, `unsubscribe`) — the KIP-848
-//! group-protocol rebalance flow against a real 3-broker Kafka 4.2.0
+//! group-protocol rebalance flow against a real 3-broker Kafka 4.4.0
 //! cluster.
 //!
 //! They run as multilanguage scenarios: each one runs against the native Rust

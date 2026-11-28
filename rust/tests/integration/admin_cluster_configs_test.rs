@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! Integration tests for the admin cluster & config RPCs against a real Kafka
-//! 4.2.0 broker.
+//! 4.4.0 broker.
 //!
 //! Mirrors the describeCluster / describeConfigs / incrementalAlterConfigs /
 //! listConfigResources scenarios in Java's
