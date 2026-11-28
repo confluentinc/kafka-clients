@@ -142,6 +142,7 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::io::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -2461,6 +2462,14 @@ async fn fencing_on_transaction_expiration<F: ProducerBackendFactory>(ctx: &mut 
         }
         tokio::time::sleep(Duration::from_millis(test_utils::DEFAULT_PAUSE_MS)).await;
     }
+    // How long after the sleep the abort completed, one line per run, so CI logs
+    // show how close it gets to EXPIRED_TRANSACTION_ABORT_WAIT. Written to stderr
+    // directly, as `ArmTimer` does, so passing runs show it too.
+    let _ = writeln!(
+        std::io::stderr(),
+        "[abort-wait] test_fencing_on_transaction_expiration backend={backend} abort_wait={:.2}s",
+        wait_start.elapsed().as_secs_f64()
+    );
     admin.close().await;
 
     // Now that the transaction has expired, the second send should fail with an
