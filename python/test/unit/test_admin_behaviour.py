@@ -782,6 +782,10 @@ async def test_async_close_leaves_no_thread_and_no_client() -> None:
     names.when_complete(action=lambda _v, _e: None)
     await admin.close()
     assert await asyncio.to_thread(_join_new_admin_threads, before) == set()
+    # close() tears the client down on the loop's default executor, whose worker
+    # thread lets go of that call, and so of the client, only after it has set
+    # the result close() awaited: wait for the executor's threads to end.
+    await asyncio.get_running_loop().shutdown_default_executor()
     ref = weakref.ref(admin)
     del admin
     gc.collect()
