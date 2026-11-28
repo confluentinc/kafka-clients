@@ -109,6 +109,7 @@ The JavaScript client, npm package `@confluentinc/kafka-javascript` in `javascri
   | `Iterable<T>` | `[Symbol.iterator]` (Q6). |
   | `Headers` or `Iterable<Header>` taken | An iterable of `Header` objects and `[key, value]` pairs, as Serialization says (Q31). |
   | A client's `Closeable` | `close()` and `[Symbol.asyncDispose]` (Q6, Q21). |
+  | `Throwable`, `Exception`, `RuntimeException` | `Error`, which every error the client makes extends, so the caller reads `e.message` with no check, as in Java: `ListGroupsResult.errors()` yields an `Error[]`, and `ElectLeadersResult.partitions()` a `TopicPartitionMap<Error \| null>`. A place that can hold a value the user's code threw stays `unknown`: an error's `cause`, and the error a `whenComplete` action gets *(Why: JavaScript can throw any value, such as a string)*. |
   | `NullPointerException` | `TypeError` (Q36). |
   | `Pattern` | Left out, with `SubscriptionPattern` in its place (Q15). |
 
