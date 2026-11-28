@@ -355,7 +355,8 @@ def test_create_topics_refinements() -> None:
 def test_create_topics_refinement_follows_its_topics_cancellation() -> None:
     """A refinement is linked as a dependant of its topic's future (Futures):
     cancelling the stored future cancels it, never the reverse."""
-    with _admin() as admin:
+    admin = _admin()
+    try:
         result = admin.create_topics(new_topics=[_topic("a")],
                                      options=CreateTopicsOptions(timeout_ms=20000))
         config = result.config(topic="a")
@@ -364,6 +365,10 @@ def test_create_topics_refinement_follows_its_topics_cancellation() -> None:
         topic_id = result.topic_id(topic="a")
         assert result._futures["a"].cancel(may_interrupt_if_running=True)
         assert topic_id.is_cancelled()
+    finally:
+        # Cancelling the futures leaves the call in flight: close() would wait
+        # for its 20 s timeout.
+        admin.close(timeout=0)
 
 
 def test_create_topics_default_options_and_empty_batch() -> None:
