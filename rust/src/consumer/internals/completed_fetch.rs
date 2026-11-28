@@ -21,11 +21,12 @@
 //!
 //! Per-record allocation budget (expected, asserted in Phase 7b's
 //! `FetchCollector` allocation test): only the user-supplied
-//! `Deserializer<T>` allocations for the key and value `T`, plus the
-//! `RecordHeaders` clone (which §27 explicitly allows in Milestone-8), plus,
-//! for a compressed batch, the buffer each record is decompressed into, the
-//! one Java allocates per record, which §27 does not allow ([`RecordStream`]
-//! says why it is taken).
+//! `Deserializer<T>` allocations for the key and value `T`, plus, for a
+//! compressed batch, the buffer each record is decompressed into, the one
+//! Java allocates per record, which §27 does not allow ([`RecordStream`]
+//! says why it is taken). Headers that are never read add nothing in an
+//! uncompressed batch; in a compressed one a record with headers keeps its
+//! buffer, so the next record gets a new one (§27).
 //! Specifically preserved here:
 //!
 //! - `partition_data.records: Option<Vec<u8>>` arrives owning the fetch
@@ -43,9 +44,10 @@
 //!   decompressed into). We never copy key/value bytes out of the buffer;
 //!   the only deep copy of record payload is whatever the user's
 //!   `Deserializer<T>` does internally.
-//! - Headers are owned per the milestone-8 §27 ruling (`RecordHeaders` built
-//!   from `DefaultRecordRef::headers()`, the single owned-copy point); a
-//!   future revisit may borrow.
+//! - Headers are read on demand (§27): a record keeps one slice of its
+//!   encoded header section (`RecordHeaders::from_wire`), nothing is built or
+//!   copied for them while the record is fetched, and the headers read later
+//!   are slices of the same buffer.
 //! - No per-record `tokio::spawn`. The whole struct is sync.
 //! - Iteration is lazy via a `BatchCursor`: records are decoded one at a
 //!   time, on demand, by walking the current batch's record bytes with a
@@ -468,8 +470,9 @@ impl RecordStream {
     /// [`Self::read_record`] to read the next record into when nothing else
     /// holds it any more; a bigger one is let go of once all of it is
     /// consumed, so a big record is not held while the next is read. A record
-    /// a deserializer sliced keeps the buffer alive through its own reference,
-    /// and the next record then gets a buffer of its own. Java keeps the record
+    /// a deserializer sliced, or one with headers, which the fetched record
+    /// keeps as a slice (§27), keeps the buffer alive through its own
+    /// reference, and the next record then gets a buffer of its own. Java keeps the record
     /// in `CompletedFetch#lastRecord` until the next one is read;
     /// nothing a caller sees depends on that.
     fn consume(&mut self, consumed: usize) {
@@ -589,9 +592,10 @@ impl RecordStream {
     /// it is this stream's alone again. Reusing it keeps a compressed record
     /// at one allocation, the reference count the first slice of it adds,
     /// rather than two, a buffer and its reference count. A buffer still held
-    /// elsewhere (a deserializer kept a slice of it) is left to its holder, and
-    /// the next record gets a new one, so no record shares a buffer with the
-    /// records around it.
+    /// elsewhere (a deserializer kept a slice of it, or the record has headers,
+    /// which the fetched record keeps as a slice of it, read or not) is left
+    /// to its holder, and the next record gets a new one, so no record shares
+    /// a buffer with the records around it.
     fn take_spare_buffer(&mut self) -> Vec<u8> {
         match std::mem::take(&mut self.record).try_into_mut() {
             Ok(spare) => {
@@ -1036,20 +1040,16 @@ impl CompletedFetch {
                 let Some(source_bytes) = self.current_record_source_bytes() else {
                     return Err(premature_eof_error(&self.partition));
                 };
-                // The only owned copy of record payload on the happy path:
-                // the §27-sanctioned `RecordHeaders` (Milestone-8 holds
-                // owned headers on the emitted `ConsumerRecord`).
-                // By the cause's message, not its class-prefixed `Display`, as in
-                // `peek_current_record`.
-                let headers_vec = record.headers().map_err(|e| {
-                    Error::InvalidRecord(InvalidRecordError::new(format!(
-                        "Record for partition {} at offset {} has invalid headers, cause: {}",
-                        self.partition,
-                        record.offset(),
-                        e.message()
-                    )))
-                })?;
-                headers_owned = RecordHeaders::with_header_iter(headers_vec);
+                // §27: the headers are a slice of the same buffer, the record's
+                // header section as it was fetched. Nothing is read or copied
+                // here; they are read when a deserializer or the application
+                // first accesses them, as slices of that section. A record
+                // without headers takes no slice, so it holds no buffer.
+                headers_owned = if record.num_headers() == 0 {
+                    RecordHeaders::new()
+                } else {
+                    RecordHeaders::from_wire(source_bytes.slice_ref(record.headers_bytes()), record.num_headers())
+                };
                 key_bytes = record.key().map(|key| source_bytes.slice_ref(key));
                 value_bytes = record.value().map(|value| source_bytes.slice_ref(value));
                 leader_epoch = maybe_leader_epoch(batch_meta.partition_leader_epoch);
@@ -3403,6 +3403,228 @@ mod tests {
         }
     }
 
+    // ── Headers are read on demand, in place (§27) ──────────────────────────
+
+    /// Records `0..count` at offsets `0..count`, each with the key `"key"`, the
+    /// value `"value-{i}"` and two headers: `"h1"` with the value
+    /// `"header-{i}"` and `"h2"` with no value.
+    fn new_records_with_headers(count: i32, compression: Compression) -> Vec<u8> {
+        use crate::common::header::RecordHeader;
+        use crate::common::record::internal::SimpleRecordOptionsBuilder;
+
+        let simple_records: Vec<SimpleRecord> = (0..count)
+            .map(|i| {
+                SimpleRecord::with_options(
+                    SimpleRecordOptionsBuilder::new()
+                        .set_timestamp(0)
+                        .set_key(Some(b"key".to_vec()))
+                        .set_value(Some(format!("value-{i}").into_bytes()))
+                        .set_headers(vec![
+                            RecordHeader::new("h1".to_string(), Some(format!("header-{i}").into_bytes())),
+                            RecordHeader::new("h2".to_string(), None),
+                        ])
+                        .build()
+                        .unwrap(),
+                )
+            })
+            .collect();
+        let records = MemoryRecords::with_records_with_magic_initial_offset_timestamp_type(
+            2,
+            0,
+            compression,
+            TimestampType::CreateTime,
+            &simple_records,
+        );
+        records.buffer().to_vec()
+    }
+
+    /// Asserts that each record of `records`, built by
+    /// [`new_records_with_headers`] and read with the `BytesDeserializer`,
+    /// has its two headers, and that they are slices of the buffer the
+    /// record's value is a slice of: a record lays its headers out right
+    /// after its value (`Value`, `HeadersCount`, `HeaderKeyLength`,
+    /// `HeaderKey`, `HeaderValueLength`, `HeaderValue`, each length here one
+    /// byte), so a header read in place starts a fixed distance past it.
+    fn assert_headers_read_in_place(records: &[ConsumerRecord<bytes::Bytes, bytes::Bytes>]) {
+        use crate::common::header::{Header, Headers};
+
+        for (i, record) in records.iter().enumerate() {
+            let value = record.value().expect("a value");
+            assert_eq!(&value[..], format!("value-{i}").as_bytes());
+            let headers = record.headers().to_array();
+            assert_eq!(headers.len(), 2, "offset {}", record.offset());
+
+            assert_eq!(headers[0].key(), "h1");
+            let h1_value = headers[0].value().expect("a header value");
+            assert_eq!(h1_value, format!("header-{i}").as_bytes());
+            assert_eq!(headers[1].key(), "h2");
+            assert_eq!(headers[1].value(), None);
+
+            let h1_key = value.as_ptr().wrapping_add(value.len() + 2);
+            assert_eq!(headers[0].key().as_ptr(), h1_key, "h1's key is not read in place");
+            assert_eq!(h1_value.as_ptr(), h1_key.wrapping_add(2 + 1), "h1's value is not read in place");
+            let h2_key = h1_value.as_ptr().wrapping_add(h1_value.len() + 1);
+            assert_eq!(headers[1].key().as_ptr(), h2_key, "h2's key is not read in place");
+        }
+    }
+
+    /// The headers of a fetched record are slices of the fetch buffer: no
+    /// header key or value is copied, as Java's `DefaultRecord.readHeaders`
+    /// keeps `ByteBuffer` slices.
+    #[test]
+    fn test_headers_are_slices_of_the_fetch_buffer() {
+        use crate::common::header::{Header, Headers};
+        use crate::common::serialization::BytesDeserializer;
+
+        let bytes = new_records_with_headers(3, Compression::none().build());
+        let fetch_buffer = bytes.as_ptr_range();
+        let mut cf = new_completed_fetch(0, bytes);
+        let fetch_config = make_fetch_config(IsolationLevel::ReadUncommitted, true);
+        let records = cf
+            .fetch_records_now::<bytes::Bytes, bytes::Bytes>(&fetch_config, &BytesDeserializer, &BytesDeserializer, 10)
+            .unwrap();
+
+        assert_eq!(records.len(), 3);
+        assert_headers_read_in_place(&records);
+        for record in &records {
+            for header in record.headers().to_array() {
+                let key = header.key().as_bytes().as_ptr_range();
+                assert!(fetch_buffer.start <= key.start && key.end <= fetch_buffer.end);
+            }
+        }
+    }
+
+    /// The headers of a record of a compressed batch are slices of the buffer
+    /// the record was decompressed into, which the record's key and value are
+    /// slices of too.
+    #[cfg(feature = "gzip")]
+    #[test]
+    fn test_headers_of_a_compressed_record_are_slices_of_its_buffer() {
+        use crate::common::serialization::BytesDeserializer;
+
+        let bytes = new_records_with_headers(3, Compression::gzip().build());
+        let mut cf = new_completed_fetch(0, bytes);
+        let fetch_config = make_fetch_config(IsolationLevel::ReadUncommitted, true);
+        let records = cf
+            .fetch_records_now::<bytes::Bytes, bytes::Bytes>(&fetch_config, &BytesDeserializer, &BytesDeserializer, 10)
+            .unwrap();
+
+        assert_eq!(records.len(), 3);
+        assert_headers_read_in_place(&records);
+    }
+
+    /// A header key that is not valid UTF-8 does not fail the record: the key
+    /// is decoded when it is read, with U+FFFD for the malformed bytes, as
+    /// Java's `RecordHeader.key()` decodes it (`Utils.utf8`).
+    #[test]
+    fn test_header_key_that_is_not_utf8_is_decoded_lossily() {
+        use crate::common::header::{Header, Headers};
+
+        let mut bytes = new_records_with_headers(1, Compression::none().build());
+        let h1 = bytes.windows(2).position(|window| window == b"h1").expect("the h1 key");
+        bytes[h1] = 0xff;
+        let mut cf = new_completed_fetch(0, bytes);
+        // The batch's CRC no longer matches its bytes.
+        let fetch_config = make_fetch_config(IsolationLevel::ReadUncommitted, false);
+        let records = cf
+            .fetch_records_now::<String, String>(&fetch_config, &StringDeserializer, &StringDeserializer, 10)
+            .unwrap();
+
+        assert_eq!(records.len(), 1);
+        let headers = records[0].headers().to_array();
+        assert_eq!(headers.len(), 2);
+        assert_eq!(headers[0].key(), "\u{fffd}1");
+        assert_eq!(headers[0].value(), Some(b"header-0".as_slice()));
+        assert_eq!(headers[1].key(), "h2");
+    }
+
+    /// The allocations `fetch_records` makes for `bytes`, a batch of `count`
+    /// records, read with a deserializer that allocates nothing and reads no
+    /// header.
+    fn count_fetch_allocations(bytes: Vec<u8>, count: i32) -> usize {
+        let mut cf = new_completed_fetch(0, bytes);
+        let fetch_config = make_fetch_config(IsolationLevel::ReadUncommitted, true);
+        // Outside the tracking window, as in
+        // `test_per_record_loop_is_pure_counter_no_sensor_record`.
+        cf.ensure_cursor();
+
+        let _guard = crate::AllocTrackingGuard::new();
+        crate::AllocTrackingGuard::reset();
+        let records = cf
+            .fetch_records_now::<usize, usize>(&fetch_config, &LenDeserializer, &LenDeserializer, count)
+            .unwrap();
+        let allocations = crate::AllocTrackingGuard::count();
+        assert_eq!(records.len(), count as usize);
+        allocations
+    }
+
+    /// Headers nobody reads cost no allocation: a batch whose records carry
+    /// two headers each is fetched with the allocations of the same batch
+    /// without headers. The record keeps a slice of its header section and
+    /// builds the header list only when it is first read.
+    #[test]
+    fn test_unread_headers_cost_no_allocation() {
+        const RECORD_COUNT: i32 = 200;
+
+        let without_headers = count_fetch_allocations(new_records(0, RECORD_COUNT, 0), RECORD_COUNT);
+        let with_headers = count_fetch_allocations(
+            new_records_with_headers(RECORD_COUNT, Compression::none().build()),
+            RECORD_COUNT,
+        );
+
+        assert!(
+            with_headers <= without_headers,
+            "{with_headers} allocations for {RECORD_COUNT} records with unread headers, \
+             {without_headers} for the same records without headers"
+        );
+    }
+
+    /// In a compressed batch a record with headers costs its buffer, read or
+    /// not: the fetched record keeps a slice of the buffer it was decompressed
+    /// into, so the stream cannot read the next record into that buffer and
+    /// allocates one per record, with the reference count the slice needs, as
+    /// Java's `DefaultRecord.readFrom(InputStream, ...)` allocates a buffer
+    /// per record. That is two allocations per record beyond the same batch
+    /// uncompressed, one more than a compressed record without headers
+    /// ([`test_compressed_per_record_allocation_budget`]), and nothing per
+    /// header: no list, no key and no value is built.
+    #[test]
+    fn test_unread_headers_of_a_compressed_record_cost_its_buffer() {
+        const RECORD_COUNT: i32 = 200;
+        /// As in [`test_compressed_per_record_allocation_budget`].
+        const STREAM_BUDGET: usize = 64;
+
+        let plain = count_fetch_allocations(
+            new_records_with_headers(RECORD_COUNT, Compression::none().build()),
+            RECORD_COUNT,
+        );
+        let per_record_buffers = 2 * RECORD_COUNT as usize;
+        let budget = plain + per_record_buffers + STREAM_BUDGET;
+        for compression in codecs() {
+            let compressed =
+                count_fetch_allocations(new_records_with_headers(RECORD_COUNT, compression.clone()), RECORD_COUNT);
+
+            assert!(
+                compressed <= budget,
+                "{compression:?}: {compressed} allocations for {RECORD_COUNT} compressed records with unread headers, \
+                 {plain} for them uncompressed (budget {budget}: a buffer and its reference count per record and \
+                 {STREAM_BUDGET} for the stream). Something is built per record or per header."
+            );
+            // The documented cost (§27): were the buffer reused, as it is for
+            // records without headers, this would be one per record.
+            assert!(
+                compressed >= plain + per_record_buffers,
+                "{compression:?}: {compressed} allocations for {RECORD_COUNT} compressed records with unread headers, \
+                 {plain} for them uncompressed: fewer than a buffer and its reference count per record, so §27 and \
+                 the comments of `RecordStream` no longer describe this path"
+            );
+            eprintln!(
+                "{compression:?}: {compressed} allocations for {RECORD_COUNT} compressed records with unread \
+                 headers, {plain} for them uncompressed (budget {budget})"
+            );
+        }
+    }
+
     // ── Decode hardening: every batch header is validated ───────────────────
     //
     // Java walks a fetch with `ByteBufferLogInputStream.nextBatch()`, which runs
@@ -5149,7 +5371,10 @@ mod tests {
         }
     }
 
-    /// Per-record allocation budget for a compressed batch: one allocation per
+    /// Per-record allocation budget for a compressed batch of records without
+    /// headers
+    /// ([`test_unread_headers_of_a_compressed_record_cost_its_buffer`] has the
+    /// budget of records with headers): one allocation per
     /// record beyond an uncompressed batch's, the buffer the record is read
     /// into, as Java allocates one per record
     /// (`DefaultRecord.readFrom(InputStream, ...)`), and nothing else per
@@ -5192,7 +5417,7 @@ mod tests {
                 compressed <= budget,
                 "{compression:?}: {compressed} allocations for {RECORD_COUNT} compressed records, {plain} for them \
                  uncompressed (budget {budget}: one per record and {STREAM_BUDGET} for the stream). A second \
-                 per-record allocation entered the compressed read path."
+                 per-record allocation entered the compressed read path of records without headers."
             );
             eprintln!(
                 "{compression:?}: {compressed} allocations for {RECORD_COUNT} compressed records, {plain} for them \

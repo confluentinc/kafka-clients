@@ -598,8 +598,9 @@ Receive-path zero-copy holds:
 - `Deserializer<T>` is a sync trait taking `&[u8]`
   (`common/serialization/deserializer.rs:53`).
 
-Headers are the one deliberate owned copy per record, matching Java's
-allocation behaviour.
+Headers are read on demand: a fetched record keeps one slice of its encoded
+header section and builds the header list on first access, each key and value
+a slice of the same buffer (`consumer-threading.md` §27).
 
 ### Admin (`src/admin/`)
 

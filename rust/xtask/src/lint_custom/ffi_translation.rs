@@ -144,6 +144,8 @@
 //! is the C caller's discriminator and has no Rust item behind it; the
 //! queued twins of sync methods whose C form drains the submission queue
 //! ([`C_ONLY_DRAINING_CB_TWINS`]) have no async Rust method behind them; the
+//! pointer-and-length view of a string C otherwise gets NUL-terminated
+//! ([`C_ONLY_STRING_VIEWS`]) has no Rust method of its own; the
 //! consumer state reads the C handle's single-owner guard can refuse
 //! ([`C_GUARDED_READS`]) are fallible in C only; an `Option<i64>` whose
 //! values include `-1` ([`C_PRESENCE_FLAG_OPTIONALS`]) crosses as a presence
@@ -258,6 +260,15 @@ const C_ONLY_DRAINING_CB_TWINS: &[&str] = &[
     "kafka_producer_Producer_begin_transaction_cb",
     "kafka_producer_Producer_begin_transaction_cb_t",
 ];
+
+/// Pointer-and-length views of a string whose C getter returns it
+/// NUL-terminated. Rust's getter returns a `&str`, which is the pointer and the
+/// length already, so there is no second Rust method; the C getter has to copy
+/// the string to terminate it, and cuts it at a NUL byte it holds, so C gets
+/// the view as a function of its own, marked `__` as every function with no
+/// Java counterpart (CLAUDE.md §4). `Header.key()` is the one case: a fetched
+/// record's header key is a slice of the fetched data, read per record.
+const C_ONLY_STRING_VIEWS: &[&str] = &["kafka_common_header_Header__key_bytes"];
 
 /// Rust methods returning a shared snapshot of a live map
 /// (`Arc<HashMap<..>>`), each paired with its C export, which hands out an
@@ -2609,6 +2620,7 @@ fn compare(expected: &BTreeMap<String, Expected>, actual: &CSurface, findings: &
             || C_ONLY_FREE_FUNCTIONS.contains(&name)
             || C_ONLY_ERROR_CODE.contains(&name)
             || C_ONLY_DRAINING_CB_TWINS.contains(&name)
+            || C_ONLY_STRING_VIEWS.contains(&name)
     };
 
     for (name, exp) in expected {

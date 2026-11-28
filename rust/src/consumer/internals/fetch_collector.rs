@@ -34,11 +34,12 @@
 //! Phase 7b is exactly:
 //!
 //! - 2 × user-supplied `Deserializer::<T>::deserialize` (key + value).
-//! - 1 × `RecordHeaders::with_header_iter` (owned headers per §27's
-//!   milestone-8 ruling).
 //!
 //! Specifically NOT in the per-record budget:
 //!
+//! - The record's headers — the record keeps a slice of its header section
+//!   (`RecordHeaders::from_wire`), and the header list is built, of slices
+//!   of the fetch buffer, only when the headers are first read (§27).
 //! - Topic-name `String` allocation — `ConsumerRecord::topic` is
 //!   `Arc<str>` (Phase 7a's `CompletedFetch::topic_arc`); cloning into
 //!   each record is an atomic pointer bump.
@@ -2754,7 +2755,7 @@ mod tests {
             // `maybeEnsureValid(batch)` / decompression — a *bare* KafkaException,
             // which is a sibling of `ApiException`, not a subclass.
             Error::kafka_message("Record batch for partition topic-a-1 at offset 0 is invalid, cause: crc mismatch"),
-            // premature EOF / records remaining / invalid headers — InvalidRecordException.
+            // premature EOF / records remaining — InvalidRecordException.
             Error::InvalidRecord(crate::common::InvalidRecordError::new(
                 "Incorrect declared batch size for partition topic-a-1, premature EOF reached",
             )),
@@ -3355,9 +3356,10 @@ mod tests {
     //     the `Vec<u8>` it owns came from `to_vec` above; counted)
     //   - 1 × `Vec<u8>::to_vec` for value
     //   - 1 × `String::from_utf8` for value
-    //   - for a record that has headers only, 1 × `Vec` backing the headers
-    //     list and 1 × the `Arc` that shares it (`RecordHeaders::with_header_iter`
-    //     stores no headers, and allocates nothing, for a record without any)
+    //   - nothing for the record's headers: the record keeps a slice of its
+    //     header section and builds the list only when the headers are read
+    //     (`RecordHeaders::from_wire`), which
+    //     `completed_fetch::tests::test_unread_headers_cost_no_allocation` pins
     //   - 1 × `ConsumerRecord` push to the per-partition `Vec`
     //     (amortized; only counts on grow)
     //
@@ -3495,9 +3497,9 @@ mod tests {
     /// budget (which copies both key and value via `to_vec`), and there must be
     /// no `Vec<u8>::clone` of the fetch buffer.
     ///
-    /// The only per-record allocations that remain are the §27-sanctioned ones
-    /// that are NOT key/value byte copies: the owned `RecordHeaders` and the
-    /// `ConsumerRecord` push onto the per-partition `Vec` (amortized). A
+    /// The only per-record allocation that remains is the §27-sanctioned one
+    /// that is NOT a key/value byte copy: the `ConsumerRecord` push onto the
+    /// per-partition `Vec` (amortized); headers nobody reads allocate nothing. A
     /// regression that re-introduces a per-record key/value copy (e.g. routing
     /// `BytesDeserializer` through the copying `deserialize` instead of
     /// `deserialize_with_headers_bytes`) would push the count up and fail this test.
@@ -3509,8 +3511,8 @@ mod tests {
         // Each record carries a 1-byte key and a small value (see
         // `make_records`). The copying ByteArray/String path costs ~2.2
         // allocs/record (key copy + value copy). The zero-copy Bytes path
-        // must stay at or below 2/record (headers Vec + amortized
-        // ConsumerRecord push), with NO key/value byte copy.
+        // must stay at or below 2/record (the amortized ConsumerRecord
+        // push), with NO key/value byte copy.
         const ALLOC_BUDGET_PER_RECORD: usize = 2;
         const OVERHEAD_BUDGET: usize = 100;
 
