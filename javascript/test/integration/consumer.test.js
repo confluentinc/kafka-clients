@@ -495,15 +495,17 @@ listenerTest(
   120000,
 );
 
-// Ask 17, pinned: after unsubscribe() has run onPartitionsRevoked, the core's
-// close() runs onPartitionsLost for the same partitions. Java calls no
-// listener there: AbstractMembershipManager#leaveGroup clears the assignment
-// snapshot (notifyAssignmentChange(Collections.emptySet())), so
-// AsyncKafkaConsumer#runRebalanceCallbacksOnClose finds nothing to revoke.
-// This test asserts what the core does today, so a core that does as Java
-// does fails it on purpose: the expected calls then end at 'revoked'.
+// After unsubscribe() has run onPartitionsRevoked, close() runs
+// onPartitionsLost for the same partitions, as Java's does:
+// AbstractMembershipManager#clearAssignmentAndLeaveGroup calls
+// subscriptions.unsubscribe() before clearAssignment(), whose
+// notifyAssignmentChange runs only if subscriptions.hasAutoAssignedPartitions(),
+// false by then, so the consumer's assignment snapshot keeps the partitions;
+// AsyncKafkaConsumer#unsubscribe resets the group metadata (epoch -1), and
+// AsyncKafkaConsumer#runRebalanceCallbacksOnClose finds the snapshot and calls
+// invokePartitionsLost.
 listenerTest(
-  "close() after unsubscribe() runs onPartitionsLost for the partitions unsubscribe() revoked, where Java's close() runs no listener",
+  "close() after unsubscribe() runs onPartitionsLost for the partitions unsubscribe() revoked, as Java's close() does",
   async () => {
     /** @type {Array<[string, string[]]>} */
     const calls = [];
@@ -529,7 +531,6 @@ listenerTest(
       ]);
       await consumer.close();
       closed = true;
-      // Java's: [['assigned', [tp]], ['revoked', [tp]]], and no more.
       assert.deepEqual(calls, [
         ['assigned', [String(tp)]],
         ['revoked', [String(tp)]],
