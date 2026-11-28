@@ -37,7 +37,7 @@ namespace Confluent.Kafka.Performance.Tests;
 public sealed class KafkaBrokerFixture : IAsyncLifetime
 {
     // The image of Python's perf conftest and the Rust integration harness.
-    private const string KafkaImage = "apache/kafka:4.2.0";
+    private const string KafkaImage = "apache/kafka:4.4.0";
     private const string ClusterId = "5L6g3nShT-eMCtK--X86sw";
 
     public const string InternalBootstrap = "localhost:9094";

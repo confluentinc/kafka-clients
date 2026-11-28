@@ -36,7 +36,7 @@
 //!   `group.consumer.assignment.interval.ms` to `0` and `1000` (KIP-1263
 //!   assignment batching). That broker config is new in 4.3; a 4.2 broker
 //!   ignores it and always assigns at once. The arms are selected at runtime
-//!   from the broker tag (`INTEGRATION_TEST_BROKER_TAG`, default 4.2.0):
+//!   from the broker tag (`INTEGRATION_TEST_BROKER_TAG`, default 4.4.0):
 //!     - on a broker older than 4.3,
 //!       `test_async_consumer_receives_fatal_exception_when_group_passes_max_size`
 //!       runs the body with the broker's only assignment behaviour (no

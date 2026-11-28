@@ -1813,7 +1813,7 @@ const SMOKE_MAIN_RS_PATH: &str = "xtask/smoke/main.rs";
 const SMOKE_EDITION: &str = "2024";
 /// Broker image started by `--with-broker`. It must match the image and tag used
 /// by the integration tests (`KAFKA_TAG` in `tests/common/kafka_cluster.rs`).
-const SMOKE_KAFKA_IMAGE: &str = "apache/kafka:4.2.0";
+const SMOKE_KAFKA_IMAGE: &str = "apache/kafka:4.4.0";
 /// Maximum time `--with-broker` waits for the broker to report that it has started.
 const SMOKE_BROKER_STARTUP: std::time::Duration = std::time::Duration::from_secs(120);
 /// Maximum time `--registry` retries while a newly published version is not yet

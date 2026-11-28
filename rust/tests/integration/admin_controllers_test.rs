@@ -24,7 +24,7 @@
 //!
 //! # Which broker answers what
 //!
-//! The scenarios run on whatever `INTEGRATION_TEST_BROKER_TAG` selects (4.2.0 by
+//! The scenarios run on whatever `INTEGRATION_TEST_BROKER_TAG` selects (4.4.0 by
 //! default), so each one first asks the cluster which of three regimes it is in,
 //! using `describeFeatures`' `metadata.version` (`MetadataVersion.IBP_4_4_IV2` is
 //! feature level 33, the first that supports unregistration):

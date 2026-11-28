@@ -672,7 +672,7 @@ cargo xtask chaos --scenario simple_flow_clean_broker_roll
 ## Dependencies
 
 - **Docker** running (the harness manages `kafka-*` containers on a private
-  network; image `apache/kafka:4.2.0`).
+  network; image `apache/kafka:4.4.0`).
 - For `python` / `python-async` / `c` / `dotnet` / `dotnet-async` workloads,
   the gRPC-server images: `make build-grpc-images` at the repository root, or
   one binding's with `make -C c grpc-image`, `make -C python grpc-image

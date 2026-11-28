@@ -181,9 +181,9 @@ test-integration: build-integration-tests
 # CI runs the full suite through test-all-features-{ssl,sasl-ssl} below.
 #
 # INTEGRATION_TEST_BROKER_TAG selects the apache/kafka image tag every
-# integration run starts (default 4.2.0, tests/common/kafka_cluster.rs), e.g.
-# `INTEGRATION_TEST_BROKER_TAG=4.4.0-rc4 make test-integration` runs the suite
-# against a newer broker. It combines with INTEGRATION_TEST_PROTOCOL.
+# integration run starts (default 4.4.0, tests/common/kafka_cluster.rs), e.g.
+# `INTEGRATION_TEST_BROKER_TAG=4.2.0 make test-integration` runs the suite
+# against an older broker. It combines with INTEGRATION_TEST_PROTOCOL.
 test-integration-plaintext: build-integration-tests
 	cargo build --examples
 	INTEGRATION_TEST_PROTOCOL=plaintext $(CARGO_TEST) --features integration-tests --test integration
