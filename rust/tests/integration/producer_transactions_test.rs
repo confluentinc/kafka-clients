@@ -141,6 +141,8 @@
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::fmt::Write as _;
+use std::io::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -153,6 +155,7 @@ use confluent_kafka::admin::ProducerState;
 use confluent_kafka::admin::TransactionState;
 use confluent_kafka::common::Error;
 use confluent_kafka::common::KafkaFuture;
+use confluent_kafka::common::Node;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::header::Header;
 use confluent_kafka::common::header::Headers;
@@ -285,6 +288,15 @@ const CONSUME_DEADLINE: Duration = Duration::from_secs(30);
 /// **not** there. This one is a *negative* assertion, so it is a fixed budget
 /// rather than a deadline: too short and the test passes vacuously.
 const NEGATIVE_POLL_BUDGET: Duration = Duration::from_secs(8);
+
+/// How long `test_fencing_on_transaction_expiration` waits for the coordinator
+/// to list the expired transaction in COMPLETE_ABORT. The abort's marker write
+/// waits for every in-sync replica of the partition for up to the broker's
+/// `request.timeout.ms` (30 s) before the coordinator sends it again, and on a
+/// loaded CI host a starved follower stays in the ISR for up to
+/// `replica.lag.time.max.ms` (30 s). 60 s fits one such attempt plus its retry;
+/// the wait still ends as soon as the abort completes.
+const EXPIRED_TRANSACTION_ABORT_WAIT: Duration = Duration::from_secs(60);
 
 fn cluster_config() -> ClusterConfig {
     // Two partitions, matching the `PlaintextConsumer*` suites, so the pooled
@@ -2280,6 +2292,117 @@ async fn consume_records_for(
     }
 }
 
+/// `Ok` once the coordinator lists `transactional_id` in COMPLETE_ABORT;
+/// otherwise the state it lists, or the listing's error.
+async fn expired_transaction_abort_state(admin: &dyn Admin, transactional_id: &str) -> Result<(), String> {
+    let listings = match admin.list_transactions().all().get().await {
+        Ok(listings) => listings,
+        Err(error) => return Err(format!("listTransactions failed: {error}")),
+    };
+    let states: Vec<TransactionState> = listings
+        .iter()
+        .filter(|txn| txn.transactional_id() == transactional_id)
+        .map(|txn| txn.state())
+        .collect();
+    if states.contains(&TransactionState::CompleteAbort) {
+        Ok(())
+    } else if states.is_empty() {
+        Err(format!(
+            "listTransactions does not list the expired transaction {transactional_id}"
+        ))
+    } else {
+        let states: Vec<String> = states.iter().map(ToString::to_string).collect();
+        Err(format!(
+            "the expired transaction is in state {}, not CompleteAbort",
+            states.join(", ")
+        ))
+    }
+}
+
+/// What `test_fencing_on_transaction_expiration` adds to its panic when the
+/// abort has not completed in time: the coordinator and the state
+/// describeTransactions gives, the partitions the coordinator still holds for
+/// the transaction, and the leader, replicas and ISR of those partitions and of
+/// `__transaction_state`. In PREPARE_ABORT the partitions still held are the
+/// ones whose abort marker is not confirmed yet, so none left means the
+/// COMPLETE_ABORT write is the one waiting.
+///
+/// Asked once, after the wait has run out, so it adds no load while the test
+/// waits. A lookup that fails is reported in place of its answer.
+async fn stuck_abort_report(admin: &dyn Admin, transactional_id: &str) -> String {
+    const TRANSACTION_STATE_TOPIC: &str = "__transaction_state";
+
+    fn broker_ids(nodes: &[Node]) -> String {
+        let ids: Vec<String> = nodes.iter().map(|node| node.id().to_string()).collect();
+        ids.join(", ")
+    }
+
+    let mut report = String::new();
+    let mut held: Vec<TopicPartition> = Vec::new();
+    match admin.describe_transactions(&[transactional_id.to_string()]).all().get().await {
+        Ok(descriptions) => match descriptions.get(transactional_id) {
+            Some(description) => {
+                held = description.topic_partitions().iter().cloned().collect();
+                held.sort_by(|a, b| (a.topic(), a.partition()).cmp(&(b.topic(), b.partition())));
+                let held_names: Vec<String> = held.iter().map(ToString::to_string).collect();
+                let _ = writeln!(
+                    report,
+                    "describeTransactions: coordinator {}, state {}, partitions still held [{}]",
+                    description.coordinator_id(),
+                    description.state(),
+                    held_names.join(", ")
+                );
+            },
+            None => {
+                let _ = writeln!(report, "describeTransactions does not describe {transactional_id}");
+            },
+        },
+        Err(error) => {
+            let _ = writeln!(report, "describeTransactions failed: {error}");
+        },
+    }
+
+    let mut topics: Vec<String> = held.iter().map(|partition| partition.topic().to_string()).collect();
+    topics.push(TRANSACTION_STATE_TOPIC.to_string());
+    topics.sort();
+    topics.dedup();
+    let Some(all_topics) = admin.describe_topics_with_topic_names(&topics).all_topic_names() else {
+        let _ = writeln!(report, "describeTopics returned no name-keyed result");
+        return report;
+    };
+    match all_topics.get().await {
+        Ok(descriptions) => {
+            for topic in &topics {
+                let Some(description) = descriptions.get(topic) else {
+                    let _ = writeln!(report, "describeTopics does not describe {topic}");
+                    continue;
+                };
+                for info in description.partitions() {
+                    // Of a data topic, only the partitions the transaction still holds.
+                    let is_held = held
+                        .iter()
+                        .any(|partition| partition.topic() == topic && partition.partition() == info.partition());
+                    if topic != TRANSACTION_STATE_TOPIC && !is_held {
+                        continue;
+                    }
+                    let leader = info.leader().map_or_else(|| "none".to_string(), |node| node.id().to_string());
+                    let _ = writeln!(
+                        report,
+                        "{topic}-{}: leader {leader}, replicas [{}], isr [{}]",
+                        info.partition(),
+                        broker_ids(info.replicas()),
+                        broker_ids(info.isr())
+                    );
+                }
+            }
+        },
+        Err(error) => {
+            let _ = writeln!(report, "describeTopics failed: {error}");
+        },
+    }
+    report
+}
+
 /// A transaction left open past `transaction.timeout.ms` is aborted by the
 /// coordinator, which bumps the epoch: the next send fails with
 /// `InvalidProducerEpochException` (or `ConcurrentTransactionsException` while the
@@ -2320,35 +2443,33 @@ async fn fencing_on_transaction_expiration<F: ProducerBackendFactory>(ctx: &mut 
     // succeeds. On CI's container brokers the abort can end after the sleep, so
     // wait until the coordinator lists the transaction in COMPLETE_ABORT. On a
     // timeout the panic gives the state the coordinator listed last, or the
-    // listing's error.
+    // listing's error, followed by `stuck_abort_report`. The wait is a loop of
+    // its own rather than `retry_on_error_with_timeout`, which panics with the
+    // last failure alone.
     let admin = txn_test_admin(ctx);
-    test_utils::retry_on_error_with_timeout(Duration::from_millis(test_utils::DEFAULT_MAX_WAIT_MS), || {
-        let listing = admin.list_transactions().all();
-        let txn_id = txn_id.clone();
-        async move {
-            let listings = match listing.get().await {
-                Ok(listings) => listings,
-                Err(error) => return Err(format!("listTransactions failed: {error}")),
-            };
-            let states: Vec<TransactionState> = listings
-                .iter()
-                .filter(|txn| txn.transactional_id() == txn_id)
-                .map(|txn| txn.state())
-                .collect();
-            if states.contains(&TransactionState::CompleteAbort) {
-                Ok(())
-            } else if states.is_empty() {
-                Err(format!("listTransactions does not list the expired transaction {txn_id}"))
-            } else {
-                let states: Vec<String> = states.iter().map(ToString::to_string).collect();
-                Err(format!(
-                    "the expired transaction is in state {}, not CompleteAbort",
-                    states.join(", ")
-                ))
-            }
+    let wait_start = Instant::now();
+    loop {
+        let failure = match expired_transaction_abort_state(admin.as_ref(), &txn_id).await {
+            Ok(()) => break,
+            Err(failure) => failure,
+        };
+        if wait_start.elapsed() >= EXPIRED_TRANSACTION_ABORT_WAIT {
+            let report = stuck_abort_report(admin.as_ref(), &txn_id).await;
+            panic!(
+                "Assertion failed after {}ms: {failure}\n{report}",
+                EXPIRED_TRANSACTION_ABORT_WAIT.as_millis()
+            );
         }
-    })
-    .await;
+        tokio::time::sleep(Duration::from_millis(test_utils::DEFAULT_PAUSE_MS)).await;
+    }
+    // How long after the sleep the abort completed, one line per run, so CI logs
+    // show how close it gets to EXPIRED_TRANSACTION_ABORT_WAIT. Written to stderr
+    // directly, as `ArmTimer` does, so passing runs show it too.
+    let _ = writeln!(
+        std::io::stderr(),
+        "[abort-wait] test_fencing_on_transaction_expiration backend={backend} abort_wait={:.2}s",
+        wait_start.elapsed().as_secs_f64()
+    );
     admin.close().await;
 
     // Now that the transaction has expired, the second send should fail with an
