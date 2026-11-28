@@ -41,6 +41,7 @@ const {
   consumeOneRecord,
   freshTopic,
   pollFailingAuthentication,
+  pollUntilRejected,
   produceOneRecord,
   sendFailingAuthentication,
   topicWithOneRecord,
@@ -254,25 +255,6 @@ async function allowAlice(operation, resource) {
   },
   120000,
 );
-
-/**
- * Polls `consumer` until a poll rejects, and returns the error.
- *
- * @param {KafkaConsumer<Buffer, Buffer>} consumer
- * @param {string} what
- * @returns {Promise<unknown>}
- */
-async function pollUntilRejected(consumer, what) {
-  const deadline = Date.now() + 60000;
-  for (;;) {
-    assert.ok(Date.now() < deadline, `no poll failed with ${what} within 60 s`);
-    try {
-      assert.equal((await consumer.poll(500)).count(), 0, `a record came back before ${what}`);
-    } catch (e) {
-      return e;
-    }
-  }
-}
 
 // alice has DESCRIBE on the topic throughout, for its metadata, its offsets
 // and the heartbeat's subscription. Without READ on the group, the broker

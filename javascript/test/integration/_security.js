@@ -330,6 +330,26 @@ async function consumeOneRecord(configs, plaintextBootstrap, what) {
 }
 
 /**
+ * Polls `consumer` until a poll rejects, and returns the error; a record
+ * coming back first, or no rejection within 60 s, fails the test.
+ *
+ * @param {KafkaConsumer<Buffer, Buffer>} consumer
+ * @param {string} what what the poll is expected to fail with, for the failures' messages
+ * @returns {Promise<unknown>}
+ */
+async function pollUntilRejected(consumer, what) {
+  const deadline = Date.now() + 60000;
+  for (;;) {
+    assert.ok(Date.now() < deadline, `no poll failed with ${what} within 60 s`);
+    try {
+      assert.equal((await consumer.poll(500)).count(), 0, `a record came back before ${what}`);
+    } catch (e) {
+      return e;
+    }
+  }
+}
+
+/**
  * Polls a consumer with `configs`, assigned partition 0 of a topic made
  * through `plaintextBootstrap`, until a poll rejects, and returns the error:
  * Java's AsyncKafkaConsumer#poll throws the authentication error its network
@@ -345,16 +365,7 @@ async function pollFailingAuthentication(configs, plaintextBootstrap, what) {
   const consumer = new KafkaConsumer({ configs: { 'group.protocol': 'consumer', 'auto.offset.reset': 'earliest', ...configs } });
   try {
     await consumer.assign([new TopicPartition({ topic, partition: 0 })]);
-    const deadline = Date.now() + 60000;
-    for (;;) {
-      assert.ok(Date.now() < deadline, `no poll over ${what} failed within 60 s`);
-      try {
-        const records = await consumer.poll(500);
-        assert.equal(records.count(), 0, 'a record came back over a connection that should fail its authentication');
-      } catch (e) {
-        return e;
-      }
-    }
+    return await pollUntilRejected(consumer, `the authentication error over ${what}`);
   } finally {
     await consumer.close({ option: CloseOptions.timeout({ timeout: 0 }) });
   }
@@ -369,5 +380,6 @@ module.exports = {
   topicWithOneRecord,
   consumeOneRecord,
   pollFailingAuthentication,
+  pollUntilRejected,
   testBroker,
 };
