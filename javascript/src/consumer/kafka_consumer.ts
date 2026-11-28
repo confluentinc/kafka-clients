@@ -115,6 +115,9 @@ export class KafkaConsumer<K = Buffer, V = Buffer> implements Consumer<K, V> {
    * configuration. Valid configuration strings are documented in Java's
    * ConsumerConfig.
    *
+   * Note: after creating a `KafkaConsumer` you must always `close()` it to
+   * avoid resource leaks.
+   *
    * @param options - The consumer configs
    * @throws `KafkaError` when the configuration is invalid (`ConfigError`,
    *   the core's, with Java's message naming the key; the client's own for
@@ -132,13 +135,11 @@ export class KafkaConsumer<K = Buffer, V = Buffer> implements Consumer<K, V> {
    *
    * @remarks Java's `Map` and `Properties` forms are `configs`.
    * `key.deserializer` and `value.deserializer` take a synchronous function
-   * `({ configs, isKey }) => deserializer`, such as `() => new
-   * StringDeserializer()` *(deviation: Java takes a class)*, or, through
-   * `create()`, one returning a Promise; these keys don't reach the core. The
-   * function gets the configuration with the `client.id` the core generated,
-   * once the core has checked it, as Java configures a deserializer. Without
-   * deserializers, keys and values are Buffers *(deviation)*. Once per process
-   * it emits an `ExperimentalWarning`.
+   * `({ configs, isKey }) => deserializer` *(deviation: Java takes a
+   * class)*, or, through `create()`, one returning a Promise; these keys
+   * don't reach the core, and the function gets the configuration with the
+   * generated `client.id`. Without deserializers, keys and values are Buffers
+   * *(deviation)*.
    */
   constructor(options: {
     /** The consumer configs: a plain object of Java's ConsumerConfig keys. */
@@ -150,6 +151,9 @@ export class KafkaConsumer<K = Buffer, V = Buffer> implements Consumer<K, V> {
    * A consumer is instantiated by providing a set of key-value pairs as
    * configuration, and a key and a value `Deserializer`. Valid configuration
    * strings are documented in Java's ConsumerConfig.
+   *
+   * Note: after creating a `KafkaConsumer` you must always `close()` it to
+   * avoid resource leaks.
    *
    * @param options - The consumer configs and the deserializers
    *

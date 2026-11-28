@@ -49,7 +49,9 @@ export class OffsetAndMetadata {
 
   /**
    * The leader epoch of the previously consumed record, or null if not known,
-   * Java's `leaderEpoch()`.
+   * Java's `leaderEpoch()`. Log truncation is detected if there exists a
+   * leader epoch which is larger than this epoch and begins at an offset
+   * earlier than the committed offset.
    */
   readonly leaderEpoch: number | null;
 
@@ -83,7 +85,8 @@ export class OffsetAndMetadata {
     metadata: string | null;
   });
   /**
-   * Construct a new OffsetAndMetadata object with no leader epoch.
+   * Construct a new OffsetAndMetadata object for committing through
+   * `KafkaConsumer`, with no leader epoch.
    *
    * @param options - the offset to be committed and the metadata
    */
@@ -95,8 +98,8 @@ export class OffsetAndMetadata {
     metadata: string | null;
   });
   /**
-   * Construct a new OffsetAndMetadata object; the metadata associated with
-   * the commit will be empty.
+   * Construct a new OffsetAndMetadata object for committing through
+   * `KafkaConsumer`. The metadata associated with the commit will be empty.
    *
    * @param offset - The offset to be committed
    */

@@ -101,6 +101,11 @@ function optionalShort(value: unknown, what: string): number | null {
  * name and a partition number from which the record is being received, an
  * offset that points to the record in a Kafka partition, and a timestamp as
  * marked by the corresponding ProducerRecord.
+ *
+ * @remarks Java's thread-safety notes (a record is not thread-safe, and its
+ * `headers` are a mutable collection) have no JavaScript counterpart: a
+ * record and its `Headers` stay in the thread that polled them, which is the
+ * only thread that reads or changes them.
  */
 export class ConsumerRecord<out K = never, out V = never> {
   /** Java's `NO_TIMESTAMP`, the timestamp of a record that has none. */

@@ -88,6 +88,14 @@ export interface Consumer<K = Buffer, V = Buffer> {
    * If the given list of topics is empty, it is treated the same as
    * `unsubscribe()`.
    *
+   * This is a short-hand for `subscribe({ topics, callback })`, which uses a
+   * no-op listener. If you need the ability to seek to particular offsets,
+   * you should prefer `subscribe({ topics, callback })`, since group
+   * rebalances will cause partition offsets to be reset. You should also
+   * provide your own listener if you are doing your own offset management
+   * since the listener gives you an opportunity to commit offsets before a
+   * rebalance finishes.
+   *
    * @param options - the list of topics to subscribe to
    * @returns settling once the subscription is set
    * @throws `IllegalArgumentError` rejects with it if topics is null or
@@ -269,7 +277,9 @@ export interface Consumer<K = Buffer, V = Buffer> {
    * Manual topic assignment through this method does not use the consumer's
    * group management functionality. As such, there will be no rebalance
    * operation triggered when group membership or cluster and topic metadata
-   * change.
+   * change. Note that it is not possible to use both manual partition
+   * assignment with `assign` and group assignment with
+   * `subscribe({ topics, callback })`.
    *
    * If auto-commit is enabled, an async commit (based on the old assignment)
    * will be triggered before the new assignment replaces the old one.
@@ -306,7 +316,9 @@ export interface Consumer<K = Buffer, V = Buffer> {
    * clears any partitions directly assigned through `assign`.
    *
    * **Note:** Unlike `close()`, this method does not commit the pending
-   * offsets before unsubscribing, even if `enable.auto.commit` is enabled.
+   * offsets before unsubscribing, even if `enable.auto.commit` is enabled. To
+   * avoid duplicate processing upon re-joining, it is recommended to
+   * explicitly call `commitSync()` before invoking this method.
    *
    * @returns settling once the consumer is unsubscribed
    * @throws `KafkaError` rejects with it for any other unrecoverable errors
@@ -322,12 +334,16 @@ export interface Consumer<K = Buffer, V = Buffer> {
    * topics or partitions before polling for data.
    *
    * On each poll, consumer will try to use the last consumed offset as the
-   * starting offset and fetch sequentially.
+   * starting offset and fetch sequentially. The last consumed offset can be
+   * manually set through `seek` or automatically set as the last committed
+   * offset for the subscribed list of partitions.
    *
    * This method returns immediately if there are records available or if the
    * position advances past control records or aborted transactions when
    * isolation.level=read_committed. Otherwise, it will await the passed
    * timeout. If the timeout expires, an empty record set will be returned.
+   * Note that this method may block beyond the timeout in order to execute
+   * custom `ConsumerRebalanceListener` callbacks.
    *
    * @param options - The maximum time to block
    * @returns resolving to the records since the last fetch for the
@@ -343,6 +359,9 @@ export interface Consumer<K = Buffer, V = Buffer> {
    * @throws `BootstrapResolutionError` rejects with it if DNS resolution of
    *   the bootstrap servers fails within `bootstrap.resolve.timeout.ms`
    * @throws `KafkaError` rejects with it for any other unrecoverable errors
+   *   (e.g. invalid groupId or session timeout, errors deserializing key/value
+   *   pairs, your rebalance callback thrown errors, or any new error cases in
+   *   future versions)
    * @throws `IllegalArgumentError` rejects with it if the timeout value is
    *   negative
    * @throws `IllegalStateError` rejects with it if the consumer is not
@@ -350,8 +369,10 @@ export interface Consumer<K = Buffer, V = Buffer> {
    *   from
    * @throws `InvalidTopicError` rejects with it if the current subscription
    *   contains any invalid topic
-   * @throws `UnsupportedVersionError` rejects with it if the broker doesn't
-   *   support a feature the consumer needs
+   * @throws `UnsupportedVersionError` rejects with it if the consumer
+   *   attempts to fetch stable offsets when the broker doesn't support this
+   *   feature. Also, if the consumer attempts to subscribe to a
+   *   `SubscriptionPattern` and the broker doesn't support this feature
    * @throws `FencedInstanceIdError` rejects with it if this consumer instance
    *   gets fenced by broker
    * @throws `ConcurrentModificationError` rejects with it while another call
@@ -461,12 +482,18 @@ export interface Consumer<K = Buffer, V = Buffer> {
    * @throws `CommitFailedError` rejects with it if the commit failed and
    *   cannot be retried. This can only occur if you are using automatic group
    *   management with `subscribe`, or if there is an active group with the
-   *   same `group.id` which is using group management.
+   *   same `group.id` which is using group management. In such cases, when
+   *   you are trying to commit to partitions that are no longer assigned to
+   *   this consumer because the consumer is for example no longer part of the
+   *   group this error would be thrown.
    * @throws `RebalanceInProgressError` rejects with it if the consumer
    *   instance is in the middle of a rebalance so it is not yet determined
    *   which partitions would be assigned to the consumer. In such cases you
    *   can first complete the rebalance by calling `poll` and commit can be
-   *   reconsidered afterwards.
+   *   reconsidered afterwards. NOTE when you reconsider committing after the
+   *   rebalance, the assigned partitions may have changed, and also for those
+   *   partitions that are still assigned their fetch positions may have
+   *   changed too if more records are returned from the `poll` call.
    * @throws `WakeupError` rejects with it if `wakeup()` is called before or
    *   while this function is called
    * @throws `AuthenticationError` rejects with it if authentication fails
@@ -525,6 +552,11 @@ export interface Consumer<K = Buffer, V = Buffer> {
    * `default.api.timeout.ms` expires (in which case a `TimeoutError` is
    * thrown to the caller).
    *
+   * Note that asynchronous offset commits sent previously with `commitAsync`
+   * (or similar) are guaranteed to have their callbacks invoked prior to
+   * completion of this method, but only when the consumer is using the
+   * consumer group protocol.
+   *
    * @param options - A map of offsets by partition with associated metadata.
    *   This map will be copied internally, so it is safe to mutate the map
    *   after returning.
@@ -532,11 +564,20 @@ export interface Consumer<K = Buffer, V = Buffer> {
    * @throws `CommitFailedError` rejects with it if the commit failed and
    *   cannot be retried. This can only occur if you are using automatic group
    *   management with `subscribe`, or if there is an active group with the
-   *   same `group.id` which is using group management.
+   *   same `group.id` which is using group management. In such cases, when
+   *   you are trying to commit to partitions that are no longer assigned to
+   *   this consumer because the consumer is for example no longer part of the
+   *   group this error would be thrown.
    * @throws `RebalanceInProgressError` rejects with it if the consumer
    *   instance is in the middle of a rebalance so it is not yet determined
-   *   which partitions would be assigned to the consumer, so when you retry
-   *   committing you should consider updating the passed in offsets
+   *   which partitions would be assigned to the consumer. In such cases you
+   *   can first complete the rebalance by calling `poll` and commit can be
+   *   reconsidered afterwards. NOTE when you reconsider committing after the
+   *   rebalance, the assigned partitions may have changed, and also for those
+   *   partitions that are still assigned their fetch positions may have
+   *   changed too if more records are returned from the `poll` call, so
+   *   when you retry committing you should consider updating the passed in
+   *   offsets
    * @throws `WakeupError` rejects with it if `wakeup()` is called before or
    *   while this function is called
    * @throws `AuthenticationError` rejects with it if authentication fails
@@ -579,7 +620,9 @@ export interface Consumer<K = Buffer, V = Buffer> {
    * such, if you need to store offsets in anything other than Kafka, this API
    * should not be used. The committed offset should be the next message your
    * application will consume, i.e. `nextRecordToBeProcessed.offset` (or
-   * `ConsumerRecords.nextOffsets()`). If automatic group management with
+   * `ConsumerRecords.nextOffsets()`). You should also add the leader epoch as
+   * commit metadata, which can be obtained from `ConsumerRecord.leaderEpoch`
+   * or `ConsumerRecords.nextOffsets()`. If automatic group management with
    * `subscribe` is used, then the committed offsets must belong to the
    * currently auto-assigned partitions.
    *
@@ -587,14 +630,32 @@ export interface Consumer<K = Buffer, V = Buffer> {
    * succeeds, an unrecoverable error is encountered (in which case it is
    * thrown to the caller), or the timeout expires.
    *
+   * Note that asynchronous offset commits sent previously with `commitAsync`
+   * (or similar) are guaranteed to have their callbacks invoked prior to
+   * completion of this method, but only when the consumer is using the
+   * consumer group protocol.
+   *
    * @param options - A map of offsets by partition with associated metadata,
    *   copied internally, and the maximum amount of time to await completion
    *   of the offset commit
    * @returns settling once the commit succeeded
    * @throws `CommitFailedError` rejects with it if the commit failed and
-   *   cannot be retried
+   *   cannot be retried. This can only occur if you are using automatic group
+   *   management with `subscribe`, or if there is an active group with the
+   *   same `group.id` which is using group management. In such cases, when
+   *   you are trying to commit to partitions that are no longer assigned to
+   *   this consumer because the consumer is for example no longer part of the
+   *   group this error would be thrown.
    * @throws `RebalanceInProgressError` rejects with it if the consumer
-   *   instance is in the middle of a rebalance
+   *   instance is in the middle of a rebalance so it is not yet determined
+   *   which partitions would be assigned to the consumer. In such cases you
+   *   can first complete the rebalance by calling `poll` and commit can be
+   *   reconsidered afterwards. NOTE when you reconsider committing after the
+   *   rebalance, the assigned partitions may have changed, and also for those
+   *   partitions that are still assigned their fetch positions may have
+   *   changed too if more records are returned from the `poll` call, so
+   *   when you retry committing you should consider updating the passed in
+   *   offsets
    * @throws `WakeupError` rejects with it if `wakeup()` is called before or
    *   while this function is called
    * @throws `AuthenticationError` rejects with it if authentication fails
@@ -603,6 +664,7 @@ export interface Consumer<K = Buffer, V = Buffer> {
    * @throws `IllegalArgumentError` rejects with it if the committed offset or
    *   the timeout is negative
    * @throws `KafkaError` rejects with it for any other unrecoverable errors
+   *   (e.g. if offset metadata is too large or if the topic does not exist)
    * @throws `TimeoutError` rejects with it if the timeout expires before
    *   successful completion of the offset commit
    * @throws `FencedInstanceIdError` rejects with it if this consumer is using
@@ -627,16 +689,16 @@ export interface Consumer<K = Buffer, V = Buffer> {
 
   /**
    * Commit offsets returned on the last `poll()` for all the subscribed list
-   * of topics and partition.
+   * of topics and partition. Same as `commitAsync(null)`.
    *
    * @returns settling once the core took the commit, not when the broker
    *   answered
    * @throws `InvalidGroupIdError` rejects with it if the consumer has no
    *   `group.id`
+   * @throws `FencedInstanceIdError` rejects with it if this consumer is using
+   *   the classic group protocol and this instance gets fenced by broker
    *
-   * @remarks Both commits return Promises; only `commitSync()` waits for the
-   * broker. Without a callback, a failed commit isn't reported, as in Java.
-   * Await it: a commit that isn't awaited keeps the consumer busy.
+   * @remarks Only `commitSync()` waits for the broker.
    */
   commitAsync(): Promise<void>;
   /**
@@ -663,6 +725,8 @@ export interface Consumer<K = Buffer, V = Buffer> {
    *   answered
    * @throws `InvalidGroupIdError` rejects with it if the consumer has no
    *   `group.id`
+   * @throws `FencedInstanceIdError` rejects with it if this consumer is using
+   *   the classic group protocol and this instance gets fenced by broker
    * @throws `TypeError` rejects with it if the callback is no function
    *
    * @remarks Java's `void` call returns a Promise here. The callback runs
@@ -713,6 +777,8 @@ export interface Consumer<K = Buffer, V = Buffer> {
    *   answered
    * @throws `InvalidGroupIdError` rejects with it if the consumer has no
    *   `group.id`
+   * @throws `FencedInstanceIdError` rejects with it if this consumer is using
+   *   the classic group protocol and this instance gets fenced by broker
    * @throws `TypeError` rejects with it if `offsets` is null or not a
    *   `TopicPartitionMap`, or the callback is null or no function
    *
@@ -1229,7 +1295,17 @@ export interface Consumer<K = Buffer, V = Buffer> {
    *
    * The pause state is preserved across a rebalance for partitions that
    * remain assigned to this consumer, but it is lost for partitions that are
-   * revoked.
+   * revoked. Which partitions are revoked depends on the group protocol in
+   * use (see `ConsumerConfig.GROUP_PROTOCOL_CONFIG`):
+   * - Classic group protocol: the behavior depends on the assignor configured
+   *   in `ConsumerConfig.PARTITION_ASSIGNMENT_STRATEGY_CONFIG`: eager
+   *   assignors revoke all partitions on every rebalance (pause state is not
+   *   preserved); cooperative assignors only revoke the partitions that are
+   *   reassigned to another consumer (pause state preserved for partitions
+   *   that remain assigned)
+   * - Consumer group protocol (KIP-848): only revokes partitions that are
+   *   reassigned to another consumer (pause state preserved for partitions
+   *   that remain assigned)
    *
    * @param options - The partitions which should be paused
    * @returns settling once the partitions are paused
@@ -1586,8 +1662,8 @@ export interface Consumer<K = Buffer, V = Buffer> {
    * Close the consumer with the default leave group behavior, waiting for up
    * to the default timeout of 30 seconds for any needed cleanup. If
    * auto-commit is enabled, this will commit the current offsets if possible
-   * within the default timeout. Note that `wakeup()` cannot be used to
-   * interrupt close.
+   * within the default timeout. See `close({ option })` for details. Note
+   * that `wakeup()` cannot be used to interrupt close.
    *
    * This close operation will attempt all shutdown steps even if one of them
    * fails. It logs all encountered errors, continues to execute the next
@@ -1597,6 +1673,8 @@ export interface Consumer<K = Buffer, V = Buffer> {
    * @throws `WakeupError` rejects with it if `wakeup()` is called before or
    *   while this function is called
    * @throws `KafkaError` rejects with it for any other error during close
+   *   (e.g., errors thrown from rebalance callbacks or commit callbacks from
+   *   previous asynchronous commits)
    * @throws `ConcurrentModificationError` rejects with it while another call,
    *   such as a pending `poll()`, is in progress
    *
@@ -1613,16 +1691,33 @@ export interface Consumer<K = Buffer, V = Buffer> {
    *
    * This method waits up to the timeout for the consumer to complete pending
    * commits and maybe leave the group, depending on the specified leave group
-   * behavior. If the consumer is unable to complete offset commits and to
-   * gracefully leave the group (if applicable) before the timeout expires,
-   * the consumer is force closed. Note that `wakeup()` cannot be used to
-   * interrupt close.
+   * behavior. If auto-commit is enabled, this will commit the current offsets
+   * if possible within the timeout. If the consumer is unable to complete
+   * offset commits and to gracefully leave the group (if applicable) before
+   * the timeout expires, the consumer is force closed. Note that `wakeup()`
+   * cannot be used to interrupt close.
+   *
+   * The actual maximum wait time is bounded by the
+   * `ConsumerConfig.REQUEST_TIMEOUT_MS_CONFIG` setting, which only applies to
+   * operations performed with the broker (coordinator-related requests and
+   * fetch sessions). Even if a larger timeout is specified, the consumer will
+   * not wait longer than `ConsumerConfig.REQUEST_TIMEOUT_MS_CONFIG` for these
+   * requests to complete during the close operation. Note that the execution
+   * time of callbacks (such as `OffsetCommitCallback` and
+   * `ConsumerRebalanceListener`) does not consume time from the close
+   * timeout.
+   *
+   * This close operation will attempt all shutdown steps even if one of them
+   * fails. It logs all encountered errors, continues to execute the next
+   * steps, and finally throws the first error found.
    *
    * @param options - see `CloseOptions`; cannot be `null`
    * @returns settling once the consumer is closed
    * @throws `WakeupError` rejects with it if `wakeup()` is called before or
    *   while this function is called
    * @throws `KafkaError` rejects with it for any other error during close
+   *   (e.g., errors thrown from rebalance callbacks or commit callbacks from
+   *   previous asynchronous commits)
    * @throws `TypeError` rejects with it if `option` is null or not a
    *   `CloseOptions`
    *

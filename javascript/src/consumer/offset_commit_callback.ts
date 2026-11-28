@@ -29,6 +29,21 @@ import type { OffsetAndMetadata } from './offset_and_metadata';
  * commit request completion. This method will be called when the commit
  * request sent to the server has been acknowledged.
  *
+ * The error it receives may be:
+ * - `CommitFailedError` if the commit failed and cannot be retried. This can
+ *   only occur if you are using automatic group management with
+ *   `KafkaConsumer.subscribe`, or if there is an active group with the same
+ *   groupId which is using group management.
+ * - `RebalanceInProgressError` if the commit failed because it is in the
+ *   middle of a rebalance. In such cases commit could be retried after the
+ *   rebalance is completed with the `KafkaConsumer.poll` call.
+ * - `WakeupError` if `KafkaConsumer.wakeup()` is called before or while this
+ *   function is called.
+ * - `AuthorizationError` if not authorized to the topic or to the configured
+ *   groupId.
+ * - `KafkaError` for any other unrecoverable errors (e.g. if offset metadata
+ *   is too large or if the committed offset is invalid).
+ *
  * @param options - the offsets and the error
  * @returns anything: a Promise is awaited
  *
