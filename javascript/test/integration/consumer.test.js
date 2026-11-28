@@ -1025,8 +1025,9 @@ async function callbackErrorFrom(what, value, next) {
         throw value;
       },
     });
-    // The commit's answer comes back; its callback waits for a waiting call.
-    await new Promise((resolve) => setTimeout(resolve, 1500));
+    // Its callback runs inside a waiting call once the commit's answer came
+    // back: each `next` waits for it, the commitAsync() case by repeating the
+    // call until one rejects.
     const outcome = await next(consumer).then(
       () => ({ rejected: false, error: undefined }),
       (e) => ({ rejected: true, error: /** @type {unknown} */ (e) }),
@@ -1044,7 +1045,17 @@ listenerTest(
   async () => {
     for (const value of CALLBACK_ERRORS()) {
       assert.equal(await callbackErrorFrom('cb-commit-sync', value, (c) => c.commitSync()), value);
-      assert.equal(await callbackErrorFrom('cb-commit-async', value, (c) => c.commitAsync()), value);
+      // A commitAsync() runs the callbacks whose answers came back before it:
+      // repeated, the first that finds this one's answer rejects with its error.
+      const repeated = async (/** @type {KafkaConsumer<Buffer, Buffer>} */ c) => {
+        const deadline = Date.now() + 30000;
+        for (;;) {
+          assert.ok(Date.now() < deadline, "no commitAsync() ran the first commit's callback within 30 s");
+          await c.commitAsync();
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+      };
+      assert.equal(await callbackErrorFrom('cb-commit-async', value, repeated), value);
     }
   },
   240000,
