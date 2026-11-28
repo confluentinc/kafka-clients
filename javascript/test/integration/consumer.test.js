@@ -969,6 +969,9 @@ listenerTest(
       // a completed future, which becomes the last pending async commit, so
       // committed last it would leave commitSync() nothing to wait for.
       await consumer.commitAsync({ offsets: new TopicPartitionMap(), callback: record('empty') });
+      // Its commit completes at once, but its callback still waits for a
+      // later waiting call: it never runs inside its own commitAsync().
+      assert.deepEqual(seen, []);
       await consumer.commitAsync({ offsets: new TopicPartitionMap([[tp, new OffsetAndMetadata(1n)]]), callback: record('ok') });
       // Beyond the broker's offset.metadata.max.bytes, 4096: the commit fails.
       const tooLarge = new OffsetAndMetadata({ offset: 2n, leaderEpoch: null, metadata: 'x'.repeat(5000) });
