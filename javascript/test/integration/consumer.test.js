@@ -952,7 +952,7 @@ async function assignedConsumer(what) {
 }
 
 listenerTest(
-  'a commit callback runs inside the next waiting call, with null offsets for a failed commit and an empty one',
+  'commit callbacks run only inside a waiting call, with null offsets for a failed commit and an empty one',
   async () => {
     const { consumer, tp } = await assignedConsumer('commit-callback');
     try {
@@ -970,9 +970,15 @@ listenerTest(
       const tooLarge = new OffsetAndMetadata({ offset: 2n, leaderEpoch: null, metadata: 'x'.repeat(5000) });
       await consumer.commitAsync({ offsets: new TopicPartitionMap([[tp, tooLarge]]), callback: record('failed') });
       await consumer.commitAsync({ offsets: new TopicPartitionMap(), callback: record('empty') });
-      // Not yet: the callbacks run inside a later waiting call.
+      // A callback runs only inside a waiting call: an earlier commit's may
+      // already have run inside a later commitAsync(), whose commit() runs the
+      // callbacks whose answers came back first, as Java's
+      // AsyncKafkaConsumer#commit runs offsetCommitCallbackInvoker
+      // .executeCallbacks(); none runs while no call waits.
+      const ranBeforeIdle = seen.length;
       await new Promise((resolve) => setTimeout(resolve, 1000));
-      assert.deepEqual(seen, []);
+      assert.equal(seen.length, ranBeforeIdle);
+      // commitSync() waits for the commits before it and runs their callbacks.
       await consumer.commitSync();
       assert.deepEqual(
         [...seen].sort(),
