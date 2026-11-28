@@ -1094,9 +1094,6 @@ package root.
   and `addedMetrics()`.
 - **Where the consumer's core differs from Java's**, the client does as the
   core does:
-  - after `unsubscribe()` has run `onPartitionsRevoked`, `close()` runs
-    `onPartitionsLost` for the same partitions, where Java's `close()` runs no
-    listener;
   - the keys a deserializer config function reads are listed by the core as
     unused, where Java marks them used;
   - `assignment()`, `subscription()`, `paused()` and `groupMetadata()` on a

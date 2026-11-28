@@ -380,8 +380,6 @@ newer.
     first, and `groupMetadata()` and `committed(null)` check `group.id`
     first;
   - a timed-out `close()`'s cause has the core's message;
-  - `close()` after `unsubscribe()` runs `onPartitionsLost` for the
-    partitions `unsubscribe()` revoked, where Java's runs no listener;
   - `enforceRebalance()` is not translated, as in Python, and Java's
     `Pattern` subscriptions are left out for `SubscriptionPattern`;
   - `MockConsumer` does as the core's mock does where it differs from
