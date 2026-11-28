@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! Integration tests for the transaction-domain admin RPCs against a real Kafka
-//! 4.2.0 broker: `describeProducers`, `describeTransactions`,
+//! 4.4.0 broker: `describeProducers`, `describeTransactions`,
 //! `abortTransaction`, `forceTerminateTransaction`, `listTransactions` and
 //! `fenceProducers` — the last six of the 46 in-scope RPCs.
 //!

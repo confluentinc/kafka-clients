@@ -18,7 +18,7 @@
 //!
 //! These tests exercise the **manual-assignment** consumer API
 //! (`assign`, `commit_sync`, `commit_async`, `committed`, `position`,
-//! `seek`) against a real 3-broker Kafka 4.2.0 cluster with KIP-848
+//! `seek`) against a real 3-broker Kafka 4.4.0 cluster with KIP-848
 //! (`group.protocol=consumer`) enabled.
 //!
 //! They run as multilanguage scenarios: each one runs against the native Rust

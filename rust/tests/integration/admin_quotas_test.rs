@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Integration tests for the admin client-quota RPCs against a real Kafka 4.2.0
+//! Integration tests for the admin client-quota RPCs against a real Kafka 4.4.0
 //! broker.
 //!
 //! Mirrors the describeClientQuotas / alterClientQuotas scenarios in Java's

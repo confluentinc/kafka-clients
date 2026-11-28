@@ -22,7 +22,7 @@
 //! These tests exercise the consumer **poll path** semantics
 //! (`max.poll.records`, `max.poll.interval.ms`, `poll(Duration::ZERO)`,
 //! `NoOffsetForPartition`, and recovery after a delayed-revocation fence)
-//! against a real 3-broker Kafka 4.2.0 cluster with KIP-848
+//! against a real 3-broker Kafka 4.4.0 cluster with KIP-848
 //! (`group.protocol=consumer`) enabled.
 //!
 //! Every test is a multilanguage scenario ([`multilanguage_consumer_test!`]):

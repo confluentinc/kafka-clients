@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! Integration tests for the admin elections / reassignments / offsets RPCs
-//! against a real Kafka 4.2.0 broker.
+//! against a real Kafka 4.4.0 broker.
 //!
 //! Mirrors the electLeaders / alterPartitionReassignments /
 //! listPartitionReassignments / listOffsets scenarios of Java's

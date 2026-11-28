@@ -42,7 +42,7 @@ use super::kafka_cluster::{KafkaCluster, SASL_PASSWORD, SASL_USERNAME};
 ///
 /// The broker version is chosen the same way, per process, by
 /// `INTEGRATION_TEST_BROKER_TAG` (the `apache/kafka` image tag; default
-/// `4.2.0`, see `kafka_cluster::KAFKA_TAG`). The two variables combine.
+/// `4.4.0`, see `kafka_cluster::KAFKA_TAG`). The two variables combine.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TestProtocol {
     /// `security.protocol=PLAINTEXT` — the default; no encryption, no auth.

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! Integration tests for `createPartitions` and `deleteRecords` against a real
-//! Kafka 4.2.0 broker.
+//! Kafka 4.4.0 broker.
 //!
 //! Mirrors the `createPartitions` / `deleteRecords` scenarios in Java's
 //! `KafkaAdminClientIntegrationTest`, exercising the real network engine (and,

@@ -32,7 +32,7 @@ import time
 
 import pytest
 
-KAFKA_IMAGE = "apache/kafka:4.2.0"  # matches tests/common/kafka_cluster.rs
+KAFKA_IMAGE = "apache/kafka:4.4.0"  # matches tests/common/kafka_cluster.rs
 CLUSTER_ID = "5L6g3nShT-eMCtK--X86sw"
 INTERNAL_BOOTSTRAP = "localhost:9094"
 KAFKA_BIN = "/opt/kafka/bin"

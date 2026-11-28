@@ -19,7 +19,7 @@
 //! These tests exercise the consumer **fetch path** (`poll`, `seek`,
 //! `auto.offset.reset` policies, `fetch.max.bytes` /
 //! `max.partition.fetch.bytes` interactions) against a real 3-broker
-//! Kafka 4.2.0 cluster with KIP-848 (`group.protocol=consumer`) enabled.
+//! Kafka 4.4.0 cluster with KIP-848 (`group.protocol=consumer`) enabled.
 //!
 //! They run as multilanguage scenarios: each one runs against the native Rust
 //! consumer and, through the gRPC backends, the Python (sync and asyncio), C

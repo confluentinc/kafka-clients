@@ -22,7 +22,7 @@
 //! per-partition specified-offset commits, auto-commit-on-rebalance,
 //! member-id propagation on subscribe+commit, position/commit interplay
 //! across two consumers, and the async-callback-completion ordering
-//! guarantees — against a real 3-broker Kafka 4.2.0 cluster with KIP-848
+//! guarantees — against a real 3-broker Kafka 4.4.0 cluster with KIP-848
 //! (`group.protocol=consumer`) enabled.
 //!
 //! They run as multilanguage scenarios: each one runs against the native Rust

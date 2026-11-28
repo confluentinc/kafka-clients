@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Integration tests for the admin log-directory RPCs against a real Kafka 4.2.0
+//! Integration tests for the admin log-directory RPCs against a real Kafka 4.4.0
 //! broker.
 //!
 //! Mirrors the describeLogDirs / describeReplicaLogDirs / alterReplicaLogDirs
@@ -384,9 +384,9 @@ async fn describe_log_dirs_unknown_broker_and_replica<F: AdminBackendFactory>(ct
         "{backend} backend: the live broker reports at least one log directory"
     );
     // KIP-1066's `isCordoned()`: `IsCordoned` arrived with DescribeLogDirs v5
-    // in Kafka 4.3.0 (KAFKA-19774), so the default 4.2.0 broker cannot report a
-    // cordoned dir and every one must cross as false. The `true` arm is pinned
-    // by the Python translation's unit test.
+    // in Kafka 4.3.0 (KAFKA-19774). The harness cordons no dir, so every one
+    // must cross as false, and an older broker cannot report one at all. The
+    // `true` arm is pinned by the Python translation's unit test.
     for (path, description) in dirs {
         assert!(!description.is_cordoned(), "{backend} backend: log dir {path} is not cordoned");
     }

@@ -13,7 +13,7 @@
 // limitations under the License.
 
 //! Integration tests for the admin ACL RPCs (createAcls / describeAcls /
-//! deleteAcls) against a real Kafka 4.2.0 broker with the KRaft
+//! deleteAcls) against a real Kafka 4.4.0 broker with the KRaft
 //! `StandardAuthorizer` enabled.
 //!
 //! Mirrors the ACL round-trip scenarios in Java's

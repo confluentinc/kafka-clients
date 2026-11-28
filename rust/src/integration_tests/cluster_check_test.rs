@@ -142,7 +142,7 @@ async fn broker_info(ctx: &TestContext) -> BrokerInfo {
     let tag = std::env::var("INTEGRATION_TEST_BROKER_TAG")
         .ok()
         .filter(|tag| !tag.trim().is_empty())
-        .unwrap_or_else(|| "4.2.0".to_string());
+        .unwrap_or_else(|| "4.4.0".to_string());
     let mut parts = tag.trim().split(['.', '-']).map(|p| p.parse::<u32>().unwrap_or(0));
     let release = (parts.next().unwrap_or(0), parts.next().unwrap_or(0));
     assert_eq!(

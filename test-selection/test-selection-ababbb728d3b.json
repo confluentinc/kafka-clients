@@ -1,0 +1,77 @@
+{
+  "base": "origin/master",
+  "c": {
+    "integration": []
+  },
+  "changed_files": [
+    "M dotnet/tests/Performance/Confluent.Kafka.PerformanceTests/KafkaBrokerFixture.cs",
+    "M python/test/performance/conftest.py",
+    "M rust/Makefile",
+    "M rust/src/integration_tests/cluster_check_test.rs",
+    "M rust/tests/chaos/README.md",
+    "M rust/tests/common/kafka_cluster.rs",
+    "M rust/tests/common/test_context.rs",
+    "M rust/tests/integration/admin_acls_test.rs",
+    "M rust/tests/integration/admin_cluster_configs_test.rs",
+    "M rust/tests/integration/admin_controllers_test.rs",
+    "M rust/tests/integration/admin_elections_reassignments_offsets_test.rs",
+    "M rust/tests/integration/admin_features_test.rs",
+    "M rust/tests/integration/admin_group_offsets_test.rs",
+    "M rust/tests/integration/admin_groups_test.rs",
+    "M rust/tests/integration/admin_log_dirs_test.rs",
+    "M rust/tests/integration/admin_partitions_records_test.rs",
+    "M rust/tests/integration/admin_quotas_test.rs",
+    "M rust/tests/integration/admin_scram_test.rs",
+    "M rust/tests/integration/admin_topics_test.rs",
+    "M rust/tests/integration/admin_transactions_test.rs",
+    "M rust/tests/integration/consumer_bounce_test.rs",
+    "M rust/tests/integration/consumer_test.rs",
+    "M rust/tests/integration/plaintext_consumer_assign_test.rs",
+    "M rust/tests/integration/plaintext_consumer_commit_test.rs",
+    "M rust/tests/integration/plaintext_consumer_fetch_test.rs",
+    "M rust/tests/integration/plaintext_consumer_poll_test.rs",
+    "M rust/tests/integration/plaintext_consumer_subscription_test.rs",
+    "M rust/tests/integration/plaintext_consumer_test.rs",
+    "M rust/tests/integration/producer_test.rs",
+    "M rust/tests/integration/producer_transactions_test.rs",
+    "M rust/xtask/src/main.rs"
+  ],
+  "created": 1795871703,
+  "dotnet": {
+    "examples": [],
+    "grpc": [],
+    "performance": []
+  },
+  "head": "ababbb728d3b3a26edc5b2ac2df48c07fb4a7d96",
+  "merge_base": "d26df74ca633672572cd761a180d8a22e97f737c",
+  "python": {
+    "grpc": [],
+    "performance": []
+  },
+  "reasons": {
+    "c.integration": "The C gRPC arm runs the Rust integration harness, whose clusters now default to the 4.4.0 broker.",
+    "dotnet.examples": "The admin examples tests run in the integration harness, whose clusters now default to the 4.4.0 broker.",
+    "dotnet.grpc": "The .NET gRPC arm runs the Rust integration harness, whose clusters now default to the 4.4.0 broker.",
+    "dotnet.performance": "KafkaBrokerFixture.cs changes the broker image the .NET performance tests start.",
+    "python.grpc": "The Python gRPC arm runs the Rust integration harness, whose clusters now default to the 4.4.0 broker.",
+    "python.performance": "conftest.py changes the broker image the Python performance fixture starts.",
+    "rust.chaos": "The chaos binary includes tests/common/mod.rs, so its clusters pick up the new default broker tag.",
+    "rust.integration": "The binary compiles tests/common, whose kafka_cluster.rs now starts apache/kafka:4.4.0 by default, so every integration test runs against a different broker.",
+    "rust.integrity": "The integrity binary includes tests/common/mod.rs, so its clusters pick up the new default broker tag.",
+    "rust.lib": "src/integration_tests compiles the shared tests/common harness, and its cluster_check_test changes its default broker tag to 4.4.0.",
+    "rust.performance": "The performance binary includes tests/common/mod.rs, so its clusters pick up the new default broker tag.",
+    "rust.xtask": "chaos_matrix.rs tests (broker_tag_follows_kafka_cluster_rs) read tests/common/kafka_cluster.rs, whose DEFAULT_KAFKA_TAG changed."
+  },
+  "rust": {
+    "chaos": [],
+    "integration": [],
+    "integrity": [],
+    "lib": [
+      "integration_tests::"
+    ],
+    "performance": [],
+    "xtask": []
+  },
+  "tree": "a63f8a4c4c0b11c3375459fd4503d57cea1385fb",
+  "version": 2
+}
